@@ -10,6 +10,7 @@ use std::process::ExitCode;
 
 use noggit_core::WorldMap;
 use noggit_formats::adt::{AdtFile, filename_by_name_id};
+use noggit_formats::blp::BlpFile;
 use noggit_formats::dbc::DbcFile;
 use noggit_vfs::{ArchiveLoadState, FileSource, VfsPath, WowClient, WowClientConfig};
 
@@ -33,6 +34,12 @@ fn run() -> Result<(), String> {
             let bytes = fs::read(&path)
                 .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
             print!("{}", inspect_dbc_bytes(&bytes)?);
+        }
+        "inspect-blp" => {
+            let path = args.next().map(PathBuf::from).ok_or_else(usage)?;
+            let bytes = fs::read(&path)
+                .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
+            print!("{}", inspect_blp_bytes(&bytes)?);
         }
         "inspect-adt" => {
             let path = args.next().map(PathBuf::from).ok_or_else(usage)?;
@@ -58,6 +65,15 @@ fn run() -> Result<(), String> {
                 check_map_assets(&map_path, &client_path, extra_archives)?
             );
         }
+        "check-map-textures" => {
+            let map_path = args.next().map(PathBuf::from).ok_or_else(usage)?;
+            let client_path = args.next().map(PathBuf::from).ok_or_else(usage)?;
+            let extra_archives = args.map(PathBuf::from).collect();
+            print!(
+                "{}",
+                check_map_textures(&map_path, &client_path, extra_archives)?
+            );
+        }
         _ => return Err(usage()),
     }
 
@@ -65,7 +81,7 @@ fn run() -> Result<(), String> {
 }
 
 fn usage() -> String {
-    "usage: noggit-cli <inspect-dbc|inspect-adt|inspect-map> <path>\n       noggit-cli inspect-client <client-path> [extra-mpq...]\n       noggit-cli check-map-assets <map-path> <client-path> [extra-mpq...]".to_string()
+    "usage: noggit-cli <inspect-dbc|inspect-blp|inspect-adt|inspect-map> <path>\n       noggit-cli inspect-client <client-path> [extra-mpq...]\n       noggit-cli check-map-assets <map-path> <client-path> [extra-mpq...]\n       noggit-cli check-map-textures <map-path> <client-path> [extra-mpq...]".to_string()
 }
 
 fn inspect_dbc_bytes(bytes: &[u8]) -> Result<String, String> {
@@ -74,6 +90,27 @@ fn inspect_dbc_bytes(bytes: &[u8]) -> Result<String, String> {
     Ok(format!(
         "DBC records={} fields={} record_size={} string_block_size={}\n",
         header.record_count, header.field_count, header.record_size, header.string_block_size
+    ))
+}
+
+fn inspect_blp_bytes(bytes: &[u8]) -> Result<String, String> {
+    let blp = BlpFile::parse(bytes).map_err(|err| err.to_string())?;
+    let header = blp.header();
+    let image = blp
+        .decode_rgba_mipmap(0)
+        .map_err(|err| format!("failed to decode BLP mipmap 0: {err}"))?;
+
+    Ok(format!(
+        "BLP magic={} content_type={} compression={} alpha_depth={} alpha_type={} mipmap_type={} width={} height={} rgba_bytes={}\n",
+        String::from_utf8_lossy(&header.magic),
+        header.content_type,
+        header.compression,
+        header.alpha_depth,
+        header.alpha_type,
+        header.mipmap_type,
+        image.width,
+        image.height,
+        image.pixels.len()
     ))
 }
 
@@ -342,6 +379,83 @@ fn check_map_assets(
     Ok(output)
 }
 
+fn check_map_textures(
+    map_path: &Path,
+    client_path: &Path,
+    extra_archives: Vec<PathBuf>,
+) -> Result<String, String> {
+    let map = WorldMap::load_from_local_directory(map_path).map_err(|err| err.to_string())?;
+    let client = open_client(client_path, extra_archives)?;
+    let textures = collect_map_textures(&map);
+    let mut output = String::new();
+    let mut decoded = 0usize;
+    let mut missing = 0usize;
+    let mut failed = 0usize;
+
+    writeln!(
+        output,
+        "TEXTURE_CHECK map={} textures={}",
+        map.name(),
+        textures.len()
+    )
+    .map_err(|err| err.to_string())?;
+
+    for texture in textures {
+        let path = VfsPath::new(&texture).map_err(|err| err.to_string())?;
+        match client.read_file(&path) {
+            Ok(bytes) => {
+                let source = client
+                    .find_archive_for_file(&path)
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "<loose>".to_string());
+                match BlpFile::parse(&bytes).and_then(|blp| {
+                    let header = blp.header().clone();
+                    blp.decode_rgba_mipmap(0).map(|image| (header, image))
+                }) {
+                    Ok((header, image)) => {
+                        decoded += 1;
+                        writeln!(
+                            output,
+                            "TEXTURE decoded width={} height={} compression={} alpha_depth={} alpha_type={} rgba_bytes={} source={} asset={}",
+                            image.width,
+                            image.height,
+                            header.compression,
+                            header.alpha_depth,
+                            header.alpha_type,
+                            image.pixels.len(),
+                            source,
+                            texture
+                        )
+                        .map_err(|err| err.to_string())?;
+                    }
+                    Err(err) => {
+                        failed += 1;
+                        writeln!(
+                            output,
+                            "TEXTURE failed error={} source={} asset={}",
+                            err, source, texture
+                        )
+                        .map_err(|err| err.to_string())?;
+                    }
+                }
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                missing += 1;
+                writeln!(output, "TEXTURE missing asset={texture}")
+                    .map_err(|err| err.to_string())?;
+            }
+            Err(err) => return Err(format!("failed to read texture {texture}: {err}")),
+        }
+    }
+
+    writeln!(
+        output,
+        "TEXTURE_SUMMARY decoded={decoded} missing={missing} failed={failed}"
+    )
+    .map_err(|err| err.to_string())?;
+    Ok(output)
+}
+
 fn open_client(client_path: &Path, extra_archives: Vec<PathBuf>) -> Result<WowClient, String> {
     WowClient::open_with_config(
         client_path,
@@ -360,6 +474,16 @@ fn collect_map_assets(map: &WorldMap) -> Vec<String> {
         assets.extend(tile.texture_assets().iter().cloned());
         assets.extend(tile.model_assets().iter().cloned());
         assets.extend(tile.wmo_assets().iter().cloned());
+    }
+
+    assets.into_iter().collect()
+}
+
+fn collect_map_textures(map: &WorldMap) -> Vec<String> {
+    let mut assets = BTreeSet::new();
+
+    for tile in map.tiles() {
+        assets.extend(tile.texture_assets().iter().cloned());
     }
 
     assets.into_iter().collect()

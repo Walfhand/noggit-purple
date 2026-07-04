@@ -1,5 +1,6 @@
 //! Renderer crate for the Rust rewrite.
 
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
@@ -20,6 +21,8 @@ pub type RenderResult<T> = Result<T, RenderError>;
 pub enum RenderError {
     /// The terrain mesh would exceed `u32` index capacity.
     TooManyVertices,
+    /// The terrain mesh would exceed `u32` material id capacity.
+    TooManyMaterials,
 }
 
 /// One terrain vertex ready for renderer upload or software preview.
@@ -29,6 +32,8 @@ pub struct TerrainVertex {
     pub position: [f32; 3],
     /// Decoded terrain normal.
     pub normal: [f32; 3],
+    /// Index into [`TerrainMesh::materials`] for the base texture on this vertex.
+    pub material_id: Option<u32>,
 }
 
 /// Axis-aligned bounds for render data.
@@ -45,6 +50,7 @@ pub struct TerrainBounds {
 pub struct TerrainMesh {
     vertices: Vec<TerrainVertex>,
     indices: Vec<u32>,
+    materials: Vec<String>,
     bounds: Option<TerrainBounds>,
 }
 
@@ -57,6 +63,11 @@ impl TerrainMesh {
     /// Return triangle indices.
     pub fn indices(&self) -> &[u32] {
         &self.indices
+    }
+
+    /// Return texture assets referenced by terrain vertices.
+    pub fn materials(&self) -> &[String] {
+        &self.materials
     }
 
     /// Return mesh bounds when at least one vertex exists.
@@ -89,6 +100,7 @@ impl Display for RenderError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::TooManyVertices => write!(f, "terrain mesh has too many vertices"),
+            Self::TooManyMaterials => write!(f, "terrain mesh has too many materials"),
         }
     }
 }
@@ -103,6 +115,7 @@ pub fn build_terrain_mesh(map: &WorldMap) -> RenderResult<TerrainMesh> {
         return Ok(TerrainMesh {
             vertices: Vec::new(),
             indices: Vec::new(),
+            materials: Vec::new(),
             bounds: None,
         });
     };
@@ -110,6 +123,8 @@ pub fn build_terrain_mesh(map: &WorldMap) -> RenderResult<TerrainMesh> {
 
     let mut vertices = Vec::new();
     let mut indices = Vec::new();
+    let mut materials = Vec::new();
+    let mut material_ids = BTreeMap::new();
     let mut bounds = None;
 
     for tile in map.tiles() {
@@ -117,10 +132,18 @@ pub fn build_terrain_mesh(map: &WorldMap) -> RenderResult<TerrainMesh> {
         let tile_origin_z = (tile.coord().y - min_tile_y) as f32 * TILE_SIZE;
 
         for chunk in tile.terrain_chunks() {
+            let material_id = chunk
+                .layers
+                .first()
+                .and_then(|layer| tile.texture_assets().get(layer.texture_id as usize))
+                .map(|asset| material_id_for(asset, &mut materials, &mut material_ids))
+                .transpose()?;
+
             append_chunk_mesh(
                 chunk,
                 tile_origin_x,
                 tile_origin_z,
+                material_id,
                 &mut vertices,
                 &mut indices,
                 &mut bounds,
@@ -131,14 +154,32 @@ pub fn build_terrain_mesh(map: &WorldMap) -> RenderResult<TerrainMesh> {
     Ok(TerrainMesh {
         vertices,
         indices,
+        materials,
         bounds,
     })
+}
+
+fn material_id_for(
+    asset: &str,
+    materials: &mut Vec<String>,
+    material_ids: &mut BTreeMap<String, u32>,
+) -> RenderResult<u32> {
+    if let Some(id) = material_ids.get(asset) {
+        return Ok(*id);
+    }
+
+    let id = u32::try_from(materials.len()).map_err(|_| RenderError::TooManyMaterials)?;
+    let asset = asset.to_owned();
+    materials.push(asset.clone());
+    material_ids.insert(asset, id);
+    Ok(id)
 }
 
 fn append_chunk_mesh(
     chunk: &TerrainChunk,
     tile_origin_x: f32,
     tile_origin_z: f32,
+    material_id: Option<u32>,
     vertices: &mut Vec<TerrainVertex>,
     indices: &mut Vec<u32>,
     bounds: &mut Option<TerrainBounds>,
@@ -170,7 +211,11 @@ fn append_chunk_mesh(
                 .unwrap_or([0.0, 1.0, 0.0]);
 
             extend_bounds(bounds, position);
-            vertices.push(TerrainVertex { position, normal });
+            vertices.push(TerrainVertex {
+                position,
+                normal,
+                material_id,
+            });
             *lookup_cell = Some(
                 base_index
                     .checked_add(
@@ -272,7 +317,9 @@ mod tests {
 
         assert_eq!(mesh.vertices().len(), 145);
         assert_eq!(mesh.indices().len(), 8 * 8 * 4 * 3);
+        assert_eq!(mesh.materials(), &["tiles/rock.blp".to_owned()]);
         assert_eq!(mesh.vertices()[0].position, [0.0, 10.0, 0.0]);
+        assert_eq!(mesh.vertices()[0].material_id, Some(0));
         assert_eq!(
             mesh.vertices()[144].position,
             [CHUNK_SIZE, 154.0, CHUNK_SIZE]
@@ -290,6 +337,7 @@ mod tests {
     fn fixture_adt() -> Vec<u8> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&stored_chunk(b"MVER", &18_u32.to_le_bytes()));
+        bytes.extend_from_slice(&stored_chunk(b"MTEX", &string_block(&["tiles/rock.blp"])));
         bytes.extend_from_slice(&stored_chunk(b"MCNK", &mcnk()));
         bytes
     }
@@ -301,6 +349,7 @@ mod tests {
         write_f32(&mut bytes, 112, 10.0);
         push_subchunk(&mut bytes, 20, b"MCVT", &mcvt());
         push_subchunk(&mut bytes, 24, b"MCNR", &mcnr());
+        push_subchunk(&mut bytes, 28, b"MCLY", &mcly());
         bytes
     }
 
@@ -312,6 +361,22 @@ mod tests {
 
     fn mcnr() -> Vec<u8> {
         vec![127; 145 * 3]
+    }
+
+    fn mcly() -> Vec<u8> {
+        [0_u32, 0, 0, 0xFFFF_FFFF]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect()
+    }
+
+    fn string_block(strings: &[&str]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for value in strings {
+            bytes.extend_from_slice(value.as_bytes());
+            bytes.push(0);
+        }
+        bytes
     }
 
     fn stored_chunk(id: &[u8; 4], data: &[u8]) -> Vec<u8> {

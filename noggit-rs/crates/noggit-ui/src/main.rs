@@ -9,7 +9,9 @@ use std::time::Duration;
 
 use minifb::{Key, MouseButton, MouseMode, Window, WindowOptions};
 use noggit_core::WorldMap;
+use noggit_formats::blp::{BlpFile, RgbaImage};
 use noggit_render::{TerrainBounds, TerrainMesh, TerrainVertex, build_terrain_mesh};
+use noggit_vfs::{FileSource, VfsPath, WowClient, WowClientConfig};
 
 const INITIAL_WIDTH: usize = 1280;
 const INITIAL_HEIGHT: usize = 720;
@@ -27,10 +29,12 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<(), String> {
-    let map_path = env::args().nth(1).map(PathBuf::from).ok_or_else(usage)?;
-    let world = WorldMap::load_from_local_directory(&map_path).map_err(|err| err.to_string())?;
+    let options = PreviewOptions::parse(env::args().skip(1))?;
+    let world =
+        WorldMap::load_from_local_directory(&options.map_path).map_err(|err| err.to_string())?;
     let mesh = build_terrain_mesh(&world).map_err(|err| err.to_string())?;
-    let preview = PreviewMesh::from_mesh(mesh)?;
+    let material_colors = load_material_colors(mesh.materials(), &options)?;
+    let preview = PreviewMesh::from_mesh(mesh, material_colors)?;
     let mut camera = Camera::new(preview.bounds);
     let mut window = Window::new(
         &format!("Noggit Rust - {}", world.name()),
@@ -73,17 +77,128 @@ fn run() -> Result<(), String> {
 }
 
 fn usage() -> String {
-    "usage: cargo run -p noggit-ui -- <local-map-directory>".to_string()
+    "usage: cargo run -p noggit-ui -- <local-map-directory> [--client <client-path>] [--extra-mpq <mpq> ...]".to_string()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PreviewOptions {
+    map_path: PathBuf,
+    client_path: Option<PathBuf>,
+    extra_archives: Vec<PathBuf>,
+}
+
+impl PreviewOptions {
+    fn parse(args: impl IntoIterator<Item = String>) -> Result<Self, String> {
+        let mut args = args.into_iter();
+        let mut map_path = None;
+        let mut client_path = None;
+        let mut extra_archives = Vec::new();
+
+        while let Some(arg) = args.next() {
+            match arg.as_str() {
+                "--client" => {
+                    let path = args.next().ok_or_else(usage)?;
+                    client_path = Some(PathBuf::from(path));
+                }
+                "--extra-mpq" => {
+                    let path = args.next().ok_or_else(usage)?;
+                    extra_archives.push(PathBuf::from(path));
+                }
+                value if value.starts_with("--") => return Err(usage()),
+                _ => {
+                    if map_path.is_some() {
+                        return Err(usage());
+                    }
+                    map_path = Some(PathBuf::from(arg));
+                }
+            }
+        }
+
+        if client_path.is_none() && !extra_archives.is_empty() {
+            return Err(format!("--extra-mpq requires --client\n{}", usage()));
+        }
+
+        Ok(Self {
+            map_path: map_path.ok_or_else(usage)?,
+            client_path,
+            extra_archives,
+        })
+    }
+}
+
+fn load_material_colors(
+    materials: &[String],
+    options: &PreviewOptions,
+) -> Result<Vec<Option<u32>>, String> {
+    let Some(client_path) = &options.client_path else {
+        return Ok(vec![None; materials.len()]);
+    };
+
+    let client = WowClient::open_with_config(
+        client_path,
+        WowClientConfig {
+            extra_archives: options.extra_archives.clone(),
+            ..WowClientConfig::default()
+        },
+    )
+    .map_err(|err| format!("failed to open WoW client {}: {err}", client_path.display()))?;
+
+    let colors = materials
+        .iter()
+        .map(|material| load_material_color(&client, material))
+        .collect::<Vec<_>>();
+    let resolved = colors.iter().filter(|color| color.is_some()).count();
+    eprintln!(
+        "terrain texture colors resolved: {resolved}/{}",
+        materials.len()
+    );
+
+    Ok(colors)
+}
+
+fn load_material_color(client: &WowClient, material: &str) -> Option<u32> {
+    let path = VfsPath::new(material).ok()?;
+    let bytes = client.read_file(&path).ok()?;
+    let blp = BlpFile::parse(&bytes).ok()?;
+    let image = blp.decode_rgba_mipmap(0).ok()?;
+    average_image_color(&image)
+}
+
+fn average_image_color(image: &RgbaImage) -> Option<u32> {
+    let mut red = 0_u64;
+    let mut green = 0_u64;
+    let mut blue = 0_u64;
+    let mut weight = 0_u64;
+
+    for pixel in image.pixels.chunks_exact(4) {
+        let alpha = u64::from(pixel[3]);
+        if alpha == 0 {
+            continue;
+        }
+        red += u64::from(pixel[0]) * alpha;
+        green += u64::from(pixel[1]) * alpha;
+        blue += u64::from(pixel[2]) * alpha;
+        weight += alpha;
+    }
+
+    if weight == 0 {
+        return None;
+    }
+
+    Some(
+        (((red / weight) as u32) << 16) | (((green / weight) as u32) << 8) | (blue / weight) as u32,
+    )
 }
 
 struct PreviewMesh {
     vertices: Vec<TerrainVertex>,
     lines: Vec<[u32; 2]>,
+    material_colors: Vec<Option<u32>>,
     bounds: TerrainBounds,
 }
 
 impl PreviewMesh {
-    fn from_mesh(mesh: TerrainMesh) -> Result<Self, String> {
+    fn from_mesh(mesh: TerrainMesh, material_colors: Vec<Option<u32>>) -> Result<Self, String> {
         let Some(bounds) = mesh.bounds() else {
             return Err("map has no renderable terrain chunks".to_string());
         };
@@ -92,6 +207,7 @@ impl PreviewMesh {
         Ok(Self {
             vertices: mesh.vertices().to_vec(),
             lines,
+            material_colors,
             bounds,
         })
     }
@@ -271,9 +387,36 @@ fn draw_preview(
         let Some((start, end)) = clip_line_to_viewport(start, end, width, height) else {
             continue;
         };
-        let color = height_color((a.position[1] + b.position[1]) * 0.5, preview.bounds);
+        let color = line_color(preview, a, b);
         draw_line(buffer, width, height, start, end, color);
     }
+}
+
+fn line_color(preview: &PreviewMesh, a: &TerrainVertex, b: &TerrainVertex) -> u32 {
+    let height = (a.position[1] + b.position[1]) * 0.5;
+    let Some(color) = line_material_color(preview, a, b) else {
+        return height_color(height, preview.bounds);
+    };
+    let range = (preview.bounds.max[1] - preview.bounds.min[1]).max(1.0);
+    let t = ((height - preview.bounds.min[1]) / range).clamp(0.0, 1.0);
+
+    scale_color(color, 0.72 + t * 0.28)
+}
+
+fn line_material_color(preview: &PreviewMesh, a: &TerrainVertex, b: &TerrainVertex) -> Option<u32> {
+    match (
+        vertex_material_color(preview, a),
+        vertex_material_color(preview, b),
+    ) {
+        (Some(a), Some(b)) if a != b => Some(mix_color(a, b, 0.5)),
+        (Some(color), _) | (_, Some(color)) => Some(color),
+        (None, None) => None,
+    }
+}
+
+fn vertex_material_color(preview: &PreviewMesh, vertex: &TerrainVertex) -> Option<u32> {
+    let material_id = usize::try_from(vertex.material_id?).ok()?;
+    *preview.material_colors.get(material_id)?
 }
 
 fn clip_line_to_viewport(
@@ -462,6 +605,15 @@ fn mix_color(a: u32, b: u32, t: f32) -> u32 {
     ((r as u32) << 16) | ((g as u32) << 8) | b as u32
 }
 
+fn scale_color(color: u32, factor: f32) -> u32 {
+    let factor = factor.max(0.0);
+    let red = (((color >> 16) & 0xff) as f32 * factor).min(255.0);
+    let green = (((color >> 8) & 0xff) as f32 * factor).min(255.0);
+    let blue = ((color & 0xff) as f32 * factor).min(255.0);
+
+    ((red as u32) << 16) | ((green as u32) << 8) | blue as u32
+}
+
 fn horizontal_forward(forward: [f32; 3]) -> [f32; 3] {
     normalize([forward[0], 0.0, forward[2]])
 }
@@ -496,5 +648,40 @@ fn normalize(value: [f32; 3]) -> [f32; 3] {
         [0.0, 0.0, 0.0]
     } else {
         scale(value, 1.0 / length)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_preview_options_with_client_and_extra_archives() -> Result<(), String> {
+        let options = PreviewOptions::parse([
+            "/maps/guerilla".to_string(),
+            "--client".to_string(),
+            "/wow".to_string(),
+            "--extra-mpq".to_string(),
+            "/maps/patch-guerilla.MPQ".to_string(),
+        ])?;
+
+        assert_eq!(options.map_path, PathBuf::from("/maps/guerilla"));
+        assert_eq!(options.client_path, Some(PathBuf::from("/wow")));
+        assert_eq!(
+            options.extra_archives,
+            vec![PathBuf::from("/maps/patch-guerilla.MPQ")]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn averages_rgba_color_with_alpha_weighting() {
+        let image = RgbaImage {
+            width: 2,
+            height: 1,
+            pixels: vec![200, 100, 50, 255, 10, 10, 10, 0],
+        };
+
+        assert_eq!(average_image_color(&image), Some(0xc86432));
     }
 }

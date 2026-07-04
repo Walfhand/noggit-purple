@@ -779,7 +779,9 @@ version = "0.1.0"
 dependencies = [
  "minifb",
  "noggit-core",
+ "noggit-formats",
  "noggit-render",
+ "noggit-vfs",
 ]
 
 [[package]]

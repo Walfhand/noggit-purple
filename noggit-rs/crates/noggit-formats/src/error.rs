@@ -40,6 +40,13 @@ pub enum FormatError {
         /// Offset inside the string table.
         offset: u32,
     },
+    /// A parser recognized the file but does not support this encoded variant yet.
+    Unsupported {
+        /// Name of the unsupported field.
+        field: &'static str,
+        /// Raw value.
+        value: u32,
+    },
 }
 
 impl Display for FormatError {
@@ -65,6 +72,9 @@ impl Display for FormatError {
             }
             Self::InvalidUtf8 { offset } => {
                 write!(f, "invalid UTF-8 string at string-table offset {offset}")
+            }
+            Self::Unsupported { field, value } => {
+                write!(f, "unsupported value for {field}: {value}")
             }
         }
     }
@@ -98,4 +108,8 @@ pub(crate) fn read_u16_le(bytes: &[u8], offset: usize) -> FormatResult<u16> {
 
 pub(crate) fn read_f32_le(bytes: &[u8], offset: usize) -> FormatResult<f32> {
     Ok(f32::from_bits(read_u32_le(bytes, offset)?))
+}
+
+pub(crate) fn read_u8(bytes: &[u8], offset: usize) -> FormatResult<u8> {
+    Ok(read_exact::<1>(bytes, offset)?[0])
 }

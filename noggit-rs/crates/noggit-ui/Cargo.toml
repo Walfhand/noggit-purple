@@ -8,7 +8,9 @@ repository.workspace = true
 [dependencies]
 minifb = "0.27"
 noggit-core = { path = "../noggit-core" }
+noggit-formats = { path = "../noggit-formats" }
 noggit-render = { path = "../noggit-render" }
+noggit-vfs = { path = "../noggit-vfs" }
 
 [lints]
 workspace = true

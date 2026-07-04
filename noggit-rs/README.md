@@ -36,11 +36,14 @@ library path, set `STORMLIB_LIB_DIR=/path/to/stormlib/lib` before building.
 
 ```bash
 cargo run -p noggit-cli -- inspect-dbc /path/to/file.dbc
+cargo run -p noggit-cli -- inspect-blp /path/to/file.blp
 cargo run -p noggit-cli -- inspect-adt /path/to/tile.adt
 cargo run -p noggit-cli -- inspect-map /path/to/World/Maps/guerilla
 cargo run -p noggit-cli -- inspect-client /path/to/WoWClient [/path/to/extra.MPQ ...]
 cargo run -p noggit-cli -- check-map-assets /path/to/guerilla /path/to/WoWClient [/path/to/extra.MPQ ...]
+cargo run -p noggit-cli -- check-map-textures /path/to/guerilla /path/to/WoWClient [/path/to/extra.MPQ ...]
 cargo run -p noggit-ui -- /path/to/guerilla
+cargo run -p noggit-ui -- /path/to/guerilla --client /path/to/WoWClient [--extra-mpq /path/to/extra.MPQ ...]
 ```
 
 `inspect-adt` prints chunk counts, version, asset tables, placement asset usage,
@@ -57,6 +60,11 @@ the same way as in Noggit C++. `check-map-assets` verifies that the texture,
 M2, and WMO assets referenced by a loaded map can be read from the client MPQ
 chain.
 
+`inspect-blp` and `check-map-textures` validate BLP texture decoding. The
+current decoder supports paletted BLPs plus DXT1, DXT3, and DXT5 mipmaps.
+
 `noggit-ui` opens the first graphical preview: a software wireframe view of the
-loaded ADT terrain heights. This is intentionally a terrain-only slice; BLP
-textures, M2 doodads, and WMO rendering are next.
+loaded ADT terrain heights. With `--client`, it reads BLP assets from the WoW
+client/extra MPQs and colors terrain lines from the decoded base chunk
+textures. This is still a terrain-only preview; true texture sampling, M2
+doodads, and WMO rendering are next.

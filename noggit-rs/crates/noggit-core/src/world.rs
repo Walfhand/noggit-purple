@@ -1,9 +1,11 @@
 //! World map domain model.
 
+use std::io::ErrorKind;
 use std::path::Path;
 
 use noggit_formats::FormatResult;
 use noggit_formats::adt::{ALPHA_MAP_SIZE, AdtFile, MddfEntry, ModfEntry, filename_by_name_id};
+use noggit_formats::wdt::{MPHD_FLAG_BIG_ALPHA, WdtFile};
 use noggit_vfs::{FileSource, LocalFolder, VfsPath};
 
 use crate::error::{CoreError, CoreResult};
@@ -153,6 +155,7 @@ impl WorldMap {
     /// Load all ADT tiles for `name` from a virtual file source.
     pub fn load_from_source(name: impl Into<String>, source: &impl FileSource) -> CoreResult<Self> {
         let name = name.into();
+        let use_big_alphamaps = load_wdt_big_alpha_flag(&name, source)?;
         let entries = source
             .list_files(&VfsPath::root())
             .map_err(|source| CoreError::Io { path: None, source })?;
@@ -167,7 +170,7 @@ impl WorldMap {
                 source,
             })?;
             let adt = parse_format(&path, AdtFile::parse(&bytes))?;
-            tiles.push(WorldTile::from_adt(coord, path, &adt)?);
+            tiles.push(WorldTile::from_adt(coord, path, &adt, use_big_alphamaps)?);
         }
 
         tiles.sort_by_key(|tile| tile.coord);
@@ -209,11 +212,33 @@ impl WorldMap {
     }
 }
 
+fn load_wdt_big_alpha_flag(name: &str, source: &impl FileSource) -> CoreResult<bool> {
+    let Ok(path) = VfsPath::new(format!("{name}.wdt")) else {
+        return Ok(false);
+    };
+    let bytes = match source.read_file(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(source) => {
+            return Err(CoreError::Io {
+                path: Some(path),
+                source,
+            });
+        }
+    };
+    let wdt = parse_format(&path, WdtFile::parse(&bytes))?;
+    Ok(parse_format(&path, wdt.mphd())?
+        .map(|header| header.flags & MPHD_FLAG_BIG_ALPHA != 0)
+        .unwrap_or(false))
+}
+
 impl WorldTile {
-    fn from_adt(coord: TileCoord, source_path: VfsPath, adt: &AdtFile) -> CoreResult<Self> {
-        let use_big_alphamaps = parse_format(&source_path, adt.mhdr())?
-            .map(|header| header.flags & 0x0004 != 0)
-            .unwrap_or(false);
+    fn from_adt(
+        coord: TileCoord,
+        source_path: VfsPath,
+        adt: &AdtFile,
+        use_big_alphamaps: bool,
+    ) -> CoreResult<Self> {
         let texture_assets =
             parse_format(&source_path, adt.texture_filenames())?.unwrap_or_default();
         let model_assets = parse_format(&source_path, adt.model_filenames())?.unwrap_or_default();
@@ -473,6 +498,30 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn loads_wdt_big_alpha_flag_for_terrain_alpha_maps() -> Result<(), Box<dyn Error>> {
+        let root = test_root("noggit-core-wdt-big-alpha")?;
+        fs::create_dir_all(&root)?;
+        fs::write(root.join("guerilla.wdt"), fixture_wdt(true))?;
+        fs::write(root.join("guerilla_27_25.adt"), fixture_adt_with_alpha())?;
+        let source = LocalFolder::new(&root);
+
+        let map = WorldMap::load_from_source("guerilla", &source)?;
+
+        fs::remove_dir_all(&root)?;
+
+        let chunk = &map.tiles()[0].terrain_chunks()[0];
+        assert_eq!(chunk.layers.len(), 2);
+        assert_eq!(chunk.alpha_maps.len(), 2);
+        assert!(chunk.alpha_maps[0].is_none());
+        let alpha = chunk.alpha_maps[1].as_ref().ok_or("missing alpha map")?;
+        assert_eq!(alpha.values[0], 0);
+        assert_eq!(alpha.values[1], 1);
+        assert_eq!(alpha.values[2], 2);
+        assert_eq!(alpha.values[255], 255);
+        Ok(())
+    }
+
     fn fixture_adt(area_id: u32) -> Vec<u8> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&stored_chunk(b"MVER", &18_u32.to_le_bytes()));
@@ -487,6 +536,29 @@ mod tests {
         bytes
     }
 
+    fn fixture_wdt(big_alpha: bool) -> Vec<u8> {
+        let flags = if big_alpha { MPHD_FLAG_BIG_ALPHA } else { 0 };
+        let mphd = [flags, 0, 0, 0, 0, 0, 0, 0]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect::<Vec<_>>();
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&stored_chunk(b"MVER", &18_u32.to_le_bytes()));
+        bytes.extend_from_slice(&stored_chunk(b"MPHD", &mphd));
+        bytes
+    }
+
+    fn fixture_adt_with_alpha() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&stored_chunk(b"MVER", &18_u32.to_le_bytes()));
+        bytes.extend_from_slice(&stored_chunk(
+            b"MTEX",
+            &string_block(&["tiles/base.blp", "tiles/detail.blp"]),
+        ));
+        bytes.extend_from_slice(&stored_chunk(b"MCNK", &mcnk_with_alpha()));
+        bytes
+    }
+
     fn mcnk(area_id: u32) -> Vec<u8> {
         let mut bytes = vec![0; 128];
         write_u32(&mut bytes, 4, 4);
@@ -497,6 +569,21 @@ mod tests {
         push_subchunk(&mut bytes, 20, b"MCVT", &mcvt());
         push_subchunk(&mut bytes, 24, b"MCNR", &mcnr());
         push_subchunk(&mut bytes, 28, b"MCLY", &mcly());
+        bytes
+    }
+
+    fn mcnk_with_alpha() -> Vec<u8> {
+        let mut bytes = vec![0; 128];
+        write_u32(&mut bytes, 4, 4);
+        write_u32(&mut bytes, 8, 9);
+        write_u32(&mut bytes, 12, 2);
+
+        push_subchunk(&mut bytes, 20, b"MCVT", &mcvt());
+        push_subchunk(&mut bytes, 24, b"MCNR", &mcnr());
+        push_subchunk(&mut bytes, 28, b"MCLY", &mcly_with_alpha());
+        let mcal = big_mcal();
+        write_u32(&mut bytes, 40, (8 + mcal.len()) as u32);
+        push_subchunk(&mut bytes, 36, b"MCAL", &mcal);
         bytes
     }
 
@@ -514,6 +601,19 @@ mod tests {
         [0_u32, 0, 0, 0xFFFF_FFFF]
             .into_iter()
             .flat_map(u32::to_le_bytes)
+            .collect()
+    }
+
+    fn mcly_with_alpha() -> Vec<u8> {
+        [0_u32, 0, 0, 0xFFFF_FFFF, 1, 0x100, 0, 0xFFFF_FFFF]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect()
+    }
+
+    fn big_mcal() -> Vec<u8> {
+        (0..ALPHA_MAP_SIZE)
+            .map(|index| (index % 256) as u8)
             .collect()
     }
 

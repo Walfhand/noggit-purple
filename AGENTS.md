@@ -60,6 +60,7 @@ Implemented:
 - DBC header/record/string parsing.
 - DBC byte-identical roundtrip.
 - Raw ADT chunk container parsing.
+- Raw WDT chunk container parsing plus `MPHD` map flags.
 - ADT `MVER` version extraction.
 - Typed ADT `MHDR`, `MCIN`, and `MCNK` header parsing.
 - Typed `MCNK` terrain access by header offsets.
@@ -73,7 +74,7 @@ Implemented:
 - BLP header parsing and RGBA decoding for paletted textures plus DXT1, DXT3,
   and DXT5 mipmaps.
 - Core world-map model that loads local map directories into sorted ADT tiles,
-  terrain chunks, assets, and placements.
+  terrain chunks, assets, placements, and WDT map-level alpha-map flags.
 - Renderer terrain mesh extraction from loaded ADT `MCVT` chunks, including
   up to four terrain texture material ids from `MCLY`, decoded `MCAL` alpha
   maps, and chunk detail-map UVs.

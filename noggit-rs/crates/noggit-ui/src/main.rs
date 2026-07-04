@@ -10,7 +10,7 @@ use bytemuck::{Pod, Zeroable};
 use noggit_core::WorldMap;
 use noggit_formats::blp::{BlpFile, RgbaImage};
 use noggit_render::{TerrainBounds, TerrainMesh, TerrainVertex, build_terrain_mesh};
-use noggit_vfs::{FileSource, VfsPath, WowClient, WowClientConfig};
+use noggit_vfs::{ArchiveLoadState, FileSource, VfsPath, WowClient, WowClientConfig};
 use wgpu::util::DeviceExt;
 use winit::dpi::{LogicalSize, PhysicalSize};
 use winit::event::{ElementState, Event, MouseButton, MouseScrollDelta, WindowEvent};
@@ -207,6 +207,7 @@ fn load_material_images(
         },
     )
     .map_err(|err| format!("failed to open WoW client {}: {err}", client_path.display()))?;
+    log_client_archive_summary(&client);
 
     let mut resolved = 0usize;
     let images = materials
@@ -222,6 +223,28 @@ fn load_material_images(
     eprintln!("terrain textures loaded: {resolved}/{}", materials.len());
 
     Ok(images)
+}
+
+fn log_client_archive_summary(client: &WowClient) {
+    let loaded = client
+        .archive_reports()
+        .iter()
+        .filter(|report| report.state == ArchiveLoadState::Loaded)
+        .count();
+    let skipped = client
+        .archive_reports()
+        .iter()
+        .filter(|report| matches!(report.state, ArchiveLoadState::SkippedTooLarge { .. }))
+        .count();
+    let failed = client
+        .archive_reports()
+        .iter()
+        .filter(|report| matches!(report.state, ArchiveLoadState::Failed { .. }))
+        .count();
+    eprintln!(
+        "client MPQs: loaded={loaded} skipped={skipped} failed={failed} data={}",
+        client.data_root().display()
+    );
 }
 
 fn load_material_image(client: &WowClient, material: &str) -> Option<MaterialImage> {

@@ -371,6 +371,7 @@ mod tests {
         let root = test_root("noggit-render-terrain")?;
         let map_dir = root.join("testmap");
         fs::create_dir_all(&map_dir)?;
+        fs::write(map_dir.join("testmap.wdt"), fixture_wdt())?;
         fs::write(map_dir.join("testmap_12_34.adt"), fixture_adt())?;
 
         let map = WorldMap::load_from_local_directory(&map_dir)?;
@@ -418,6 +419,17 @@ mod tests {
             &string_block(&["tiles/rock.blp", "tiles/dirt.blp"]),
         ));
         bytes.extend_from_slice(&stored_chunk(b"MCNK", &mcnk()));
+        bytes
+    }
+
+    fn fixture_wdt() -> Vec<u8> {
+        let mphd = [0x0004_u32, 0, 0, 0, 0, 0, 0, 0]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect::<Vec<_>>();
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&stored_chunk(b"MVER", &18_u32.to_le_bytes()));
+        bytes.extend_from_slice(&stored_chunk(b"MPHD", &mphd));
         bytes
     }
 

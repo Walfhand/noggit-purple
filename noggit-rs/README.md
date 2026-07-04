@@ -20,9 +20,9 @@ renderer, or UI.
 ## First Vertical Slice
 
 1. Parse DBC files and roundtrip them byte-for-byte.
-2. Parse ADT chunk containers, typed headers, terrain heights, normals, texture
-   layers, alpha maps, asset filename blocks, filename offset tables, and
-   placement tables.
+2. Parse WDT map flags plus ADT chunk containers, typed headers, terrain
+   heights, normals, texture layers, alpha maps, asset filename blocks,
+   filename offset tables, and placement tables.
 3. Load a local map directory through `noggit-vfs` into a `noggit-core`
    `WorldMap` with sorted tiles, terrain chunks, assets, and placements.
 4. Discover and read WoW client MPQ archives for referenced map assets using
@@ -51,7 +51,9 @@ terrain chunk summaries, height ranges, normal counts, texture layer counts,
 and raw `MCAL` payload sizes.
 
 `inspect-map` loads every matching ADT in a local map directory and prints the
-map-level tile, placement, and terrain chunk totals.
+map-level tile, placement, and terrain chunk totals. The core also reads the
+local `<map>.wdt` when present so terrain alpha-map decoding follows the same
+map-level big-alpha flag as Noggit C++.
 
 `inspect-client` discovers WotLK client MPQs in Noggit load order and reports
 loaded/skipped/failed archives. By default no archive is skipped by size;

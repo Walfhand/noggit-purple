@@ -59,6 +59,7 @@ fn run() -> Result<(), String> {
     let gpu_mesh = GpuMesh::from_terrain_mesh(mesh, fallback_material_id, fallback_alpha_id)?;
     let gpu_marker_mesh = GpuMarkerMesh::from_marker_mesh(&marker_mesh)?;
     let mut camera = Camera::new(gpu_mesh.bounds);
+    log_render_bounds(gpu_mesh.bounds, marker_mesh.bounds());
     eprintln!(
         "object placement markers: {} placements, {} lines",
         marker_mesh.marker_count(),
@@ -392,6 +393,31 @@ fn load_alpha_images(alpha_maps: &[noggit_render::TerrainAlphaMap]) -> Vec<Alpha
 fn empty_alpha_image() -> AlphaImage {
     AlphaImage {
         values: [0; TERRAIN_ALPHA_MAP_BYTES],
+    }
+}
+
+fn log_render_bounds(terrain: TerrainBounds, markers: Option<TerrainBounds>) {
+    eprintln!(
+        "terrain bounds: min=({:.1},{:.1},{:.1}) max=({:.1},{:.1},{:.1})",
+        terrain.min[0],
+        terrain.min[1],
+        terrain.min[2],
+        terrain.max[0],
+        terrain.max[1],
+        terrain.max[2]
+    );
+    if let Some(markers) = markers {
+        eprintln!(
+            "marker bounds: min=({:.1},{:.1},{:.1}) max=({:.1},{:.1},{:.1})",
+            markers.min[0],
+            markers.min[1],
+            markers.min[2],
+            markers.max[0],
+            markers.max[1],
+            markers.max[2]
+        );
+    } else {
+        eprintln!("marker bounds: none");
     }
 }
 

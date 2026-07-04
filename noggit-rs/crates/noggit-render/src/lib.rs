@@ -10,8 +10,6 @@ use noggit_core::{ModelPlacement, TerrainChunk, WmoPlacement, WorldMap};
 pub const TILE_SIZE: f32 = 1600.0 / 3.0;
 /// ADT terrain chunk width in yards.
 pub const CHUNK_SIZE: f32 = TILE_SIZE / 16.0;
-/// WoW world-space origin offset used by ADT object placement coordinates.
-pub const ZERO_POINT: f32 = TILE_SIZE * 32.0;
 const CHUNK_GRID_STEPS: usize = 8;
 const MCVT_ROWS: usize = 17;
 /// Byte count for one decoded 64x64 terrain alpha map.
@@ -293,7 +291,7 @@ fn append_model_marker(
     indices: &mut Vec<u32>,
     bounds: &mut Option<TerrainBounds>,
 ) -> RenderResult<()> {
-    let center = server_position_to_render_local(placement.position, min_tile_x, min_tile_y);
+    let center = world_position_to_render_local(placement.position, min_tile_x, min_tile_y);
     let scale = (placement.scale as f32 / 1024.0).max(0.1);
     let half = MODEL_MARKER_HALF_SIZE * scale;
     let height = MODEL_MARKER_HEIGHT * scale;
@@ -315,22 +313,22 @@ fn append_wmo_marker(
     indices: &mut Vec<u32>,
     bounds: &mut Option<TerrainBounds>,
 ) -> RenderResult<()> {
-    let lower = server_position_to_render_local(placement.lower_extent, min_tile_x, min_tile_y);
-    let upper = server_position_to_render_local(placement.upper_extent, min_tile_x, min_tile_y);
+    let lower = world_position_to_render_local(placement.lower_extent, min_tile_x, min_tile_y);
+    let upper = world_position_to_render_local(placement.upper_extent, min_tile_x, min_tile_y);
     let (min, max) = min_max_points(lower, upper);
     let (min, max) = expand_tiny_bounds(min, max);
     append_line_box(min, max, WMO_MARKER_COLOR, vertices, indices, bounds)
 }
 
-fn server_position_to_render_local(
-    server_position: [f32; 3],
+fn world_position_to_render_local(
+    world_position: [f32; 3],
     min_tile_x: u32,
     min_tile_y: u32,
 ) -> [f32; 3] {
     [
-        ZERO_POINT - server_position[1] - min_tile_x as f32 * TILE_SIZE,
-        server_position[2],
-        ZERO_POINT - server_position[0] - min_tile_y as f32 * TILE_SIZE,
+        world_position[0] - min_tile_x as f32 * TILE_SIZE,
+        world_position[1],
+        world_position[2] - min_tile_y as f32 * TILE_SIZE,
     ]
 }
 
@@ -634,15 +632,11 @@ mod tests {
     }
 
     #[test]
-    fn converts_server_positions_to_map_local_render_space() {
-        let server_position = [
-            ZERO_POINT - (25.0 * TILE_SIZE + 20.0),
-            ZERO_POINT - (27.0 * TILE_SIZE + 10.0),
-            7.0,
-        ];
+    fn converts_world_positions_to_map_local_render_space() {
+        let world_position = [27.0 * TILE_SIZE + 10.0, 7.0, 25.0 * TILE_SIZE + 20.0];
 
         assert_eq!(
-            server_position_to_render_local(server_position, 27, 25),
+            world_position_to_render_local(world_position, 27, 25),
             [10.0, 7.0, 20.0]
         );
     }
@@ -757,11 +751,7 @@ mod tests {
         bytes.extend_from_slice(&77_u32.to_le_bytes());
         push_vec3(
             &mut bytes,
-            [
-                ZERO_POINT - (25.0 * TILE_SIZE + 20.0),
-                ZERO_POINT - (27.0 * TILE_SIZE + 10.0),
-                7.0,
-            ],
+            [27.0 * TILE_SIZE + 10.0, 7.0, 25.0 * TILE_SIZE + 20.0],
         );
         push_vec3(&mut bytes, [0.0, 0.0, 0.0]);
         bytes.extend_from_slice(&1024_u16.to_le_bytes());
@@ -775,28 +765,16 @@ mod tests {
         bytes.extend_from_slice(&88_u32.to_le_bytes());
         push_vec3(
             &mut bytes,
-            [
-                ZERO_POINT - (25.0 * TILE_SIZE + 80.0),
-                ZERO_POINT - (27.0 * TILE_SIZE + 60.0),
-                20.0,
-            ],
+            [27.0 * TILE_SIZE + 60.0, 20.0, 25.0 * TILE_SIZE + 80.0],
         );
         push_vec3(&mut bytes, [0.0, 0.0, 0.0]);
         push_vec3(
             &mut bytes,
-            [
-                ZERO_POINT - (25.0 * TILE_SIZE + 90.0),
-                ZERO_POINT - (27.0 * TILE_SIZE + 50.0),
-                12.0,
-            ],
+            [27.0 * TILE_SIZE + 50.0, 12.0, 25.0 * TILE_SIZE + 70.0],
         );
         push_vec3(
             &mut bytes,
-            [
-                ZERO_POINT - (25.0 * TILE_SIZE + 70.0),
-                ZERO_POINT - (27.0 * TILE_SIZE + 80.0),
-                28.0,
-            ],
+            [27.0 * TILE_SIZE + 80.0, 28.0, 25.0 * TILE_SIZE + 90.0],
         );
         bytes.extend_from_slice(&0_u16.to_le_bytes());
         bytes.extend_from_slice(&0_u16.to_le_bytes());

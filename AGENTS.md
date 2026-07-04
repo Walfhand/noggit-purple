@@ -79,8 +79,8 @@ Implemented:
   up to four terrain texture material ids from `MCLY`, decoded `MCAL` alpha
   maps, and chunk detail-map UVs.
 - Renderer debug marker extraction for loaded `MDDF` M2 doodad placements and
-  `MODF` WMO placements. Placement coordinates are converted from WoW
-  server/world coordinates into the same map-local render space as terrain.
+  `MODF` WMO placements. ADT placement coordinates are converted from global
+  tile/world coordinates into the same map-local render space as terrain.
 - Desktop terrain preview window through `noggit-ui`, using `winit`/`wgpu` for
   filled terrain triangles, depth buffering, camera controls, repeated BLP
   texture sampling, generated/decoded mipmaps, and GPU blending of terrain

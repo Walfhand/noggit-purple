@@ -1,0 +1,90 @@
+# Build directories
+/build/
+/build-*/
+/cmake-build-*/
+/out/
+/install/
+/package/
+
+# CMake generated files
+/CMakeFiles/
+/CMakeCache.txt
+/cmake_install.cmake
+/CTestTestfile.cmake
+/DartConfiguration.tcl
+/Testing/
+/Makefile
+/compile_commands.json
+/install_manifest.txt
+/.cmake/
+/_deps/
+CMakeUserPresets.json
+
+# Compiled objects and binaries
+*.o
+*.obj
+*.lo
+*.la
+*.a
+*.lib
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+*.out
+*.app
+*.pdb
+*.ilk
+*.exp
+*.dSYM/
+
+# Qt generated files
+moc_*.cpp
+moc_*.h
+qrc_*.cpp
+ui_*.h
+*.qmlc
+*.jsc
+
+# Runtime/local state
+*.log
+/log.txt
+/logs/
+/imgui.ini
+/noggit.json
+/script_settings.json
+/projects/
+/cache/
+/tmp/
+/temp/
+/listfile.csv
+
+# Local game/client data
+/Client/
+/client/
+/Data/
+/WTF/
+/Cache/
+/wow/
+/WoW/
+
+# Local backups
+*.bak
+*.backup
+*.tmp
+*.swp
+*.swo
+*.core
+core
+/noggit.backup*
+/noggit.before-*
+
+# Editor and OS files
+/.idea/
+/.vscode/
+*.user
+*.suo
+*.autosave
+.DS_Store
+Thumbs.db

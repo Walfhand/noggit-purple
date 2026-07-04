@@ -1,22 +1,32 @@
 //! Terrain preview window for the Rust rewrite.
 
-use std::collections::HashSet;
+use std::borrow::Cow;
+use std::collections::BTreeSet;
 use std::env;
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::thread;
-use std::time::Duration;
 
-use minifb::{Key, MouseButton, MouseMode, Window, WindowOptions};
+use bytemuck::{Pod, Zeroable};
 use noggit_core::WorldMap;
 use noggit_formats::blp::{BlpFile, RgbaImage};
 use noggit_render::{TerrainBounds, TerrainMesh, TerrainVertex, build_terrain_mesh};
 use noggit_vfs::{FileSource, VfsPath, WowClient, WowClientConfig};
+use wgpu::util::DeviceExt;
+use winit::dpi::{LogicalSize, PhysicalSize};
+use winit::event::{ElementState, Event, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event_loop::{ControlFlow, EventLoop};
+use winit::keyboard::{KeyCode, PhysicalKey};
+use winit::window::{Window, WindowBuilder};
 
-const INITIAL_WIDTH: usize = 1280;
-const INITIAL_HEIGHT: usize = 720;
-const BACKGROUND: u32 = 0x101417;
-const MAX_WIREFRAME_LINES: usize = 55_000;
+const INITIAL_WIDTH: u32 = 1280;
+const INITIAL_HEIGHT: u32 = 720;
+const BACKGROUND: wgpu::Color = wgpu::Color {
+    r: 0.063,
+    g: 0.078,
+    b: 0.091,
+    a: 1.0,
+};
+const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth24Plus;
 
 fn main() -> ExitCode {
     match run() {
@@ -34,46 +44,81 @@ fn run() -> Result<(), String> {
         WorldMap::load_from_local_directory(&options.map_path).map_err(|err| err.to_string())?;
     let mesh = build_terrain_mesh(&world).map_err(|err| err.to_string())?;
     let material_colors = load_material_colors(mesh.materials(), &options)?;
-    let preview = PreviewMesh::from_mesh(mesh, material_colors)?;
-    let mut camera = Camera::new(preview.bounds);
-    let mut window = Window::new(
-        &format!("Noggit Rust - {}", world.name()),
-        INITIAL_WIDTH,
-        INITIAL_HEIGHT,
-        WindowOptions {
-            resize: true,
-            ..WindowOptions::default()
-        },
-    )
-    .map_err(|err| format!("failed to open preview window: {err}"))?;
-    let mut buffer = vec![BACKGROUND; INITIAL_WIDTH * INITIAL_HEIGHT];
-    let mut width = INITIAL_WIDTH;
-    let mut height = INITIAL_HEIGHT;
-    let mut dirty = true;
+    let gpu_mesh = GpuMesh::from_terrain_mesh(mesh, &material_colors)?;
+    let mut camera = Camera::new(gpu_mesh.bounds);
 
-    while window.is_open() && !window.is_key_down(Key::Escape) {
-        let (new_width, new_height) = window.get_size();
-        if new_width != width || new_height != height {
-            width = new_width.max(1);
-            height = new_height.max(1);
-            buffer.resize(width * height, BACKGROUND);
-            dirty = true;
-        }
+    let event_loop =
+        EventLoop::new().map_err(|err| format!("failed to create event loop: {err}"))?;
+    let window = WindowBuilder::new()
+        .with_title(format!("Noggit Rust GPU - {}", world.name()))
+        .with_inner_size(LogicalSize::new(
+            f64::from(INITIAL_WIDTH),
+            f64::from(INITIAL_HEIGHT),
+        ))
+        .build(&event_loop)
+        .map_err(|err| format!("failed to open preview window: {err}"))?;
+    let window: &'static Window = Box::leak(Box::new(window));
+    let mut gpu = pollster::block_on(GpuState::new(
+        window,
+        &gpu_mesh,
+        camera.uniform(window.inner_size()),
+    ))?;
+    let mut input = InputState::default();
 
-        if camera.update(&window) {
-            dirty = true;
-        }
-        if dirty {
-            draw_preview(&preview, &camera, &mut buffer, width, height);
-            dirty = false;
-        }
-        window
-            .update_with_buffer(&buffer, width, height)
-            .map_err(|err| format!("failed to update preview window: {err}"))?;
-        thread::sleep(Duration::from_millis(16));
-    }
+    event_loop
+        .run(move |event, target| {
+            target.set_control_flow(ControlFlow::Poll);
 
-    Ok(())
+            match event {
+                Event::WindowEvent { event, window_id } if window_id == window.id() => {
+                    match event {
+                        WindowEvent::CloseRequested => target.exit(),
+                        WindowEvent::KeyboardInput { event, .. } => {
+                            if let PhysicalKey::Code(code) = event.physical_key {
+                                if code == KeyCode::Escape && event.state == ElementState::Pressed {
+                                    target.exit();
+                                }
+                                input.set_key(code, event.state);
+                            }
+                        }
+                        WindowEvent::MouseInput { state, button, .. } => {
+                            input.set_mouse_button(button, state);
+                        }
+                        WindowEvent::CursorMoved { position, .. } => {
+                            input.set_cursor_position(position.x as f32, position.y as f32);
+                        }
+                        WindowEvent::MouseWheel { delta, .. } => {
+                            input.add_scroll(delta);
+                        }
+                        WindowEvent::Resized(size) => {
+                            gpu.resize(size);
+                        }
+                        WindowEvent::RedrawRequested => {
+                            if camera.update(&mut input) {
+                                gpu.update_camera(camera.uniform(window.inner_size()));
+                            }
+
+                            match gpu.render() {
+                                Ok(()) => {}
+                                Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
+                                    gpu.resize(window.inner_size());
+                                }
+                                Err(wgpu::SurfaceError::OutOfMemory) => target.exit(),
+                                Err(wgpu::SurfaceError::Timeout) => {
+                                    eprintln!("surface render timeout");
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                Event::AboutToWait => {
+                    window.request_redraw();
+                }
+                _ => {}
+            }
+        })
+        .map_err(|err| format!("event loop failed: {err}"))
 }
 
 fn usage() -> String {
@@ -190,27 +235,376 @@ fn average_image_color(image: &RgbaImage) -> Option<u32> {
     )
 }
 
-struct PreviewMesh {
-    vertices: Vec<TerrainVertex>,
-    lines: Vec<[u32; 2]>,
-    material_colors: Vec<Option<u32>>,
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct GpuVertex {
+    position: [f32; 3],
+    normal: [f32; 3],
+    color: [f32; 3],
+}
+
+impl GpuVertex {
+    fn layout() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<GpuVertex>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &[
+                wgpu::VertexAttribute {
+                    offset: 0,
+                    shader_location: 0,
+                    format: wgpu::VertexFormat::Float32x3,
+                },
+                wgpu::VertexAttribute {
+                    offset: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
+                    shader_location: 1,
+                    format: wgpu::VertexFormat::Float32x3,
+                },
+                wgpu::VertexAttribute {
+                    offset: (std::mem::size_of::<[f32; 3]>() * 2) as wgpu::BufferAddress,
+                    shader_location: 2,
+                    format: wgpu::VertexFormat::Float32x3,
+                },
+            ],
+        }
+    }
+}
+
+struct GpuMesh {
+    vertices: Vec<GpuVertex>,
+    indices: Vec<u32>,
     bounds: TerrainBounds,
 }
 
-impl PreviewMesh {
-    fn from_mesh(mesh: TerrainMesh, material_colors: Vec<Option<u32>>) -> Result<Self, String> {
+impl GpuMesh {
+    fn from_terrain_mesh(
+        mesh: TerrainMesh,
+        material_colors: &[Option<u32>],
+    ) -> Result<Self, String> {
         let Some(bounds) = mesh.bounds() else {
             return Err("map has no renderable terrain chunks".to_string());
         };
+        if mesh.indices().is_empty() {
+            return Err("map has no renderable terrain triangles".to_string());
+        }
 
-        let lines = sampled_wireframe_lines(mesh.indices());
+        let vertices = mesh
+            .vertices()
+            .iter()
+            .map(|vertex| GpuVertex {
+                position: vertex.position,
+                normal: normalize(vertex.normal),
+                color: vertex_color(vertex, material_colors, bounds),
+            })
+            .collect();
+
         Ok(Self {
-            vertices: mesh.vertices().to_vec(),
-            lines,
-            material_colors,
+            vertices,
+            indices: mesh.indices().to_vec(),
             bounds,
         })
     }
+}
+
+fn vertex_color(
+    vertex: &TerrainVertex,
+    material_colors: &[Option<u32>],
+    bounds: TerrainBounds,
+) -> [f32; 3] {
+    let color = vertex
+        .material_id
+        .and_then(|id| usize::try_from(id).ok())
+        .and_then(|id| material_colors.get(id).copied().flatten())
+        .unwrap_or_else(|| height_color(vertex.position[1], bounds));
+
+    rgb_to_f32(color)
+}
+
+fn rgb_to_f32(color: u32) -> [f32; 3] {
+    [
+        ((color >> 16) & 0xff) as f32 / 255.0,
+        ((color >> 8) & 0xff) as f32 / 255.0,
+        (color & 0xff) as f32 / 255.0,
+    ]
+}
+
+struct GpuState<'window> {
+    surface: wgpu::Surface<'window>,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    config: wgpu::SurfaceConfiguration,
+    depth: DepthTarget,
+    pipeline: wgpu::RenderPipeline,
+    camera_buffer: wgpu::Buffer,
+    camera_bind_group: wgpu::BindGroup,
+    vertex_buffer: wgpu::Buffer,
+    index_buffer: wgpu::Buffer,
+    index_count: u32,
+}
+
+impl<'window> GpuState<'window> {
+    async fn new(
+        window: &'window Window,
+        mesh: &GpuMesh,
+        camera_uniform: CameraUniform,
+    ) -> Result<Self, String> {
+        let size = window.inner_size();
+        let instance = wgpu::Instance::default();
+        let surface = instance
+            .create_surface(window)
+            .map_err(|err| format!("failed to create GPU surface: {err}"))?;
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                compatible_surface: Some(&surface),
+                force_fallback_adapter: false,
+            })
+            .await
+            .ok_or_else(|| "failed to find a compatible GPU adapter".to_string())?;
+        let (device, queue) = adapter
+            .request_device(
+                &wgpu::DeviceDescriptor {
+                    label: Some("noggit-ui-device"),
+                    required_features: wgpu::Features::empty(),
+                    required_limits: wgpu::Limits::default(),
+                },
+                None,
+            )
+            .await
+            .map_err(|err| format!("failed to create GPU device: {err}"))?;
+        let caps = surface.get_capabilities(&adapter);
+        let format = caps
+            .formats
+            .iter()
+            .copied()
+            .find(wgpu::TextureFormat::is_srgb)
+            .or_else(|| caps.formats.first().copied())
+            .ok_or_else(|| "GPU surface has no supported formats".to_string())?;
+        let present_mode = caps
+            .present_modes
+            .iter()
+            .copied()
+            .find(|mode| *mode == wgpu::PresentMode::Mailbox)
+            .or_else(|| {
+                caps.present_modes
+                    .iter()
+                    .copied()
+                    .find(|mode| *mode == wgpu::PresentMode::Fifo)
+            })
+            .or_else(|| caps.present_modes.first().copied())
+            .ok_or_else(|| "GPU surface has no present modes".to_string())?;
+        let alpha_mode = caps
+            .alpha_modes
+            .first()
+            .copied()
+            .ok_or_else(|| "GPU surface has no alpha modes".to_string())?;
+        let config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format,
+            width: size.width.max(1),
+            height: size.height.max(1),
+            present_mode,
+            alpha_mode,
+            view_formats: Vec::new(),
+            desired_maximum_frame_latency: 2,
+        };
+        surface.configure(&device, &config);
+
+        let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("camera-buffer"),
+            contents: bytemuck::bytes_of(&camera_uniform),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let camera_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("camera-bind-group-layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+        let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("camera-bind-group"),
+            layout: &camera_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: camera_buffer.as_entire_binding(),
+            }],
+        });
+
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("terrain-shader"),
+            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(TERRAIN_SHADER)),
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("terrain-pipeline-layout"),
+            bind_group_layouts: &[&camera_bind_group_layout],
+            push_constant_ranges: &[],
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("terrain-pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: "vs_main",
+                buffers: &[GpuVertex::layout()],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: "fs_main",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+        });
+        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("terrain-vertex-buffer"),
+            contents: bytemuck::cast_slice(&mesh.vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("terrain-index-buffer"),
+            contents: bytemuck::cast_slice(&mesh.indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+        let index_count = u32::try_from(mesh.indices.len())
+            .map_err(|_| "terrain index buffer exceeds u32 draw range".to_string())?;
+        let depth = DepthTarget::new(&device, &config);
+
+        Ok(Self {
+            surface,
+            device,
+            queue,
+            config,
+            depth,
+            pipeline,
+            camera_buffer,
+            camera_bind_group,
+            vertex_buffer,
+            index_buffer,
+            index_count,
+        })
+    }
+
+    fn resize(&mut self, size: PhysicalSize<u32>) {
+        if size.width == 0 || size.height == 0 {
+            return;
+        }
+
+        self.config.width = size.width;
+        self.config.height = size.height;
+        self.surface.configure(&self.device, &self.config);
+        self.depth = DepthTarget::new(&self.device, &self.config);
+    }
+
+    fn update_camera(&self, uniform: CameraUniform) {
+        self.queue
+            .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&uniform));
+    }
+
+    fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
+        let frame = self.surface.get_current_texture()?;
+        let view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("terrain-render-encoder"),
+            });
+
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("terrain-render-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(BACKGROUND),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth.view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &self.camera_bind_group, &[]);
+            pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+            pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..self.index_count, 0, 0..1);
+        }
+
+        self.queue.submit([encoder.finish()]);
+        frame.present();
+        Ok(())
+    }
+}
+
+struct DepthTarget {
+    view: wgpu::TextureView,
+}
+
+impl DepthTarget {
+    fn new(device: &wgpu::Device, config: &wgpu::SurfaceConfiguration) -> Self {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("depth-texture"),
+            size: wgpu::Extent3d {
+                width: config.width,
+                height: config.height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: DEPTH_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        Self { view }
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct CameraUniform {
+    view_projection: [[f32; 4]; 4],
 }
 
 struct Camera {
@@ -218,7 +612,6 @@ struct Camera {
     yaw: f32,
     pitch: f32,
     distance: f32,
-    last_mouse: Option<(f32, f32)>,
 }
 
 impl Camera {
@@ -226,75 +619,72 @@ impl Camera {
         let size = bounds.size();
         let planar_size = size[0].max(size[2]).max(1.0);
         let mut target = bounds.center();
-        target[1] += size[1] * 0.15;
+        target[1] += size[1] * 0.08;
 
         Self {
             target,
             yaw: 0.75,
-            pitch: 0.65,
-            distance: planar_size * 1.35,
-            last_mouse: None,
+            pitch: 0.68,
+            distance: planar_size * 0.95,
         }
     }
 
-    fn update(&mut self, window: &Window) -> bool {
+    fn update(&mut self, input: &mut InputState) -> bool {
         let previous_target = self.target;
         let previous_yaw = self.yaw;
         let previous_pitch = self.pitch;
         let previous_distance = self.distance;
         let turn_step = 0.035;
-        let zoom_step = self.distance * 0.035;
         let pan_step = self.distance * 0.012;
 
-        if window.is_key_down(Key::Left) {
+        if input.key_down(KeyCode::ArrowLeft) {
             self.yaw -= turn_step;
         }
-        if window.is_key_down(Key::Right) {
+        if input.key_down(KeyCode::ArrowRight) {
             self.yaw += turn_step;
         }
-        if window.is_key_down(Key::Up) {
+        if input.key_down(KeyCode::ArrowUp) {
             self.pitch += turn_step;
         }
-        if window.is_key_down(Key::Down) {
+        if input.key_down(KeyCode::ArrowDown) {
             self.pitch -= turn_step;
         }
-        if window.is_key_down(Key::Q) {
-            self.distance += zoom_step;
+        if input.key_down(KeyCode::KeyQ) {
+            self.distance *= 1.035;
         }
-        if window.is_key_down(Key::E) {
-            self.distance = (self.distance - zoom_step).max(20.0);
+        if input.key_down(KeyCode::KeyE) {
+            self.distance *= 0.965;
+        }
+
+        let scroll = input.take_scroll();
+        if scroll.abs() > f32::EPSILON {
+            self.distance *= (1.0 - scroll * 0.12).clamp(0.35, 1.65);
+        }
+
+        let mouse_delta = input.take_mouse_delta();
+        if input.left_mouse_down() {
+            self.yaw += mouse_delta.0 * 0.006;
+            self.pitch += mouse_delta.1 * 0.006;
         }
 
         let basis = self.basis();
-        if window.is_key_down(Key::W) {
+        if input.key_down(KeyCode::KeyW) {
             self.target = add(
                 self.target,
                 scale(horizontal_forward(basis.forward), pan_step),
             );
         }
-        if window.is_key_down(Key::S) {
+        if input.key_down(KeyCode::KeyS) {
             self.target = sub(
                 self.target,
                 scale(horizontal_forward(basis.forward), pan_step),
             );
         }
-        if window.is_key_down(Key::A) {
+        if input.key_down(KeyCode::KeyA) {
             self.target = sub(self.target, scale(basis.right, pan_step));
         }
-        if window.is_key_down(Key::D) {
+        if input.key_down(KeyCode::KeyD) {
             self.target = add(self.target, scale(basis.right, pan_step));
-        }
-
-        if window.get_mouse_down(MouseButton::Left) {
-            if let Some(position) = window.get_mouse_pos(MouseMode::Clamp) {
-                if let Some(last) = self.last_mouse {
-                    self.yaw += (position.0 - last.0) * 0.006;
-                    self.pitch += (position.1 - last.1) * 0.006;
-                }
-                self.last_mouse = Some(position);
-            }
-        } else {
-            self.last_mouse = None;
         }
 
         self.pitch = self.pitch.clamp(0.12, 1.42);
@@ -306,6 +696,21 @@ impl Camera {
             || (self.distance - previous_distance).abs() > f32::EPSILON
     }
 
+    fn uniform(&self, size: PhysicalSize<u32>) -> CameraUniform {
+        let aspect = size.width.max(1) as f32 / size.height.max(1) as f32;
+        CameraUniform {
+            view_projection: mat4_mul(
+                perspective(55.0_f32.to_radians(), aspect, 1.0, 6000.0),
+                self.view_matrix(),
+            ),
+        }
+    }
+
+    fn view_matrix(&self) -> [[f32; 4]; 4] {
+        let basis = self.basis();
+        look_at(basis.position, self.target, [0.0, 1.0, 0.0])
+    }
+
     fn basis(&self) -> CameraBasis {
         let offset = [
             self.yaw.sin() * self.pitch.cos() * self.distance,
@@ -315,13 +720,11 @@ impl Camera {
         let position = add(self.target, offset);
         let forward = normalize(sub(self.target, position));
         let right = normalize(cross(forward, [0.0, 1.0, 0.0]));
-        let up = cross(right, forward);
 
         CameraBasis {
             position,
             forward,
             right,
-            up,
         }
     }
 }
@@ -331,253 +734,77 @@ struct CameraBasis {
     position: [f32; 3],
     forward: [f32; 3],
     right: [f32; 3],
-    up: [f32; 3],
 }
 
-#[derive(Clone, Copy)]
-struct ScreenPoint {
-    x: i32,
-    y: i32,
+#[derive(Default)]
+struct InputState {
+    keys: BTreeSet<KeyCode>,
+    left_mouse: bool,
+    last_cursor: Option<(f32, f32)>,
+    mouse_delta: (f32, f32),
+    scroll: f32,
 }
 
-fn sampled_wireframe_lines(indices: &[u32]) -> Vec<[u32; 2]> {
-    let mut seen = HashSet::new();
-    let mut lines = Vec::new();
-
-    for triangle in indices.chunks_exact(3) {
-        add_edge(triangle[0], triangle[1], &mut seen, &mut lines);
-        add_edge(triangle[1], triangle[2], &mut seen, &mut lines);
-        add_edge(triangle[2], triangle[0], &mut seen, &mut lines);
-    }
-
-    let stride = (lines.len() / MAX_WIREFRAME_LINES).max(1);
-    lines.into_iter().step_by(stride).collect()
-}
-
-fn add_edge(a: u32, b: u32, seen: &mut HashSet<(u32, u32)>, lines: &mut Vec<[u32; 2]>) {
-    let edge = if a < b { (a, b) } else { (b, a) };
-    if seen.insert(edge) {
-        lines.push([edge.0, edge.1]);
-    }
-}
-
-fn draw_preview(
-    preview: &PreviewMesh,
-    camera: &Camera,
-    buffer: &mut [u32],
-    width: usize,
-    height: usize,
-) {
-    buffer.fill(BACKGROUND);
-    let basis = camera.basis();
-
-    for line in &preview.lines {
-        let Some(a) = preview.vertices.get(line[0] as usize) else {
-            continue;
-        };
-        let Some(b) = preview.vertices.get(line[1] as usize) else {
-            continue;
-        };
-        let Some(start) = project(a.position, basis, width, height) else {
-            continue;
-        };
-        let Some(end) = project(b.position, basis, width, height) else {
-            continue;
-        };
-        let Some((start, end)) = clip_line_to_viewport(start, end, width, height) else {
-            continue;
-        };
-        let color = line_color(preview, a, b);
-        draw_line(buffer, width, height, start, end, color);
-    }
-}
-
-fn line_color(preview: &PreviewMesh, a: &TerrainVertex, b: &TerrainVertex) -> u32 {
-    let height = (a.position[1] + b.position[1]) * 0.5;
-    let Some(color) = line_material_color(preview, a, b) else {
-        return height_color(height, preview.bounds);
-    };
-    let range = (preview.bounds.max[1] - preview.bounds.min[1]).max(1.0);
-    let t = ((height - preview.bounds.min[1]) / range).clamp(0.0, 1.0);
-
-    scale_color(color, 0.72 + t * 0.28)
-}
-
-fn line_material_color(preview: &PreviewMesh, a: &TerrainVertex, b: &TerrainVertex) -> Option<u32> {
-    match (
-        vertex_material_color(preview, a),
-        vertex_material_color(preview, b),
-    ) {
-        (Some(a), Some(b)) if a != b => Some(mix_color(a, b, 0.5)),
-        (Some(color), _) | (_, Some(color)) => Some(color),
-        (None, None) => None,
-    }
-}
-
-fn vertex_material_color(preview: &PreviewMesh, vertex: &TerrainVertex) -> Option<u32> {
-    let material_id = usize::try_from(vertex.material_id?).ok()?;
-    *preview.material_colors.get(material_id)?
-}
-
-fn clip_line_to_viewport(
-    start: ScreenPoint,
-    end: ScreenPoint,
-    width: usize,
-    height: usize,
-) -> Option<(ScreenPoint, ScreenPoint)> {
-    let x_min = 0.0;
-    let y_min = 0.0;
-    let x_max = width.saturating_sub(1) as f32;
-    let y_max = height.saturating_sub(1) as f32;
-    let mut x0 = start.x as f32;
-    let mut y0 = start.y as f32;
-    let mut x1 = end.x as f32;
-    let mut y1 = end.y as f32;
-
-    loop {
-        let code0 = viewport_out_code(x0, y0, x_max, y_max);
-        let code1 = viewport_out_code(x1, y1, x_max, y_max);
-
-        if code0 | code1 == 0 {
-            return Some((
-                ScreenPoint {
-                    x: x0.round() as i32,
-                    y: y0.round() as i32,
-                },
-                ScreenPoint {
-                    x: x1.round() as i32,
-                    y: y1.round() as i32,
-                },
-            ));
-        }
-        if code0 & code1 != 0 {
-            return None;
-        }
-
-        let code = if code0 != 0 { code0 } else { code1 };
-        let (x, y) = if code & OUT_TOP != 0 {
-            if (y1 - y0).abs() <= f32::EPSILON {
-                return None;
+impl InputState {
+    fn set_key(&mut self, code: KeyCode, state: ElementState) {
+        match state {
+            ElementState::Pressed => {
+                self.keys.insert(code);
             }
-            (x0 + (x1 - x0) * (y_min - y0) / (y1 - y0), y_min)
-        } else if code & OUT_BOTTOM != 0 {
-            if (y1 - y0).abs() <= f32::EPSILON {
-                return None;
+            ElementState::Released => {
+                self.keys.remove(&code);
             }
-            (x0 + (x1 - x0) * (y_max - y0) / (y1 - y0), y_max)
-        } else if code & OUT_RIGHT != 0 {
-            if (x1 - x0).abs() <= f32::EPSILON {
-                return None;
-            }
-            (x_max, y0 + (y1 - y0) * (x_max - x0) / (x1 - x0))
-        } else {
-            if (x1 - x0).abs() <= f32::EPSILON {
-                return None;
-            }
-            (x_min, y0 + (y1 - y0) * (x_min - x0) / (x1 - x0))
+        }
+    }
+
+    fn set_mouse_button(&mut self, button: MouseButton, state: ElementState) {
+        if button != MouseButton::Left {
+            return;
+        }
+
+        self.left_mouse = state == ElementState::Pressed;
+        if !self.left_mouse {
+            self.last_cursor = None;
+            self.mouse_delta = (0.0, 0.0);
+        }
+    }
+
+    fn set_cursor_position(&mut self, x: f32, y: f32) {
+        if self.left_mouse
+            && let Some((last_x, last_y)) = self.last_cursor
+        {
+            self.mouse_delta.0 += x - last_x;
+            self.mouse_delta.1 += y - last_y;
+        }
+        self.last_cursor = Some((x, y));
+    }
+
+    fn add_scroll(&mut self, delta: MouseScrollDelta) {
+        self.scroll += match delta {
+            MouseScrollDelta::LineDelta(_, y) => y,
+            MouseScrollDelta::PixelDelta(position) => position.y as f32 / 80.0,
         };
-
-        if code == code0 {
-            x0 = x;
-            y0 = y;
-        } else {
-            x1 = x;
-            y1 = y;
-        }
-    }
-}
-
-const OUT_LEFT: u8 = 0b0001;
-const OUT_RIGHT: u8 = 0b0010;
-const OUT_TOP: u8 = 0b0100;
-const OUT_BOTTOM: u8 = 0b1000;
-
-fn viewport_out_code(x: f32, y: f32, x_max: f32, y_max: f32) -> u8 {
-    let mut code = 0;
-    if x < 0.0 {
-        code |= OUT_LEFT;
-    } else if x > x_max {
-        code |= OUT_RIGHT;
-    }
-    if y < 0.0 {
-        code |= OUT_TOP;
-    } else if y > y_max {
-        code |= OUT_BOTTOM;
-    }
-    code
-}
-
-fn project(
-    point: [f32; 3],
-    basis: CameraBasis,
-    width: usize,
-    height: usize,
-) -> Option<ScreenPoint> {
-    let relative = sub(point, basis.position);
-    let depth = dot(relative, basis.forward);
-    if depth <= 1.0 {
-        return None;
     }
 
-    let focal = height as f32 * 0.9;
-    let x = dot(relative, basis.right);
-    let y = dot(relative, basis.up);
-    let screen_x = width as f32 * 0.5 + (x / depth) * focal;
-    let screen_y = height as f32 * 0.52 - (y / depth) * focal;
-
-    Some(ScreenPoint {
-        x: screen_x.round() as i32,
-        y: screen_y.round() as i32,
-    })
-}
-
-fn draw_line(
-    buffer: &mut [u32],
-    width: usize,
-    height: usize,
-    start: ScreenPoint,
-    end: ScreenPoint,
-    color: u32,
-) {
-    let mut x0 = start.x;
-    let mut y0 = start.y;
-    let x1 = end.x;
-    let y1 = end.y;
-    let dx = (x1 - x0).abs();
-    let sx = if x0 < x1 { 1 } else { -1 };
-    let dy = -(y1 - y0).abs();
-    let sy = if y0 < y1 { 1 } else { -1 };
-    let mut error = dx + dy;
-
-    loop {
-        put_pixel(buffer, width, height, x0, y0, color);
-        if x0 == x1 && y0 == y1 {
-            break;
-        }
-        let e2 = error * 2;
-        if e2 >= dy {
-            error += dy;
-            x0 += sx;
-        }
-        if e2 <= dx {
-            error += dx;
-            y0 += sy;
-        }
-    }
-}
-
-fn put_pixel(buffer: &mut [u32], width: usize, height: usize, x: i32, y: i32, color: u32) {
-    if x < 0 || y < 0 {
-        return;
+    fn key_down(&self, code: KeyCode) -> bool {
+        self.keys.contains(&code)
     }
 
-    let x = x as usize;
-    let y = y as usize;
-    if x >= width || y >= height {
-        return;
+    fn left_mouse_down(&self) -> bool {
+        self.left_mouse
     }
 
-    buffer[y * width + x] = color;
+    fn take_mouse_delta(&mut self) -> (f32, f32) {
+        let delta = self.mouse_delta;
+        self.mouse_delta = (0.0, 0.0);
+        delta
+    }
+
+    fn take_scroll(&mut self) -> f32 {
+        let scroll = self.scroll;
+        self.scroll = 0.0;
+        scroll
+    }
 }
 
 fn height_color(height: f32, bounds: TerrainBounds) -> u32 {
@@ -605,13 +832,40 @@ fn mix_color(a: u32, b: u32, t: f32) -> u32 {
     ((r as u32) << 16) | ((g as u32) << 8) | b as u32
 }
 
-fn scale_color(color: u32, factor: f32) -> u32 {
-    let factor = factor.max(0.0);
-    let red = (((color >> 16) & 0xff) as f32 * factor).min(255.0);
-    let green = (((color >> 8) & 0xff) as f32 * factor).min(255.0);
-    let blue = ((color & 0xff) as f32 * factor).min(255.0);
+fn mat4_mul(a: [[f32; 4]; 4], b: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
+    let mut out = [[0.0; 4]; 4];
+    for column in 0..4 {
+        for row in 0..4 {
+            out[column][row] = a[0][row] * b[column][0]
+                + a[1][row] * b[column][1]
+                + a[2][row] * b[column][2]
+                + a[3][row] * b[column][3];
+        }
+    }
+    out
+}
 
-    ((red as u32) << 16) | ((green as u32) << 8) | blue as u32
+fn perspective(fovy: f32, aspect: f32, near: f32, far: f32) -> [[f32; 4]; 4] {
+    let f = 1.0 / (fovy * 0.5).tan();
+    [
+        [f / aspect, 0.0, 0.0, 0.0],
+        [0.0, f, 0.0, 0.0],
+        [0.0, 0.0, far / (near - far), -1.0],
+        [0.0, 0.0, near * far / (near - far), 0.0],
+    ]
+}
+
+fn look_at(eye: [f32; 3], target: [f32; 3], up: [f32; 3]) -> [[f32; 4]; 4] {
+    let forward = normalize(sub(target, eye));
+    let right = normalize(cross(forward, up));
+    let up = cross(right, forward);
+
+    [
+        [right[0], up[0], -forward[0], 0.0],
+        [right[1], up[1], -forward[1], 0.0],
+        [right[2], up[2], -forward[2], 0.0],
+        [-dot(right, eye), -dot(up, eye), dot(forward, eye), 1.0],
+    ]
 }
 
 fn horizontal_forward(forward: [f32; 3]) -> [f32; 3] {
@@ -651,6 +905,43 @@ fn normalize(value: [f32; 3]) -> [f32; 3] {
     }
 }
 
+const TERRAIN_SHADER: &str = r#"
+struct Camera {
+    view_projection: mat4x4<f32>,
+};
+
+@group(0) @binding(0)
+var<uniform> camera: Camera;
+
+struct VertexInput {
+    @location(0) position: vec3<f32>,
+    @location(1) normal: vec3<f32>,
+    @location(2) color: vec3<f32>,
+};
+
+struct VertexOutput {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) normal: vec3<f32>,
+    @location(1) color: vec3<f32>,
+};
+
+@vertex
+fn vs_main(input: VertexInput) -> VertexOutput {
+    var output: VertexOutput;
+    output.clip_position = camera.view_projection * vec4<f32>(input.position, 1.0);
+    output.normal = input.normal;
+    output.color = input.color;
+    return output;
+}
+
+@fragment
+fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+    let light = normalize(vec3<f32>(0.35, 0.88, 0.32));
+    let shade = 0.58 + max(dot(normalize(input.normal), light), 0.0) * 0.42;
+    return vec4<f32>(input.color * shade, 1.0);
+}
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -683,5 +974,24 @@ mod tests {
         };
 
         assert_eq!(average_image_color(&image), Some(0xc86432));
+    }
+
+    #[test]
+    fn uses_material_color_for_gpu_vertices() {
+        let vertex = TerrainVertex {
+            position: [0.0, 4.0, 0.0],
+            normal: [0.0, 1.0, 0.0],
+            material_id: Some(0),
+        };
+        let color = vertex_color(
+            &vertex,
+            &[Some(0x804020)],
+            TerrainBounds {
+                min: [0.0, 0.0, 0.0],
+                max: [0.0, 10.0, 0.0],
+            },
+        );
+
+        assert_eq!(color, [128.0 / 255.0, 64.0 / 255.0, 32.0 / 255.0]);
     }
 }

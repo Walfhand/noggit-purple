@@ -12,8 +12,8 @@ format reference until Rust tests supersede a feature.
 - `noggit-stormlib`: minimal safe Rust wrapper around StormLib for MPQ reads.
 - `noggit-formats`: binary format parsing and serialization.
 - `noggit-core`: editor domain model and mutation logic.
-- `noggit-render`: future `wgpu` renderer.
-- `noggit-ui`: desktop preview UI.
+- `noggit-render`: renderer-facing mesh preparation.
+- `noggit-ui`: desktop `wgpu` preview UI.
 - `noggit-scripting`: future Lua API.
 - `noggit-cli`: validation/debug commands.
 
@@ -76,8 +76,9 @@ Implemented:
   terrain chunks, assets, and placements.
 - Renderer terrain mesh extraction from loaded ADT `MCVT` chunks, including
   base terrain texture material ids from `MCLY`.
-- Desktop terrain preview window through `noggit-ui`, currently software
-  wireframe with optional BLP-derived terrain material colors.
+- Desktop terrain preview window through `noggit-ui`, using `winit`/`wgpu` for
+  filled terrain triangles, depth buffering, camera controls, and optional
+  BLP-derived terrain material colors.
 - `noggit-cli` commands: `inspect-dbc`, `inspect-adt`, `inspect-map`,
   `inspect-client`, `inspect-blp`, `check-map-assets`, `check-map-textures`.
 - `inspect-adt` summary for versions, asset tables, placements, terrain chunks,
@@ -93,16 +94,17 @@ Implemented:
   assets.
 - `cargo run -p noggit-ui -- /home/walfhand/Documents/wow-maps/guerilla --client /home/walfhand/Documents/Ultimate\ WotLK --extra-mpq /home/walfhand/Documents/wow-maps/patch-guerilla.MPQ`
   opens the current terrain preview and resolves the base terrain texture
-  colors from the WoW client/extra MPQ. The preview is still wireframe; real
-  texture sampling requires the GPU renderer.
+  colors from the WoW client/extra MPQ. The preview now renders filled terrain
+  on the GPU, but still uses average material colors rather than sampled BLP
+  textures and `MCAL` alpha blending.
 - `cargo run -p noggit-cli -- check-map-textures /home/walfhand/Documents/wow-maps/guerilla /home/walfhand/Documents/Ultimate\ WotLK /home/walfhand/Documents/wow-maps/patch-guerilla.MPQ`
   currently decodes all 12 terrain textures referenced by Guerilla.
 
 Next:
 
 - MPQ/local asset decoding for M2 and WMO through `noggit-formats`.
-- `wgpu` terrain rendering with UVs, BLP texture sampling, `MCLY` layers, and
-  `MCAL` alpha blending.
+- GPU terrain UVs, BLP texture sampling, `MCLY` layers, and `MCAL` alpha
+  blending.
 - Renderer-facing M2 and WMO placement loading.
 - Terrain editing mutations and byte-preserving save paths.
 - Real golden samples once stable fixtures are available.

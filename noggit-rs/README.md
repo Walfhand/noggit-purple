@@ -12,8 +12,8 @@ renderer, or UI.
 - `noggit-stormlib`: safe read-only Rust wrapper around StormLib for WotLK MPQs.
 - `noggit-formats`: WoW binary formats such as DBC, ADT, WDT, WMO, M2, and BLP.
 - `noggit-core`: editor domain model and mutation logic.
-- `noggit-render`: `wgpu` renderer.
-- `noggit-ui`: desktop UI.
+- `noggit-render`: renderer-facing mesh preparation.
+- `noggit-ui`: desktop `wgpu` UI.
 - `noggit-scripting`: Lua scripting API.
 - `noggit-cli`: validation and debugging tools.
 
@@ -63,8 +63,9 @@ chain.
 `inspect-blp` and `check-map-textures` validate BLP texture decoding. The
 current decoder supports paletted BLPs plus DXT1, DXT3, and DXT5 mipmaps.
 
-`noggit-ui` opens the first graphical preview: a software wireframe view of the
-loaded ADT terrain heights. With `--client`, it reads BLP assets from the WoW
-client/extra MPQs and colors terrain lines from the decoded base chunk
-textures. This is still a terrain-only preview; true texture sampling, M2
-doodads, and WMO rendering are next.
+`noggit-ui` opens the first graphical preview: a GPU-rendered terrain view with
+filled ADT triangles, depth buffering, and camera controls. With `--client`, it
+reads BLP assets from the WoW client/extra MPQs and colors the terrain from the
+decoded base chunk textures. This is still a terrain-only preview; true BLP
+texture sampling, `MCLY`/`MCAL` layer blending, M2 doodads, and WMO rendering
+are next.

@@ -5,6 +5,7 @@
 /out/
 /install/
 /package/
+target/
 
 # CMake generated files
 /CMakeFiles/

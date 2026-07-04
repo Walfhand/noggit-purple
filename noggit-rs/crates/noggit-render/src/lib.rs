@@ -32,6 +32,8 @@ pub struct TerrainVertex {
     pub position: [f32; 3],
     /// Decoded terrain normal.
     pub normal: [f32; 3],
+    /// Terrain texture coordinate in WoW chunk detail-map space.
+    pub tex_coord: [f32; 2],
     /// Index into [`TerrainMesh::materials`] for the base texture on this vertex.
     pub material_id: Option<u32>,
 }
@@ -204,6 +206,7 @@ fn append_chunk_mesh(
                 chunk.base_height + chunk.heights[height_index],
                 chunk_origin_z + (row as f32 * 0.5) * step,
             ];
+            let tex_coord = [column as f32 + offset, row as f32 * 0.5];
             let normal = chunk
                 .normals
                 .get(height_index)
@@ -214,6 +217,7 @@ fn append_chunk_mesh(
             vertices.push(TerrainVertex {
                 position,
                 normal,
+                tex_coord,
                 material_id,
             });
             *lookup_cell = Some(
@@ -319,11 +323,14 @@ mod tests {
         assert_eq!(mesh.indices().len(), 8 * 8 * 4 * 3);
         assert_eq!(mesh.materials(), &["tiles/rock.blp".to_owned()]);
         assert_eq!(mesh.vertices()[0].position, [0.0, 10.0, 0.0]);
+        assert_eq!(mesh.vertices()[0].tex_coord, [0.0, 0.0]);
+        assert_eq!(mesh.vertices()[9].tex_coord, [0.5, 0.5]);
         assert_eq!(mesh.vertices()[0].material_id, Some(0));
         assert_eq!(
             mesh.vertices()[144].position,
             [CHUNK_SIZE, 154.0, CHUNK_SIZE]
         );
+        assert_eq!(mesh.vertices()[144].tex_coord, [8.0, 8.0]);
         assert_eq!(
             mesh.bounds(),
             Some(TerrainBounds {

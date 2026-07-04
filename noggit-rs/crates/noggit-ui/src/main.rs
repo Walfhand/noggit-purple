@@ -43,8 +43,10 @@ fn run() -> Result<(), String> {
     let world =
         WorldMap::load_from_local_directory(&options.map_path).map_err(|err| err.to_string())?;
     let mesh = build_terrain_mesh(&world).map_err(|err| err.to_string())?;
-    let material_colors = load_material_colors(mesh.materials(), &options)?;
-    let gpu_mesh = GpuMesh::from_terrain_mesh(mesh, &material_colors)?;
+    let mut material_images = load_material_images(mesh.materials(), &options)?;
+    let fallback_material_id = material_images.len();
+    material_images.push(missing_material_image());
+    let gpu_mesh = GpuMesh::from_terrain_mesh(mesh, fallback_material_id)?;
     let mut camera = Camera::new(gpu_mesh.bounds);
 
     let event_loop =
@@ -61,6 +63,7 @@ fn run() -> Result<(), String> {
     let mut gpu = pollster::block_on(GpuState::new(
         window,
         &gpu_mesh,
+        &material_images,
         camera.uniform(window.inner_size()),
     ))?;
     let mut input = InputState::default();
@@ -171,12 +174,17 @@ impl PreviewOptions {
     }
 }
 
-fn load_material_colors(
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MaterialImage {
+    image: RgbaImage,
+}
+
+fn load_material_images(
     materials: &[String],
     options: &PreviewOptions,
-) -> Result<Vec<Option<u32>>, String> {
+) -> Result<Vec<MaterialImage>, String> {
     let Some(client_path) = &options.client_path else {
-        return Ok(vec![None; materials.len()]);
+        return Ok(vec![missing_material_image(); materials.len()]);
     };
 
     let client = WowClient::open_with_config(
@@ -188,51 +196,49 @@ fn load_material_colors(
     )
     .map_err(|err| format!("failed to open WoW client {}: {err}", client_path.display()))?;
 
-    let colors = materials
+    let mut resolved = 0usize;
+    let images = materials
         .iter()
-        .map(|material| load_material_color(&client, material))
+        .map(|material| match load_material_image(&client, material) {
+            Some(image) => {
+                resolved += 1;
+                image
+            }
+            None => missing_material_image(),
+        })
         .collect::<Vec<_>>();
-    let resolved = colors.iter().filter(|color| color.is_some()).count();
-    eprintln!(
-        "terrain texture colors resolved: {resolved}/{}",
-        materials.len()
-    );
+    eprintln!("terrain textures loaded: {resolved}/{}", materials.len());
 
-    Ok(colors)
+    Ok(images)
 }
 
-fn load_material_color(client: &WowClient, material: &str) -> Option<u32> {
+fn load_material_image(client: &WowClient, material: &str) -> Option<MaterialImage> {
     let path = VfsPath::new(material).ok()?;
     let bytes = client.read_file(&path).ok()?;
     let blp = BlpFile::parse(&bytes).ok()?;
     let image = blp.decode_rgba_mipmap(0).ok()?;
-    average_image_color(&image)
+    Some(MaterialImage { image })
 }
 
-fn average_image_color(image: &RgbaImage) -> Option<u32> {
-    let mut red = 0_u64;
-    let mut green = 0_u64;
-    let mut blue = 0_u64;
-    let mut weight = 0_u64;
-
-    for pixel in image.pixels.chunks_exact(4) {
-        let alpha = u64::from(pixel[3]);
-        if alpha == 0 {
-            continue;
+fn missing_material_image() -> MaterialImage {
+    let mut pixels = Vec::with_capacity(4 * 4 * 4);
+    for y in 0..4 {
+        for x in 0..4 {
+            if (x + y) % 2 == 0 {
+                pixels.extend_from_slice(&[180, 24, 180, 255]);
+            } else {
+                pixels.extend_from_slice(&[24, 24, 24, 255]);
+            }
         }
-        red += u64::from(pixel[0]) * alpha;
-        green += u64::from(pixel[1]) * alpha;
-        blue += u64::from(pixel[2]) * alpha;
-        weight += alpha;
     }
 
-    if weight == 0 {
-        return None;
+    MaterialImage {
+        image: RgbaImage {
+            width: 4,
+            height: 4,
+            pixels,
+        },
     }
-
-    Some(
-        (((red / weight) as u32) << 16) | (((green / weight) as u32) << 8) | (blue / weight) as u32,
-    )
 }
 
 #[repr(C)]
@@ -240,7 +246,7 @@ fn average_image_color(image: &RgbaImage) -> Option<u32> {
 struct GpuVertex {
     position: [f32; 3],
     normal: [f32; 3],
-    color: [f32; 3],
+    tex_coord: [f32; 2],
 }
 
 impl GpuVertex {
@@ -262,7 +268,7 @@ impl GpuVertex {
                 wgpu::VertexAttribute {
                     offset: (std::mem::size_of::<[f32; 3]>() * 2) as wgpu::BufferAddress,
                     shader_location: 2,
-                    format: wgpu::VertexFormat::Float32x3,
+                    format: wgpu::VertexFormat::Float32x2,
                 },
             ],
         }
@@ -270,16 +276,18 @@ impl GpuVertex {
 }
 
 struct GpuMesh {
-    vertices: Vec<GpuVertex>,
-    indices: Vec<u32>,
+    groups: Vec<GpuMeshGroup>,
     bounds: TerrainBounds,
 }
 
+struct GpuMeshGroup {
+    material_id: usize,
+    vertices: Vec<GpuVertex>,
+    indices: Vec<u32>,
+}
+
 impl GpuMesh {
-    fn from_terrain_mesh(
-        mesh: TerrainMesh,
-        material_colors: &[Option<u32>],
-    ) -> Result<Self, String> {
+    fn from_terrain_mesh(mesh: TerrainMesh, fallback_material_id: usize) -> Result<Self, String> {
         let Some(bounds) = mesh.bounds() else {
             return Err("map has no renderable terrain chunks".to_string());
         };
@@ -287,44 +295,60 @@ impl GpuMesh {
             return Err("map has no renderable terrain triangles".to_string());
         }
 
-        let vertices = mesh
-            .vertices()
-            .iter()
-            .map(|vertex| GpuVertex {
-                position: vertex.position,
-                normal: normalize(vertex.normal),
-                color: vertex_color(vertex, material_colors, bounds),
+        let mut groups = (0..=fallback_material_id)
+            .map(|material_id| GpuMeshGroup {
+                material_id,
+                vertices: Vec::new(),
+                indices: Vec::new(),
             })
-            .collect();
+            .collect::<Vec<_>>();
 
-        Ok(Self {
-            vertices,
-            indices: mesh.indices().to_vec(),
-            bounds,
-        })
+        for triangle in mesh.indices().chunks_exact(3) {
+            let a = mesh
+                .vertices()
+                .get(triangle[0] as usize)
+                .ok_or_else(|| "terrain triangle references missing vertex".to_string())?;
+            let b = mesh
+                .vertices()
+                .get(triangle[1] as usize)
+                .ok_or_else(|| "terrain triangle references missing vertex".to_string())?;
+            let c = mesh
+                .vertices()
+                .get(triangle[2] as usize)
+                .ok_or_else(|| "terrain triangle references missing vertex".to_string())?;
+            let material_id = triangle_material_id([a, b, c], fallback_material_id);
+            let group = groups
+                .get_mut(material_id)
+                .ok_or_else(|| "terrain triangle references missing material".to_string())?;
+            let base_index = u32::try_from(group.vertices.len())
+                .map_err(|_| "terrain material group has too many vertices".to_string())?;
+
+            group.vertices.extend([a, b, c].map(gpu_vertex));
+            group
+                .indices
+                .extend_from_slice(&[base_index, base_index + 1, base_index + 2]);
+        }
+
+        groups.retain(|group| !group.indices.is_empty());
+
+        Ok(Self { groups, bounds })
     }
 }
 
-fn vertex_color(
-    vertex: &TerrainVertex,
-    material_colors: &[Option<u32>],
-    bounds: TerrainBounds,
-) -> [f32; 3] {
-    let color = vertex
-        .material_id
-        .and_then(|id| usize::try_from(id).ok())
-        .and_then(|id| material_colors.get(id).copied().flatten())
-        .unwrap_or_else(|| height_color(vertex.position[1], bounds));
-
-    rgb_to_f32(color)
+fn triangle_material_id(vertices: [&TerrainVertex; 3], fallback_material_id: usize) -> usize {
+    vertices
+        .into_iter()
+        .find_map(|vertex| vertex.material_id.and_then(|id| usize::try_from(id).ok()))
+        .filter(|id| *id < fallback_material_id)
+        .unwrap_or(fallback_material_id)
 }
 
-fn rgb_to_f32(color: u32) -> [f32; 3] {
-    [
-        ((color >> 16) & 0xff) as f32 / 255.0,
-        ((color >> 8) & 0xff) as f32 / 255.0,
-        (color & 0xff) as f32 / 255.0,
-    ]
+fn gpu_vertex(vertex: &TerrainVertex) -> GpuVertex {
+    GpuVertex {
+        position: vertex.position,
+        normal: normalize(vertex.normal),
+        tex_coord: [vertex.tex_coord[0] / 8.0, vertex.tex_coord[1] / 8.0],
+    }
 }
 
 struct GpuState<'window> {
@@ -336,6 +360,12 @@ struct GpuState<'window> {
     pipeline: wgpu::RenderPipeline,
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
+    material_bind_groups: Vec<wgpu::BindGroup>,
+    draw_groups: Vec<GpuDrawGroup>,
+}
+
+struct GpuDrawGroup {
+    material_id: usize,
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
     index_count: u32,
@@ -345,6 +375,7 @@ impl<'window> GpuState<'window> {
     async fn new(
         window: &'window Window,
         mesh: &GpuMesh,
+        material_images: &[MaterialImage],
         camera_uniform: CameraUniform,
     ) -> Result<Self, String> {
         let size = window.inner_size();
@@ -436,6 +467,52 @@ impl<'window> GpuState<'window> {
                 resource: camera_buffer.as_entire_binding(),
             }],
         });
+        let material_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("material-bind-group-layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
+        let material_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("terrain-material-sampler"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            address_mode_w: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..wgpu::SamplerDescriptor::default()
+        });
+        let material_bind_groups = material_images
+            .iter()
+            .enumerate()
+            .map(|(index, material)| {
+                create_material_bind_group(
+                    &device,
+                    &queue,
+                    &material_bind_group_layout,
+                    &material_sampler,
+                    index,
+                    material,
+                )
+            })
+            .collect::<Vec<_>>();
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("terrain-shader"),
@@ -443,7 +520,7 @@ impl<'window> GpuState<'window> {
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("terrain-pipeline-layout"),
-            bind_group_layouts: &[&camera_bind_group_layout],
+            bind_group_layouts: &[&camera_bind_group_layout, &material_bind_group_layout],
             push_constant_ranges: &[],
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -484,18 +561,12 @@ impl<'window> GpuState<'window> {
             multisample: wgpu::MultisampleState::default(),
             multiview: None,
         });
-        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("terrain-vertex-buffer"),
-            contents: bytemuck::cast_slice(&mesh.vertices),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("terrain-index-buffer"),
-            contents: bytemuck::cast_slice(&mesh.indices),
-            usage: wgpu::BufferUsages::INDEX,
-        });
-        let index_count = u32::try_from(mesh.indices.len())
-            .map_err(|_| "terrain index buffer exceeds u32 draw range".to_string())?;
+        let draw_groups = mesh
+            .groups
+            .iter()
+            .enumerate()
+            .map(|(index, group)| create_draw_group(&device, index, group))
+            .collect::<Result<Vec<_>, _>>()?;
         let depth = DepthTarget::new(&device, &config);
 
         Ok(Self {
@@ -507,9 +578,8 @@ impl<'window> GpuState<'window> {
             pipeline,
             camera_buffer,
             camera_bind_group,
-            vertex_buffer,
-            index_buffer,
-            index_count,
+            material_bind_groups,
+            draw_groups,
         })
     }
 
@@ -564,15 +634,104 @@ impl<'window> GpuState<'window> {
             });
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.camera_bind_group, &[]);
-            pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-            pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..self.index_count, 0, 0..1);
+            for group in &self.draw_groups {
+                let Some(material) = self.material_bind_groups.get(group.material_id) else {
+                    continue;
+                };
+                pass.set_bind_group(1, material, &[]);
+                pass.set_vertex_buffer(0, group.vertex_buffer.slice(..));
+                pass.set_index_buffer(group.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..group.index_count, 0, 0..1);
+            }
         }
 
         self.queue.submit([encoder.finish()]);
         frame.present();
         Ok(())
     }
+}
+
+fn create_material_bind_group(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    layout: &wgpu::BindGroupLayout,
+    sampler: &wgpu::Sampler,
+    index: usize,
+    material: &MaterialImage,
+) -> wgpu::BindGroup {
+    let image = &material.image;
+    let size = wgpu::Extent3d {
+        width: image.width.max(1),
+        height: image.height.max(1),
+        depth_or_array_layers: 1,
+    };
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(&format!("terrain-material-texture-{index}")),
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        wgpu::ImageCopyTexture {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &image.pixels,
+        wgpu::ImageDataLayout {
+            offset: 0,
+            bytes_per_row: Some(image.width.max(1) * 4),
+            rows_per_image: Some(image.height.max(1)),
+        },
+        size,
+    );
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some(&format!("terrain-material-bind-group-{index}")),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
+        ],
+    })
+}
+
+fn create_draw_group(
+    device: &wgpu::Device,
+    index: usize,
+    group: &GpuMeshGroup,
+) -> Result<GpuDrawGroup, String> {
+    let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some(&format!("terrain-vertex-buffer-{index}")),
+        contents: bytemuck::cast_slice(&group.vertices),
+        usage: wgpu::BufferUsages::VERTEX,
+    });
+    let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some(&format!("terrain-index-buffer-{index}")),
+        contents: bytemuck::cast_slice(&group.indices),
+        usage: wgpu::BufferUsages::INDEX,
+    });
+    let index_count = u32::try_from(group.indices.len())
+        .map_err(|_| "terrain index buffer exceeds u32 draw range".to_string())?;
+
+    Ok(GpuDrawGroup {
+        material_id: group.material_id,
+        vertex_buffer,
+        index_buffer,
+        index_count,
+    })
 }
 
 struct DepthTarget {
@@ -807,31 +966,6 @@ impl InputState {
     }
 }
 
-fn height_color(height: f32, bounds: TerrainBounds) -> u32 {
-    let range = (bounds.max[1] - bounds.min[1]).max(1.0);
-    let t = ((height - bounds.min[1]) / range).clamp(0.0, 1.0);
-
-    if t < 0.42 {
-        mix_color(0x365f47, 0x8a7a45, t / 0.42)
-    } else {
-        mix_color(0x8a7a45, 0xd2d5c8, (t - 0.42) / 0.58)
-    }
-}
-
-fn mix_color(a: u32, b: u32, t: f32) -> u32 {
-    let ar = ((a >> 16) & 0xff) as f32;
-    let ag = ((a >> 8) & 0xff) as f32;
-    let ab = (a & 0xff) as f32;
-    let br = ((b >> 16) & 0xff) as f32;
-    let bg = ((b >> 8) & 0xff) as f32;
-    let bb = (b & 0xff) as f32;
-    let r = ar + (br - ar) * t;
-    let g = ag + (bg - ag) * t;
-    let b = ab + (bb - ab) * t;
-
-    ((r as u32) << 16) | ((g as u32) << 8) | b as u32
-}
-
 fn mat4_mul(a: [[f32; 4]; 4], b: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
     let mut out = [[0.0; 4]; 4];
     for column in 0..4 {
@@ -913,16 +1047,22 @@ struct Camera {
 @group(0) @binding(0)
 var<uniform> camera: Camera;
 
+@group(1) @binding(0)
+var terrain_texture: texture_2d<f32>;
+
+@group(1) @binding(1)
+var terrain_sampler: sampler;
+
 struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
-    @location(2) color: vec3<f32>,
+    @location(2) tex_coord: vec2<f32>,
 };
 
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) normal: vec3<f32>,
-    @location(1) color: vec3<f32>,
+    @location(1) tex_coord: vec2<f32>,
 };
 
 @vertex
@@ -930,7 +1070,7 @@ fn vs_main(input: VertexInput) -> VertexOutput {
     var output: VertexOutput;
     output.clip_position = camera.view_projection * vec4<f32>(input.position, 1.0);
     output.normal = input.normal;
-    output.color = input.color;
+    output.tex_coord = input.tex_coord;
     return output;
 }
 
@@ -938,7 +1078,8 @@ fn vs_main(input: VertexInput) -> VertexOutput {
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let light = normalize(vec3<f32>(0.35, 0.88, 0.32));
     let shade = 0.58 + max(dot(normalize(input.normal), light), 0.0) * 0.42;
-    return vec4<f32>(input.color * shade, 1.0);
+    let tex_color = textureSample(terrain_texture, terrain_sampler, input.tex_coord).rgb;
+    return vec4<f32>(tex_color * shade, 1.0);
 }
 "#;
 
@@ -966,32 +1107,25 @@ mod tests {
     }
 
     #[test]
-    fn averages_rgba_color_with_alpha_weighting() {
-        let image = RgbaImage {
-            width: 2,
-            height: 1,
-            pixels: vec![200, 100, 50, 255, 10, 10, 10, 0],
-        };
+    fn builds_checkerboard_missing_material_texture() {
+        let material = missing_material_image();
 
-        assert_eq!(average_image_color(&image), Some(0xc86432));
+        assert_eq!(material.image.width, 4);
+        assert_eq!(material.image.height, 4);
+        assert_eq!(&material.image.pixels[0..4], &[180, 24, 180, 255]);
+        assert_eq!(&material.image.pixels[4..8], &[24, 24, 24, 255]);
     }
 
     #[test]
-    fn uses_material_color_for_gpu_vertices() {
+    fn normalizes_chunk_detail_uv_for_gpu_vertices() {
         let vertex = TerrainVertex {
             position: [0.0, 4.0, 0.0],
             normal: [0.0, 1.0, 0.0],
+            tex_coord: [4.0, 8.0],
             material_id: Some(0),
         };
-        let color = vertex_color(
-            &vertex,
-            &[Some(0x804020)],
-            TerrainBounds {
-                min: [0.0, 0.0, 0.0],
-                max: [0.0, 10.0, 0.0],
-            },
-        );
+        let gpu_vertex = gpu_vertex(&vertex);
 
-        assert_eq!(color, [128.0 / 255.0, 64.0 / 255.0, 32.0 / 255.0]);
+        assert_eq!(gpu_vertex.tex_coord, [0.5, 1.0]);
     }
 }

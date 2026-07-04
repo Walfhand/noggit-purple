@@ -75,10 +75,10 @@ Implemented:
 - Core world-map model that loads local map directories into sorted ADT tiles,
   terrain chunks, assets, and placements.
 - Renderer terrain mesh extraction from loaded ADT `MCVT` chunks, including
-  base terrain texture material ids from `MCLY`.
+  base terrain texture material ids from `MCLY` and chunk detail-map UVs.
 - Desktop terrain preview window through `noggit-ui`, using `winit`/`wgpu` for
-  filled terrain triangles, depth buffering, camera controls, and optional
-  BLP-derived terrain material colors.
+  filled terrain triangles, depth buffering, camera controls, and base BLP
+  texture sampling.
 - `noggit-cli` commands: `inspect-dbc`, `inspect-adt`, `inspect-map`,
   `inspect-client`, `inspect-blp`, `check-map-assets`, `check-map-textures`.
 - `inspect-adt` summary for versions, asset tables, placements, terrain chunks,
@@ -93,18 +93,16 @@ Implemented:
   StormLib backend, the Guerilla asset check currently resolves all 85 referenced
   assets.
 - `cargo run -p noggit-ui -- /home/walfhand/Documents/wow-maps/guerilla --client /home/walfhand/Documents/Ultimate\ WotLK --extra-mpq /home/walfhand/Documents/wow-maps/patch-guerilla.MPQ`
-  opens the current terrain preview and resolves the base terrain texture
-  colors from the WoW client/extra MPQ. The preview now renders filled terrain
-  on the GPU, but still uses average material colors rather than sampled BLP
-  textures and `MCAL` alpha blending.
+  opens the current terrain preview and samples base terrain BLP textures from
+  the WoW client/extra MPQ. The preview does not yet blend additional `MCLY`
+  layers through `MCAL` alpha maps.
 - `cargo run -p noggit-cli -- check-map-textures /home/walfhand/Documents/wow-maps/guerilla /home/walfhand/Documents/Ultimate\ WotLK /home/walfhand/Documents/wow-maps/patch-guerilla.MPQ`
   currently decodes all 12 terrain textures referenced by Guerilla.
 
 Next:
 
 - MPQ/local asset decoding for M2 and WMO through `noggit-formats`.
-- GPU terrain UVs, BLP texture sampling, `MCLY` layers, and `MCAL` alpha
-  blending.
+- GPU terrain `MCLY` layer sampling and `MCAL` alpha blending.
 - Renderer-facing M2 and WMO placement loading.
 - Terrain editing mutations and byte-preserving save paths.
 - Real golden samples once stable fixtures are available.

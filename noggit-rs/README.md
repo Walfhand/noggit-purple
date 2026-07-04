@@ -69,5 +69,9 @@ current decoder supports paletted BLPs plus DXT1, DXT3, and DXT5 mipmaps.
 filled ADT triangles, depth buffering, and camera controls. With `--client`, it
 reads BLP assets from the WoW client/extra MPQs, uploads decoded/generated
 mipmaps, and blends up to four `MCLY` terrain texture layers through decoded
-`MCAL` alpha maps in the terrain shader. This is still a terrain-only preview;
-M2 doodads, WMO rendering, water, sky, and edit tools are next.
+`MCAL` alpha maps in the terrain shader.
+
+The UI also draws a debug placement overlay for loaded objects: M2 doodads are
+cyan wire boxes and WMO placements are orange wire boxes. Press `O` to toggle
+that overlay. Real M2/WMO mesh rendering, water, sky, and edit tools are still
+next.

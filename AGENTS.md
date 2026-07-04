@@ -78,10 +78,17 @@ Implemented:
 - Renderer terrain mesh extraction from loaded ADT `MCVT` chunks, including
   up to four terrain texture material ids from `MCLY`, decoded `MCAL` alpha
   maps, and chunk detail-map UVs.
+- Renderer debug marker extraction for loaded `MDDF` M2 doodad placements and
+  `MODF` WMO placements. Placement coordinates are converted from WoW
+  server/world coordinates into the same map-local render space as terrain.
 - Desktop terrain preview window through `noggit-ui`, using `winit`/`wgpu` for
   filled terrain triangles, depth buffering, camera controls, repeated BLP
   texture sampling, generated/decoded mipmaps, and GPU blending of terrain
   `MCLY` layers through `MCAL` alpha maps.
+- `noggit-ui` draws a debug object-placement overlay as colored wire boxes:
+  cyan for M2 doodads and orange for WMO placements. The overlay is visible by
+  default and can be toggled with `O`; this is the first small UI action state
+  slice, not the final editor GUI.
 - `noggit-cli` commands: `inspect-dbc`, `inspect-adt`, `inspect-map`,
   `inspect-client`, `inspect-blp`, `check-map-assets`, `check-map-textures`.
 - `inspect-adt` summary for versions, asset tables, placements, terrain chunks,
@@ -97,14 +104,17 @@ Implemented:
   assets.
 - `cargo run -p noggit-ui -- /home/walfhand/Documents/wow-maps/guerilla --client /home/walfhand/Documents/Ultimate\ WotLK --extra-mpq /home/walfhand/Documents/wow-maps/patch-guerilla.MPQ`
   opens the current terrain preview and blends up to four terrain BLP layers
-  from the WoW client/extra MPQ using decoded `MCAL` alpha maps. The preview
-  still does not render M2 doodads, WMO objects, water, sky, or edit tools.
+  from the WoW client/extra MPQ using decoded `MCAL` alpha maps. It also draws
+  debug placement boxes for the loaded M2/WMO placements; press `O` to toggle
+  them. The preview still does not render real M2 doodad meshes, WMO geometry,
+  water, sky, or edit tools.
 - `cargo run -p noggit-cli -- check-map-textures /home/walfhand/Documents/wow-maps/guerilla /home/walfhand/Documents/Ultimate\ WotLK /home/walfhand/Documents/wow-maps/patch-guerilla.MPQ`
   currently decodes all 12 terrain textures referenced by Guerilla.
 
 Next:
 
 - MPQ/local asset decoding for M2 and WMO through `noggit-formats`.
-- Renderer-facing M2 and WMO placement loading.
+- Renderer-facing real M2 and WMO mesh loading using the placement data now
+  validated by debug markers.
 - Terrain editing mutations and byte-preserving save paths.
 - Real golden samples once stable fixtures are available.

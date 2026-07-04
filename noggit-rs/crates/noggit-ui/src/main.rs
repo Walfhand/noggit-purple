@@ -9,7 +9,10 @@ use std::process::ExitCode;
 use bytemuck::{Pod, Zeroable};
 use noggit_core::WorldMap;
 use noggit_formats::blp::{BlpFile, RgbaImage};
-use noggit_render::{TerrainBounds, TerrainMesh, TerrainVertex, build_terrain_mesh};
+use noggit_render::{
+    PlacementMarkerMesh, PlacementMarkerVertex, TerrainBounds, TerrainMesh, TerrainVertex,
+    build_placement_marker_mesh, build_terrain_mesh,
+};
 use noggit_vfs::{ArchiveLoadState, FileSource, VfsPath, WowClient, WowClientConfig};
 use wgpu::util::DeviceExt;
 use winit::dpi::{LogicalSize, PhysicalSize};
@@ -46,6 +49,7 @@ fn run() -> Result<(), String> {
     let world =
         WorldMap::load_from_local_directory(&options.map_path).map_err(|err| err.to_string())?;
     let mesh = build_terrain_mesh(&world).map_err(|err| err.to_string())?;
+    let marker_mesh = build_placement_marker_mesh(&world).map_err(|err| err.to_string())?;
     let mut material_images = load_material_images(mesh.materials(), &options)?;
     let fallback_material_id = material_images.len();
     material_images.push(missing_material_image());
@@ -53,7 +57,13 @@ fn run() -> Result<(), String> {
     let fallback_alpha_id = alpha_images.len();
     alpha_images.push(empty_alpha_image());
     let gpu_mesh = GpuMesh::from_terrain_mesh(mesh, fallback_material_id, fallback_alpha_id)?;
+    let gpu_marker_mesh = GpuMarkerMesh::from_marker_mesh(&marker_mesh)?;
     let mut camera = Camera::new(gpu_mesh.bounds);
+    eprintln!(
+        "object placement markers: {} placements, {} lines",
+        marker_mesh.marker_count(),
+        marker_mesh.indices().len() / 2
+    );
 
     let event_loop =
         EventLoop::new().map_err(|err| format!("failed to create event loop: {err}"))?;
@@ -69,11 +79,13 @@ fn run() -> Result<(), String> {
     let mut gpu = pollster::block_on(GpuState::new(
         window,
         &gpu_mesh,
+        &gpu_marker_mesh,
         &material_images,
         &alpha_images,
         camera.uniform(window.inner_size()),
     ))?;
     let mut input = InputState::default();
+    let mut view_options = ViewOptions::default();
 
     event_loop
         .run(move |event, target| {
@@ -87,6 +99,9 @@ fn run() -> Result<(), String> {
                             if let PhysicalKey::Code(code) = event.physical_key {
                                 if code == KeyCode::Escape && event.state == ElementState::Pressed {
                                     target.exit();
+                                }
+                                if event.state == ElementState::Pressed && !event.repeat {
+                                    view_options.handle_key_press(code);
                                 }
                                 input.set_key(code, event.state);
                             }
@@ -108,7 +123,7 @@ fn run() -> Result<(), String> {
                                 gpu.update_camera(camera.uniform(window.inner_size()));
                             }
 
-                            match gpu.render() {
+                            match gpu.render(&view_options) {
                                 Ok(()) => {}
                                 Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
                                     gpu.resize(window.inner_size());
@@ -421,6 +436,34 @@ impl GpuVertex {
     }
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct GpuMarkerVertex {
+    position: [f32; 3],
+    color: [f32; 4],
+}
+
+impl GpuMarkerVertex {
+    fn layout() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<GpuMarkerVertex>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &[
+                wgpu::VertexAttribute {
+                    offset: 0,
+                    shader_location: 0,
+                    format: wgpu::VertexFormat::Float32x3,
+                },
+                wgpu::VertexAttribute {
+                    offset: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
+                    shader_location: 1,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+            ],
+        }
+    }
+}
+
 struct GpuMesh {
     groups: Vec<GpuMeshGroup>,
     bounds: TerrainBounds,
@@ -430,6 +473,11 @@ struct GpuMeshGroup {
     material_ids: [usize; 4],
     alpha_map_ids: [usize; 3],
     vertices: Vec<GpuVertex>,
+    indices: Vec<u32>,
+}
+
+struct GpuMarkerMesh {
+    vertices: Vec<GpuMarkerVertex>,
     indices: Vec<u32>,
 }
 
@@ -496,6 +544,17 @@ impl GpuMesh {
     }
 }
 
+impl GpuMarkerMesh {
+    fn from_marker_mesh(mesh: &PlacementMarkerMesh) -> Result<Self, String> {
+        let _ = u32::try_from(mesh.indices().len())
+            .map_err(|_| "placement marker index buffer exceeds u32 draw range".to_string())?;
+        Ok(Self {
+            vertices: mesh.vertices().iter().map(gpu_marker_vertex).collect(),
+            indices: mesh.indices().to_vec(),
+        })
+    }
+}
+
 fn vertex_layer_set(
     vertex: &TerrainVertex,
     fallback_material_id: usize,
@@ -529,6 +588,13 @@ fn gpu_vertex(vertex: &TerrainVertex) -> GpuVertex {
     }
 }
 
+fn gpu_marker_vertex(vertex: &PlacementMarkerVertex) -> GpuMarkerVertex {
+    GpuMarkerVertex {
+        position: vertex.position,
+        color: vertex.color,
+    }
+}
+
 struct GpuState<'window> {
     surface: wgpu::Surface<'window>,
     device: wgpu::Device,
@@ -536,11 +602,13 @@ struct GpuState<'window> {
     config: wgpu::SurfaceConfiguration,
     depth: DepthTarget,
     pipeline: wgpu::RenderPipeline,
+    marker_pipeline: wgpu::RenderPipeline,
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
     _material_textures: Vec<GpuTextureResource>,
     _alpha_textures: Vec<GpuTextureResource>,
     draw_groups: Vec<GpuDrawGroup>,
+    marker_draw: Option<GpuMarkerDraw>,
 }
 
 struct GpuTextureResource {
@@ -563,6 +631,12 @@ struct GpuDrawGroup {
     index_count: u32,
 }
 
+struct GpuMarkerDraw {
+    vertex_buffer: wgpu::Buffer,
+    index_buffer: wgpu::Buffer,
+    index_count: u32,
+}
+
 impl GpuTextureResource {
     fn view(&self) -> &wgpu::TextureView {
         &self.view
@@ -573,6 +647,7 @@ impl<'window> GpuState<'window> {
     async fn new(
         window: &'window Window,
         mesh: &GpuMesh,
+        marker_mesh: &GpuMarkerMesh,
         material_images: &[MaterialImage],
         alpha_images: &[AlphaImage],
         camera_uniform: CameraUniform,
@@ -759,6 +834,54 @@ impl<'window> GpuState<'window> {
             multisample: wgpu::MultisampleState::default(),
             multiview: None,
         });
+        let marker_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("placement-marker-shader"),
+            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(MARKER_SHADER)),
+        });
+        let marker_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("placement-marker-pipeline-layout"),
+                bind_group_layouts: &[&camera_bind_group_layout],
+                push_constant_ranges: &[],
+            });
+        let marker_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("placement-marker-pipeline"),
+            layout: Some(&marker_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &marker_shader,
+                entry_point: "vs_marker",
+                buffers: &[GpuMarkerVertex::layout()],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &marker_shader,
+                entry_point: "fs_marker",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::LineList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::Always,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+        });
         let draw_groups = mesh
             .groups
             .iter()
@@ -774,6 +897,7 @@ impl<'window> GpuState<'window> {
                 create_draw_group(&device, index, group, &resources)
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let marker_draw = create_marker_draw(&device, marker_mesh)?;
         let depth = DepthTarget::new(&device, &config);
 
         Ok(Self {
@@ -783,11 +907,13 @@ impl<'window> GpuState<'window> {
             config,
             depth,
             pipeline,
+            marker_pipeline,
             camera_buffer,
             camera_bind_group,
             _material_textures: material_textures,
             _alpha_textures: alpha_textures,
             draw_groups,
+            marker_draw,
         })
     }
 
@@ -807,7 +933,7 @@ impl<'window> GpuState<'window> {
             .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&uniform));
     }
 
-    fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
+    fn render(&mut self, view_options: &ViewOptions) -> Result<(), wgpu::SurfaceError> {
         let frame = self.surface.get_current_texture()?;
         let view = frame
             .texture
@@ -847,6 +973,18 @@ impl<'window> GpuState<'window> {
                 pass.set_vertex_buffer(0, group.vertex_buffer.slice(..));
                 pass.set_index_buffer(group.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..group.index_count, 0, 0..1);
+            }
+            if view_options.show_object_markers
+                && let Some(marker_draw) = &self.marker_draw
+            {
+                pass.set_pipeline(&self.marker_pipeline);
+                pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                pass.set_vertex_buffer(0, marker_draw.vertex_buffer.slice(..));
+                pass.set_index_buffer(
+                    marker_draw.index_buffer.slice(..),
+                    wgpu::IndexFormat::Uint32,
+                );
+                pass.draw_indexed(0..marker_draw.index_count, 0, 0..1);
             }
         }
 
@@ -1087,6 +1225,34 @@ fn create_draw_group(
     })
 }
 
+fn create_marker_draw(
+    device: &wgpu::Device,
+    mesh: &GpuMarkerMesh,
+) -> Result<Option<GpuMarkerDraw>, String> {
+    if mesh.indices.is_empty() {
+        return Ok(None);
+    }
+
+    let index_count = u32::try_from(mesh.indices.len())
+        .map_err(|_| "placement marker index buffer exceeds u32 draw range".to_string())?;
+    let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("placement-marker-vertex-buffer"),
+        contents: bytemuck::cast_slice(&mesh.vertices),
+        usage: wgpu::BufferUsages::VERTEX,
+    });
+    let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("placement-marker-index-buffer"),
+        contents: bytemuck::cast_slice(&mesh.indices),
+        usage: wgpu::BufferUsages::INDEX,
+    });
+
+    Ok(Some(GpuMarkerDraw {
+        vertex_buffer,
+        index_buffer,
+        index_count,
+    }))
+}
+
 struct DepthTarget {
     view: wgpu::TextureView,
 }
@@ -1246,6 +1412,31 @@ struct CameraBasis {
     position: [f32; 3],
     forward: [f32; 3],
     right: [f32; 3],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ViewOptions {
+    show_object_markers: bool,
+}
+
+impl Default for ViewOptions {
+    fn default() -> Self {
+        Self {
+            show_object_markers: true,
+        }
+    }
+}
+
+impl ViewOptions {
+    fn handle_key_press(&mut self, code: KeyCode) -> bool {
+        match code {
+            KeyCode::KeyO => {
+                self.show_object_markers = !self.show_object_markers;
+                true
+            }
+            _ => false,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -1468,9 +1659,54 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
 }
 "#;
 
+const MARKER_SHADER: &str = r#"
+struct Camera {
+    view_projection: mat4x4<f32>,
+};
+
+@group(0) @binding(0)
+var<uniform> camera: Camera;
+
+struct VertexInput {
+    @location(0) position: vec3<f32>,
+    @location(1) color: vec4<f32>,
+};
+
+struct VertexOutput {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) color: vec4<f32>,
+};
+
+@vertex
+fn vs_marker(input: VertexInput) -> VertexOutput {
+    var output: VertexOutput;
+    output.clip_position = camera.view_projection * vec4<f32>(input.position, 1.0);
+    output.color = input.color;
+    return output;
+}
+
+@fragment
+fn fs_marker(input: VertexOutput) -> @location(0) vec4<f32> {
+    return input.color;
+}
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn object_marker_overlay_toggles_from_keyboard_action() {
+        let mut options = ViewOptions::default();
+
+        assert!(options.show_object_markers);
+        assert!(options.handle_key_press(KeyCode::KeyO));
+        assert!(!options.show_object_markers);
+        assert!(options.handle_key_press(KeyCode::KeyO));
+        assert!(options.show_object_markers);
+        assert!(!options.handle_key_press(KeyCode::KeyP));
+        assert!(options.show_object_markers);
+    }
 
     #[test]
     fn parses_preview_options_with_client_and_extra_archives() -> Result<(), String> {

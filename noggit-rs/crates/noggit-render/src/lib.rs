@@ -4,16 +4,23 @@ use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
-use noggit_core::{TerrainChunk, WorldMap};
+use noggit_core::{ModelPlacement, TerrainChunk, WmoPlacement, WorldMap};
 
 /// Full ADT tile width in yards.
 pub const TILE_SIZE: f32 = 1600.0 / 3.0;
 /// ADT terrain chunk width in yards.
 pub const CHUNK_SIZE: f32 = TILE_SIZE / 16.0;
+/// WoW world-space origin offset used by ADT object placement coordinates.
+pub const ZERO_POINT: f32 = TILE_SIZE * 32.0;
 const CHUNK_GRID_STEPS: usize = 8;
 const MCVT_ROWS: usize = 17;
 /// Byte count for one decoded 64x64 terrain alpha map.
 pub const TERRAIN_ALPHA_MAP_SIZE: usize = 64 * 64;
+const MODEL_MARKER_COLOR: [f32; 4] = [0.1, 0.85, 1.0, 1.0];
+const WMO_MARKER_COLOR: [f32; 4] = [1.0, 0.62, 0.16, 1.0];
+const MODEL_MARKER_HALF_SIZE: f32 = 3.0;
+const MODEL_MARKER_HEIGHT: f32 = 12.0;
+const MIN_MARKER_EXTENT: f32 = 2.0;
 
 /// Result type used by renderer preparation code.
 pub type RenderResult<T> = Result<T, RenderError>;
@@ -70,6 +77,24 @@ pub struct TerrainAlphaMap {
     pub values: [u8; TERRAIN_ALPHA_MAP_SIZE],
 }
 
+/// One colored vertex for a debug placement overlay.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PlacementMarkerVertex {
+    /// Position in map-local render space.
+    pub position: [f32; 3],
+    /// Linear RGBA color.
+    pub color: [f32; 4],
+}
+
+/// Line-list geometry for M2/WMO placement debugging.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlacementMarkerMesh {
+    vertices: Vec<PlacementMarkerVertex>,
+    indices: Vec<u32>,
+    bounds: Option<TerrainBounds>,
+    marker_count: usize,
+}
+
 impl TerrainMesh {
     /// Return all terrain vertices.
     pub fn vertices(&self) -> &[TerrainVertex] {
@@ -94,6 +119,28 @@ impl TerrainMesh {
     /// Return mesh bounds when at least one vertex exists.
     pub fn bounds(&self) -> Option<TerrainBounds> {
         self.bounds
+    }
+}
+
+impl PlacementMarkerMesh {
+    /// Return overlay line vertices.
+    pub fn vertices(&self) -> &[PlacementMarkerVertex] {
+        &self.vertices
+    }
+
+    /// Return line-list indices.
+    pub fn indices(&self) -> &[u32] {
+        &self.indices
+    }
+
+    /// Return marker bounds when at least one placement marker exists.
+    pub fn bounds(&self) -> Option<TerrainBounds> {
+        self.bounds
+    }
+
+    /// Return the number of source placements represented in this mesh.
+    pub fn marker_count(&self) -> usize {
+        self.marker_count
     }
 }
 
@@ -183,6 +230,182 @@ pub fn build_terrain_mesh(map: &WorldMap) -> RenderResult<TerrainMesh> {
         alpha_maps,
         bounds,
     })
+}
+
+/// Build debug line boxes for loaded M2 and WMO placements.
+pub fn build_placement_marker_mesh(map: &WorldMap) -> RenderResult<PlacementMarkerMesh> {
+    let min_tile_x = map.tiles().iter().map(|tile| tile.coord().x).min();
+    let min_tile_y = map.tiles().iter().map(|tile| tile.coord().y).min();
+    let Some(min_tile_x) = min_tile_x else {
+        return Ok(PlacementMarkerMesh {
+            vertices: Vec::new(),
+            indices: Vec::new(),
+            bounds: None,
+            marker_count: 0,
+        });
+    };
+    let min_tile_y = min_tile_y.unwrap_or(0);
+
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+    let mut bounds = None;
+    let mut marker_count = 0usize;
+
+    for tile in map.tiles() {
+        for placement in tile.model_placements() {
+            append_model_marker(
+                placement,
+                min_tile_x,
+                min_tile_y,
+                &mut vertices,
+                &mut indices,
+                &mut bounds,
+            )?;
+            marker_count += 1;
+        }
+
+        for placement in tile.wmo_placements() {
+            append_wmo_marker(
+                placement,
+                min_tile_x,
+                min_tile_y,
+                &mut vertices,
+                &mut indices,
+                &mut bounds,
+            )?;
+            marker_count += 1;
+        }
+    }
+
+    Ok(PlacementMarkerMesh {
+        vertices,
+        indices,
+        bounds,
+        marker_count,
+    })
+}
+
+fn append_model_marker(
+    placement: &ModelPlacement,
+    min_tile_x: u32,
+    min_tile_y: u32,
+    vertices: &mut Vec<PlacementMarkerVertex>,
+    indices: &mut Vec<u32>,
+    bounds: &mut Option<TerrainBounds>,
+) -> RenderResult<()> {
+    let center = server_position_to_render_local(placement.position, min_tile_x, min_tile_y);
+    let scale = (placement.scale as f32 / 1024.0).max(0.1);
+    let half = MODEL_MARKER_HALF_SIZE * scale;
+    let height = MODEL_MARKER_HEIGHT * scale;
+    append_line_box(
+        [center[0] - half, center[1], center[2] - half],
+        [center[0] + half, center[1] + height, center[2] + half],
+        MODEL_MARKER_COLOR,
+        vertices,
+        indices,
+        bounds,
+    )
+}
+
+fn append_wmo_marker(
+    placement: &WmoPlacement,
+    min_tile_x: u32,
+    min_tile_y: u32,
+    vertices: &mut Vec<PlacementMarkerVertex>,
+    indices: &mut Vec<u32>,
+    bounds: &mut Option<TerrainBounds>,
+) -> RenderResult<()> {
+    let lower = server_position_to_render_local(placement.lower_extent, min_tile_x, min_tile_y);
+    let upper = server_position_to_render_local(placement.upper_extent, min_tile_x, min_tile_y);
+    let (min, max) = min_max_points(lower, upper);
+    let (min, max) = expand_tiny_bounds(min, max);
+    append_line_box(min, max, WMO_MARKER_COLOR, vertices, indices, bounds)
+}
+
+fn server_position_to_render_local(
+    server_position: [f32; 3],
+    min_tile_x: u32,
+    min_tile_y: u32,
+) -> [f32; 3] {
+    [
+        ZERO_POINT - server_position[1] - min_tile_x as f32 * TILE_SIZE,
+        server_position[2],
+        ZERO_POINT - server_position[0] - min_tile_y as f32 * TILE_SIZE,
+    ]
+}
+
+fn min_max_points(a: [f32; 3], b: [f32; 3]) -> ([f32; 3], [f32; 3]) {
+    (
+        [a[0].min(b[0]), a[1].min(b[1]), a[2].min(b[2])],
+        [a[0].max(b[0]), a[1].max(b[1]), a[2].max(b[2])],
+    )
+}
+
+fn expand_tiny_bounds(mut min: [f32; 3], mut max: [f32; 3]) -> ([f32; 3], [f32; 3]) {
+    for axis in 0..3 {
+        if max[axis] - min[axis] >= MIN_MARKER_EXTENT {
+            continue;
+        }
+
+        let center = (min[axis] + max[axis]) * 0.5;
+        min[axis] = center - MIN_MARKER_EXTENT * 0.5;
+        max[axis] = center + MIN_MARKER_EXTENT * 0.5;
+    }
+    (min, max)
+}
+
+fn append_line_box(
+    min: [f32; 3],
+    max: [f32; 3],
+    color: [f32; 4],
+    vertices: &mut Vec<PlacementMarkerVertex>,
+    indices: &mut Vec<u32>,
+    bounds: &mut Option<TerrainBounds>,
+) -> RenderResult<()> {
+    let base_index = u32::try_from(vertices.len()).map_err(|_| RenderError::TooManyVertices)?;
+    let corners = [
+        [min[0], min[1], min[2]],
+        [max[0], min[1], min[2]],
+        [max[0], min[1], max[2]],
+        [min[0], min[1], max[2]],
+        [min[0], max[1], min[2]],
+        [max[0], max[1], min[2]],
+        [max[0], max[1], max[2]],
+        [min[0], max[1], max[2]],
+    ];
+
+    for position in corners {
+        extend_bounds(bounds, position);
+        vertices.push(PlacementMarkerVertex { position, color });
+    }
+
+    for [a, b] in [
+        [0, 1],
+        [1, 2],
+        [2, 3],
+        [3, 0],
+        [4, 5],
+        [5, 6],
+        [6, 7],
+        [7, 4],
+        [0, 4],
+        [1, 5],
+        [2, 6],
+        [3, 7],
+    ] {
+        indices.push(
+            base_index
+                .checked_add(a)
+                .ok_or(RenderError::TooManyVertices)?,
+        );
+        indices.push(
+            base_index
+                .checked_add(b)
+                .ok_or(RenderError::TooManyVertices)?,
+        );
+    }
+
+    Ok(())
 }
 
 fn material_layer_ids(
@@ -410,6 +633,42 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn converts_server_positions_to_map_local_render_space() {
+        let server_position = [
+            ZERO_POINT - (25.0 * TILE_SIZE + 20.0),
+            ZERO_POINT - (27.0 * TILE_SIZE + 10.0),
+            7.0,
+        ];
+
+        assert_eq!(
+            server_position_to_render_local(server_position, 27, 25),
+            [10.0, 7.0, 20.0]
+        );
+    }
+
+    #[test]
+    fn builds_debug_marker_lines_for_model_and_wmo_placements() -> Result<(), Box<dyn Error>> {
+        let root = test_root("noggit-render-placement-markers")?;
+        let map_dir = root.join("testmap");
+        fs::create_dir_all(&map_dir)?;
+        fs::write(map_dir.join("testmap.wdt"), fixture_wdt())?;
+        fs::write(map_dir.join("testmap_27_25.adt"), fixture_adt())?;
+
+        let map = WorldMap::load_from_local_directory(&map_dir)?;
+        let markers = build_placement_marker_mesh(&map)?;
+
+        fs::remove_dir_all(&root)?;
+
+        assert_eq!(markers.vertices().len(), 16);
+        assert_eq!(markers.indices().len(), 48);
+        assert_eq!(markers.marker_count(), 2);
+        assert_eq!(markers.vertices()[0].color, MODEL_MARKER_COLOR);
+        assert_eq!(markers.vertices()[8].color, WMO_MARKER_COLOR);
+        assert!(markers.bounds().is_some());
+        Ok(())
+    }
+
     fn fixture_adt() -> Vec<u8> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&stored_chunk(b"MVER", &18_u32.to_le_bytes()));
@@ -418,6 +677,12 @@ mod tests {
             b"MTEX",
             &string_block(&["tiles/rock.blp", "tiles/dirt.blp"]),
         ));
+        bytes.extend_from_slice(&stored_chunk(b"MMDX", &string_block(&["models/tree.m2"])));
+        bytes.extend_from_slice(&stored_chunk(b"MMID", &0_u32.to_le_bytes()));
+        bytes.extend_from_slice(&stored_chunk(b"MWMO", &string_block(&["world/bridge.wmo"])));
+        bytes.extend_from_slice(&stored_chunk(b"MWID", &0_u32.to_le_bytes()));
+        bytes.extend_from_slice(&stored_chunk(b"MDDF", &mddf_entry()));
+        bytes.extend_from_slice(&stored_chunk(b"MODF", &modf_entry()));
         bytes.extend_from_slice(&stored_chunk(b"MCNK", &mcnk()));
         bytes
     }
@@ -484,6 +749,66 @@ mod tests {
             bytes.push(0);
         }
         bytes
+    }
+
+    fn mddf_entry() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0_u32.to_le_bytes());
+        bytes.extend_from_slice(&77_u32.to_le_bytes());
+        push_vec3(
+            &mut bytes,
+            [
+                ZERO_POINT - (25.0 * TILE_SIZE + 20.0),
+                ZERO_POINT - (27.0 * TILE_SIZE + 10.0),
+                7.0,
+            ],
+        );
+        push_vec3(&mut bytes, [0.0, 0.0, 0.0]);
+        bytes.extend_from_slice(&1024_u16.to_le_bytes());
+        bytes.extend_from_slice(&0_u16.to_le_bytes());
+        bytes
+    }
+
+    fn modf_entry() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0_u32.to_le_bytes());
+        bytes.extend_from_slice(&88_u32.to_le_bytes());
+        push_vec3(
+            &mut bytes,
+            [
+                ZERO_POINT - (25.0 * TILE_SIZE + 80.0),
+                ZERO_POINT - (27.0 * TILE_SIZE + 60.0),
+                20.0,
+            ],
+        );
+        push_vec3(&mut bytes, [0.0, 0.0, 0.0]);
+        push_vec3(
+            &mut bytes,
+            [
+                ZERO_POINT - (25.0 * TILE_SIZE + 90.0),
+                ZERO_POINT - (27.0 * TILE_SIZE + 50.0),
+                12.0,
+            ],
+        );
+        push_vec3(
+            &mut bytes,
+            [
+                ZERO_POINT - (25.0 * TILE_SIZE + 70.0),
+                ZERO_POINT - (27.0 * TILE_SIZE + 80.0),
+                28.0,
+            ],
+        );
+        bytes.extend_from_slice(&0_u16.to_le_bytes());
+        bytes.extend_from_slice(&0_u16.to_le_bytes());
+        bytes.extend_from_slice(&0_u16.to_le_bytes());
+        bytes.extend_from_slice(&1024_u16.to_le_bytes());
+        bytes
+    }
+
+    fn push_vec3(bytes: &mut Vec<u8>, values: [f32; 3]) {
+        for value in values {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
     }
 
     fn stored_chunk(id: &[u8; 4], data: &[u8]) -> Vec<u8> {

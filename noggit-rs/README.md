@@ -9,6 +9,7 @@ renderer, or UI.
 ## Crates
 
 - `noggit-vfs`: local/client/archive file access.
+- `noggit-stormlib`: safe read-only Rust wrapper around StormLib for WotLK MPQs.
 - `noggit-formats`: WoW binary formats such as DBC, ADT, WDT, WMO, M2, and BLP.
 - `noggit-core`: editor domain model and mutation logic.
 - `noggit-render`: `wgpu` renderer.
@@ -22,4 +23,35 @@ renderer, or UI.
 2. Parse ADT chunk containers, typed headers, terrain heights, normals, texture
    layers, alpha maps, asset filename blocks, filename offset tables, and
    placement tables.
-3. Add golden fixtures from known-good map files as they become available.
+3. Load a local map directory through `noggit-vfs` into a `noggit-core`
+   `WorldMap` with sorted tiles, terrain chunks, assets, and placements.
+4. Discover and read WoW client MPQ archives for referenced map assets using
+   the same StormLib backend as Noggit C++.
+5. Add golden fixtures from known-good map files as they become available.
+
+## Smoke Tests
+
+The Rust MPQ backend requires StormLib. If it is not installed in a standard
+library path, set `STORMLIB_LIB_DIR=/path/to/stormlib/lib` before building.
+
+```bash
+cargo run -p noggit-cli -- inspect-dbc /path/to/file.dbc
+cargo run -p noggit-cli -- inspect-adt /path/to/tile.adt
+cargo run -p noggit-cli -- inspect-map /path/to/World/Maps/guerilla
+cargo run -p noggit-cli -- inspect-client /path/to/WoWClient [/path/to/extra.MPQ ...]
+cargo run -p noggit-cli -- check-map-assets /path/to/guerilla /path/to/WoWClient [/path/to/extra.MPQ ...]
+```
+
+`inspect-adt` prints chunk counts, version, asset tables, placement asset usage,
+terrain chunk summaries, height ranges, normal counts, texture layer counts,
+and raw `MCAL` payload sizes.
+
+`inspect-map` loads every matching ADT in a local map directory and prints the
+map-level tile, placement, and terrain chunk totals.
+
+`inspect-client` discovers WotLK client MPQs in Noggit load order and reports
+loaded/skipped/failed archives. By default no archive is skipped by size;
+StormLib is used so large patch archives such as `Patch-N.MPQ` can be opened
+the same way as in Noggit C++. `check-map-assets` verifies that the texture,
+M2, and WMO assets referenced by a loaded map can be read from the client MPQ
+chain.

@@ -5,5 +5,11 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[dependencies]
+noggit-stormlib = { path = "../noggit-stormlib" }
+
+[dev-dependencies]
+wow-mpq = "0.6.4"
+
 [lints]
 workspace = true

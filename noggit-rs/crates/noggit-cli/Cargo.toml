@@ -6,7 +6,9 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+noggit-core = { path = "../noggit-core" }
 noggit-formats = { path = "../noggit-formats" }
+noggit-vfs = { path = "../noggit-vfs" }
 
 [lints]
 workspace = true

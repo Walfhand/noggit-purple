@@ -12,6 +12,11 @@ const MDDF_ENTRY_SIZE: usize = 0x24;
 const MODF_ENTRY_SIZE: usize = 0x40;
 const MCNR_NORMAL_BYTE_COUNT: usize = MCNK_VERTEX_HEIGHT_COUNT * 3;
 const LEGACY_ALPHA_MAP_SIZE: usize = ALPHA_MAP_SIZE / 2;
+const KNOWN_CHUNK_IDS: [[u8; 4]; 25] = [
+    *b"MVER", *b"MHDR", *b"MCIN", *b"MTEX", *b"MMDX", *b"MMID", *b"MWMO", *b"MWID", *b"MDDF",
+    *b"MODF", *b"MFBO", *b"MH2O", *b"MTXF", *b"MTFX", *b"MCNK", *b"MCVT", *b"MCNR", *b"MCLY",
+    *b"MCAL", *b"MCSH", *b"MCCV", *b"MCRF", *b"MCSE", *b"MCLQ", *b"MCBB",
+];
 
 /// Number of terrain height vertices stored in an `MCVT` sub-chunk.
 pub const MCNK_VERTEX_HEIGHT_COUNT: usize = 9 * 9 + 8 * 8;
@@ -230,6 +235,27 @@ pub struct ModfEntry {
     pub scale: u16,
 }
 
+/// Resolve an ADT `name_id` through an offset table into a filename block.
+pub fn filename_by_name_id<'a>(
+    filenames: &'a [String],
+    offsets: &[u32],
+    name_id: u32,
+) -> Option<&'a str> {
+    let offset_index = usize::try_from(name_id).ok()?;
+    let target_offset = *offsets.get(offset_index)?;
+    let mut current_offset = 0u32;
+
+    for filename in filenames {
+        if current_offset == target_offset {
+            return Some(filename);
+        }
+        current_offset =
+            current_offset.checked_add(u32::try_from(filename.len()).ok()?.checked_add(1)?)?;
+    }
+
+    None
+}
+
 impl AdtFile {
     /// Parse an ADT file into ordered raw chunks.
     pub fn parse(bytes: &[u8]) -> FormatResult<Self> {
@@ -237,7 +263,7 @@ impl AdtFile {
         let mut offset = 0;
 
         while offset < bytes.len() {
-            let id = read_exact::<4>(bytes, offset)?;
+            let id = normalize_chunk_id(read_exact::<4>(bytes, offset)?);
             let size = read_u32_le(bytes, offset + 4)?;
             let size = usize::try_from(size).map_err(|_| FormatError::InvalidRange {
                 field: "chunk size",
@@ -571,7 +597,7 @@ impl Mcnk {
         let chunk_offset = raw_offset
             .checked_sub(MCNK_OUTER_HEADER_SIZE)
             .ok_or(FormatError::InvalidRange { field })?;
-        let actual_id = read_exact::<4>(&self.data, chunk_offset)?;
+        let actual_id = normalize_chunk_id(read_exact::<4>(&self.data, chunk_offset)?);
         if actual_id != expected_id {
             return Err(FormatError::InvalidMagic {
                 expected: expected_id,
@@ -676,6 +702,27 @@ fn parse_mcin_entries(bytes: &[u8]) -> FormatResult<Vec<McinEntry>> {
     (0..MCIN_ENTRY_COUNT)
         .map(|index| McinEntry::parse(bytes, index * MCIN_ENTRY_SIZE))
         .collect()
+}
+
+fn normalize_chunk_id(id: [u8; 4]) -> [u8; 4] {
+    if is_known_chunk_id(id) {
+        id
+    } else {
+        let reversed = reverse_chunk_id(id);
+        if is_known_chunk_id(reversed) {
+            reversed
+        } else {
+            id
+        }
+    }
+}
+
+fn is_known_chunk_id(id: [u8; 4]) -> bool {
+    KNOWN_CHUNK_IDS.contains(&id)
+}
+
+fn reverse_chunk_id(id: [u8; 4]) -> [u8; 4] {
+    [id[3], id[2], id[1], id[0]]
 }
 
 fn parse_string_block(bytes: &[u8]) -> FormatResult<Vec<String>> {

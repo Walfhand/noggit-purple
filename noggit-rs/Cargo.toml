@@ -5,6 +5,7 @@ members = [
   "crates/noggit-formats",
   "crates/noggit-render",
   "crates/noggit-scripting",
+  "crates/noggit-stormlib",
   "crates/noggit-ui",
   "crates/noggit-vfs",
 ]

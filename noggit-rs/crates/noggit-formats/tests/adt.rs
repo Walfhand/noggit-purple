@@ -2,7 +2,7 @@
 
 use noggit_formats::adt::{
     ALPHA_MAP_SIZE, AdtFile, MCLY_FLAG_ALPHA_COMPRESSED, MCLY_FLAG_USE_ALPHA,
-    MCNK_VERTEX_HEIGHT_COUNT, Mcnk, MddfEntry,
+    MCNK_VERTEX_HEIGHT_COUNT, Mcnk, MddfEntry, filename_by_name_id,
 };
 use noggit_formats::{FormatError, FormatResult};
 
@@ -14,12 +14,27 @@ fn chunk(id: &[u8; 4], data: &[u8]) -> Vec<u8> {
     bytes
 }
 
+fn stored_chunk(id: &[u8; 4], data: &[u8]) -> Vec<u8> {
+    chunk(&reverse_id(id), data)
+}
+
 fn fixture_adt() -> Vec<u8> {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(&chunk(b"MVER", &18_u32.to_le_bytes()));
     bytes.extend_from_slice(&chunk(b"MHDR", &fixture_mhdr()));
     bytes.extend_from_slice(&chunk(b"MCIN", &fixture_mcin()));
     bytes.extend_from_slice(&chunk(b"MCNK", &fixture_mcnk()));
+    bytes
+}
+
+fn fixture_stored_order_adt() -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&stored_chunk(b"MVER", &18_u32.to_le_bytes()));
+    bytes.extend_from_slice(&stored_chunk(
+        b"MTEX",
+        &string_block(&["tiles/foo.blp", "tiles/bar.blp"]),
+    ));
+    bytes.extend_from_slice(&stored_chunk(b"MCNK", &fixture_stored_order_mcnk()));
     bytes
 }
 
@@ -113,6 +128,13 @@ fn fixture_mcnk() -> Vec<u8> {
     write_u32(&mut bytes, 40, (8 + mcal.len()) as u32);
     push_mcnk_subchunk(&mut bytes, 36, b"MCAL", &mcal);
 
+    bytes
+}
+
+fn fixture_stored_order_mcnk() -> Vec<u8> {
+    let mut bytes = fixture_mcnk_header();
+    write_u32(&mut bytes, 12, 1);
+    push_stored_mcnk_subchunk(&mut bytes, 20, b"MCVT", &fixture_mcvt());
     bytes
 }
 
@@ -245,11 +267,21 @@ fn push_mcnk_subchunk(bytes: &mut Vec<u8>, offset_field: usize, id: &[u8; 4], da
     bytes.extend_from_slice(&chunk(id, data));
 }
 
+fn push_stored_mcnk_subchunk(bytes: &mut Vec<u8>, offset_field: usize, id: &[u8; 4], data: &[u8]) {
+    let offset = (bytes.len() + 8) as u32;
+    write_u32(bytes, offset_field, offset);
+    bytes.extend_from_slice(&stored_chunk(id, data));
+}
+
 fn push_mcly(bytes: &mut Vec<u8>, texture_id: u32, flags: u32, ofs_alpha: u32, effect_id: u32) {
     bytes.extend_from_slice(&texture_id.to_le_bytes());
     bytes.extend_from_slice(&flags.to_le_bytes());
     bytes.extend_from_slice(&ofs_alpha.to_le_bytes());
     bytes.extend_from_slice(&effect_id.to_le_bytes());
+}
+
+fn reverse_id(id: &[u8; 4]) -> [u8; 4] {
+    [id[3], id[2], id[1], id[0]]
 }
 
 #[test]
@@ -261,6 +293,39 @@ fn parses_adt_chunks_in_file_order() -> FormatResult<()> {
     assert_eq!(adt.chunks()[1].id, *b"MHDR");
     assert_eq!(adt.chunks()[2].id, *b"MCIN");
     assert_eq!(adt.chunks()[3].id, *b"MCNK");
+    Ok(())
+}
+
+#[test]
+fn normalizes_reversed_storage_order_chunk_ids() -> FormatResult<()> {
+    let adt = AdtFile::parse(&fixture_stored_order_adt())?;
+
+    assert_eq!(adt.chunks()[0].id, *b"MVER");
+    assert_eq!(adt.chunks()[1].id, *b"MTEX");
+    assert_eq!(adt.chunks()[2].id, *b"MCNK");
+    assert_eq!(adt.version()?, Some(18));
+    assert_eq!(
+        adt.texture_filenames()?.ok_or(FormatError::InvalidRange {
+            field: "missing MTEX",
+        })?,
+        vec!["tiles/foo.blp", "tiles/bar.blp"]
+    );
+
+    let mcnk = first_mcnk(&adt)?;
+    assert_eq!(
+        mcnk.first_subchunk(*b"MCVT")?
+            .ok_or(FormatError::InvalidRange {
+                field: "missing MCVT",
+            })?
+            .id,
+        *b"MCVT"
+    );
+    assert_eq!(
+        mcnk.heights()?.ok_or(FormatError::InvalidRange {
+            field: "missing MCVT heights",
+        })?[144],
+        36.0
+    );
     Ok(())
 }
 
@@ -521,14 +586,16 @@ fn parses_adt_asset_filename_blocks() -> FormatResult<()> {
 #[test]
 fn parses_adt_asset_filename_offset_tables() -> FormatResult<()> {
     let adt = AdtFile::parse(&fixture_asset_adt())?;
+    let models = adt.model_filenames()?.ok_or(FormatError::InvalidRange {
+        field: "missing MMDX",
+    })?;
+    let model_offsets = adt
+        .model_filename_offsets()?
+        .ok_or(FormatError::InvalidRange {
+            field: "missing MMID",
+        })?;
 
-    assert_eq!(
-        adt.model_filename_offsets()?
-            .ok_or(FormatError::InvalidRange {
-                field: "missing MMID",
-            })?,
-        vec![0, 15]
-    );
+    assert_eq!(model_offsets, vec![0, 15]);
     assert_eq!(
         adt.wmo_filename_offsets()?
             .ok_or(FormatError::InvalidRange {
@@ -536,6 +603,11 @@ fn parses_adt_asset_filename_offset_tables() -> FormatResult<()> {
             })?,
         vec![0]
     );
+    assert_eq!(
+        filename_by_name_id(&models, &model_offsets, 1),
+        Some("models/rock.m2")
+    );
+    assert_eq!(filename_by_name_id(&models, &model_offsets, 99), None);
     Ok(())
 }
 

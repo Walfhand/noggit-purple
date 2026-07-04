@@ -75,10 +75,12 @@ Implemented:
 - Core world-map model that loads local map directories into sorted ADT tiles,
   terrain chunks, assets, and placements.
 - Renderer terrain mesh extraction from loaded ADT `MCVT` chunks, including
-  base terrain texture material ids from `MCLY` and chunk detail-map UVs.
+  up to four terrain texture material ids from `MCLY`, decoded `MCAL` alpha
+  maps, and chunk detail-map UVs.
 - Desktop terrain preview window through `noggit-ui`, using `winit`/`wgpu` for
-  filled terrain triangles, depth buffering, camera controls, and base BLP
-  texture sampling.
+  filled terrain triangles, depth buffering, camera controls, repeated BLP
+  texture sampling, generated/decoded mipmaps, and GPU blending of terrain
+  `MCLY` layers through `MCAL` alpha maps.
 - `noggit-cli` commands: `inspect-dbc`, `inspect-adt`, `inspect-map`,
   `inspect-client`, `inspect-blp`, `check-map-assets`, `check-map-textures`.
 - `inspect-adt` summary for versions, asset tables, placements, terrain chunks,
@@ -93,16 +95,15 @@ Implemented:
   StormLib backend, the Guerilla asset check currently resolves all 85 referenced
   assets.
 - `cargo run -p noggit-ui -- /home/walfhand/Documents/wow-maps/guerilla --client /home/walfhand/Documents/Ultimate\ WotLK --extra-mpq /home/walfhand/Documents/wow-maps/patch-guerilla.MPQ`
-  opens the current terrain preview and samples base terrain BLP textures from
-  the WoW client/extra MPQ. The preview does not yet blend additional `MCLY`
-  layers through `MCAL` alpha maps.
+  opens the current terrain preview and blends up to four terrain BLP layers
+  from the WoW client/extra MPQ using decoded `MCAL` alpha maps. The preview
+  still does not render M2 doodads, WMO objects, water, sky, or edit tools.
 - `cargo run -p noggit-cli -- check-map-textures /home/walfhand/Documents/wow-maps/guerilla /home/walfhand/Documents/Ultimate\ WotLK /home/walfhand/Documents/wow-maps/patch-guerilla.MPQ`
   currently decodes all 12 terrain textures referenced by Guerilla.
 
 Next:
 
 - MPQ/local asset decoding for M2 and WMO through `noggit-formats`.
-- GPU terrain `MCLY` layer sampling and `MCAL` alpha blending.
 - Renderer-facing M2 and WMO placement loading.
 - Terrain editing mutations and byte-preserving save paths.
 - Real golden samples once stable fixtures are available.

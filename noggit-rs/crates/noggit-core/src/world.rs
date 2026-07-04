@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use noggit_formats::FormatResult;
-use noggit_formats::adt::{AdtFile, MddfEntry, ModfEntry, filename_by_name_id};
+use noggit_formats::adt::{ALPHA_MAP_SIZE, AdtFile, MddfEntry, ModfEntry, filename_by_name_id};
 use noggit_vfs::{FileSource, LocalFolder, VfsPath};
 
 use crate::error::{CoreError, CoreResult};
@@ -56,6 +56,8 @@ pub struct TerrainChunk {
     pub normals: Vec<[f32; 3]>,
     /// Texture layers on this terrain chunk.
     pub layers: Vec<TerrainLayer>,
+    /// Alpha maps aligned with texture layers. Layer 0 normally has no alpha.
+    pub alpha_maps: Vec<Option<TerrainAlphaMap>>,
 }
 
 /// Texture layer metadata for a terrain chunk.
@@ -69,6 +71,13 @@ pub struct TerrainLayer {
     pub alpha_offset: u32,
     /// Texture effect id.
     pub effect_id: u32,
+}
+
+/// Decoded 64x64 terrain alpha map for a texture layer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerrainAlphaMap {
+    /// Alpha values in row-major 64x64 order.
+    pub values: [u8; ALPHA_MAP_SIZE],
 }
 
 /// Height range for a terrain chunk.
@@ -202,6 +211,9 @@ impl WorldMap {
 
 impl WorldTile {
     fn from_adt(coord: TileCoord, source_path: VfsPath, adt: &AdtFile) -> CoreResult<Self> {
+        let use_big_alphamaps = parse_format(&source_path, adt.mhdr())?
+            .map(|header| header.flags & 0x0004 != 0)
+            .unwrap_or(false);
         let texture_assets =
             parse_format(&source_path, adt.texture_filenames())?.unwrap_or_default();
         let model_assets = parse_format(&source_path, adt.model_filenames())?.unwrap_or_default();
@@ -240,6 +252,18 @@ impl WorldTile {
                         effect_id: layer.effect_id,
                     })
                     .collect();
+                let do_not_fix_alpha_map = chunk.header.flags & 0x0000_8000 != 0;
+                let alpha_maps = parse_format(
+                    &source_path,
+                    chunk.alpha_maps(use_big_alphamaps, do_not_fix_alpha_map),
+                )?
+                .into_iter()
+                .map(|alpha| {
+                    alpha.map(|alpha| TerrainAlphaMap {
+                        values: *alpha.as_bytes(),
+                    })
+                })
+                .collect();
 
                 Ok(TerrainChunk {
                     x: chunk.header.ix,
@@ -250,6 +274,7 @@ impl WorldTile {
                     heights,
                     normals,
                     layers,
+                    alpha_maps,
                 })
             })
             .collect::<CoreResult<Vec<_>>>()?;

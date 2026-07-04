@@ -65,6 +65,7 @@ current decoder supports paletted BLPs plus DXT1, DXT3, and DXT5 mipmaps.
 
 `noggit-ui` opens the first graphical preview: a GPU-rendered terrain view with
 filled ADT triangles, depth buffering, and camera controls. With `--client`, it
-reads BLP assets from the WoW client/extra MPQs and samples the decoded base
-chunk textures in the terrain shader. This is still a terrain-only preview;
-`MCLY`/`MCAL` layer blending, M2 doodads, and WMO rendering are next.
+reads BLP assets from the WoW client/extra MPQs, uploads decoded/generated
+mipmaps, and blends up to four `MCLY` terrain texture layers through decoded
+`MCAL` alpha maps in the terrain shader. This is still a terrain-only preview;
+M2 doodads, WMO rendering, water, sky, and edit tools are next.

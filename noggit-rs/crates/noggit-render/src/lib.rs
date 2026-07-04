@@ -12,6 +12,8 @@ pub const TILE_SIZE: f32 = 1600.0 / 3.0;
 pub const CHUNK_SIZE: f32 = TILE_SIZE / 16.0;
 const CHUNK_GRID_STEPS: usize = 8;
 const MCVT_ROWS: usize = 17;
+/// Byte count for one decoded 64x64 terrain alpha map.
+pub const TERRAIN_ALPHA_MAP_SIZE: usize = 64 * 64;
 
 /// Result type used by renderer preparation code.
 pub type RenderResult<T> = Result<T, RenderError>;
@@ -23,6 +25,8 @@ pub enum RenderError {
     TooManyVertices,
     /// The terrain mesh would exceed `u32` material id capacity.
     TooManyMaterials,
+    /// The terrain mesh would exceed `u32` alpha map id capacity.
+    TooManyAlphaMaps,
 }
 
 /// One terrain vertex ready for renderer upload or software preview.
@@ -34,8 +38,10 @@ pub struct TerrainVertex {
     pub normal: [f32; 3],
     /// Terrain texture coordinate in WoW chunk detail-map space.
     pub tex_coord: [f32; 2],
-    /// Index into [`TerrainMesh::materials`] for the base texture on this vertex.
-    pub material_id: Option<u32>,
+    /// Indices into [`TerrainMesh::materials`] for up to four terrain layers.
+    pub material_ids: [Option<u32>; 4],
+    /// Indices into [`TerrainMesh::alpha_maps`] for layers 1 through 3.
+    pub alpha_map_ids: [Option<u32>; 3],
 }
 
 /// Axis-aligned bounds for render data.
@@ -53,7 +59,15 @@ pub struct TerrainMesh {
     vertices: Vec<TerrainVertex>,
     indices: Vec<u32>,
     materials: Vec<String>,
+    alpha_maps: Vec<TerrainAlphaMap>,
     bounds: Option<TerrainBounds>,
+}
+
+/// Renderer-owned 64x64 terrain alpha map.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerrainAlphaMap {
+    /// Alpha values in row-major 64x64 order.
+    pub values: [u8; TERRAIN_ALPHA_MAP_SIZE],
 }
 
 impl TerrainMesh {
@@ -70,6 +84,11 @@ impl TerrainMesh {
     /// Return texture assets referenced by terrain vertices.
     pub fn materials(&self) -> &[String] {
         &self.materials
+    }
+
+    /// Return alpha maps referenced by terrain vertices.
+    pub fn alpha_maps(&self) -> &[TerrainAlphaMap] {
+        &self.alpha_maps
     }
 
     /// Return mesh bounds when at least one vertex exists.
@@ -103,6 +122,7 @@ impl Display for RenderError {
         match self {
             Self::TooManyVertices => write!(f, "terrain mesh has too many vertices"),
             Self::TooManyMaterials => write!(f, "terrain mesh has too many materials"),
+            Self::TooManyAlphaMaps => write!(f, "terrain mesh has too many alpha maps"),
         }
     }
 }
@@ -118,6 +138,7 @@ pub fn build_terrain_mesh(map: &WorldMap) -> RenderResult<TerrainMesh> {
             vertices: Vec::new(),
             indices: Vec::new(),
             materials: Vec::new(),
+            alpha_maps: Vec::new(),
             bounds: None,
         });
     };
@@ -127,6 +148,7 @@ pub fn build_terrain_mesh(map: &WorldMap) -> RenderResult<TerrainMesh> {
     let mut indices = Vec::new();
     let mut materials = Vec::new();
     let mut material_ids = BTreeMap::new();
+    let mut alpha_maps = Vec::new();
     let mut bounds = None;
 
     for tile in map.tiles() {
@@ -134,18 +156,19 @@ pub fn build_terrain_mesh(map: &WorldMap) -> RenderResult<TerrainMesh> {
         let tile_origin_z = (tile.coord().y - min_tile_y) as f32 * TILE_SIZE;
 
         for chunk in tile.terrain_chunks() {
-            let material_id = chunk
-                .layers
-                .first()
-                .and_then(|layer| tile.texture_assets().get(layer.texture_id as usize))
-                .map(|asset| material_id_for(asset, &mut materials, &mut material_ids))
-                .transpose()?;
+            let material_layer_ids = material_layer_ids(
+                chunk,
+                tile.texture_assets(),
+                &mut materials,
+                &mut material_ids,
+            )?;
+            let alpha_map_ids = alpha_map_ids(chunk, &mut alpha_maps)?;
 
             append_chunk_mesh(
                 chunk,
-                tile_origin_x,
-                tile_origin_z,
-                material_id,
+                [tile_origin_x, tile_origin_z],
+                material_layer_ids,
+                alpha_map_ids,
                 &mut vertices,
                 &mut indices,
                 &mut bounds,
@@ -157,8 +180,25 @@ pub fn build_terrain_mesh(map: &WorldMap) -> RenderResult<TerrainMesh> {
         vertices,
         indices,
         materials,
+        alpha_maps,
         bounds,
     })
+}
+
+fn material_layer_ids(
+    chunk: &TerrainChunk,
+    texture_assets: &[String],
+    materials: &mut Vec<String>,
+    material_ids: &mut BTreeMap<String, u32>,
+) -> RenderResult<[Option<u32>; 4]> {
+    let mut ids = [None; 4];
+    for (slot, layer) in chunk.layers.iter().take(ids.len()).enumerate() {
+        ids[slot] = texture_assets
+            .get(layer.texture_id as usize)
+            .map(|asset| material_id_for(asset, materials, material_ids))
+            .transpose()?;
+    }
+    Ok(ids)
 }
 
 fn material_id_for(
@@ -177,11 +217,29 @@ fn material_id_for(
     Ok(id)
 }
 
+fn alpha_map_ids(
+    chunk: &TerrainChunk,
+    alpha_maps: &mut Vec<TerrainAlphaMap>,
+) -> RenderResult<[Option<u32>; 3]> {
+    let mut ids = [None; 3];
+    for (layer_index, alpha) in chunk.alpha_maps.iter().enumerate().skip(1).take(ids.len()) {
+        let Some(alpha) = alpha else {
+            continue;
+        };
+        let id = u32::try_from(alpha_maps.len()).map_err(|_| RenderError::TooManyAlphaMaps)?;
+        alpha_maps.push(TerrainAlphaMap {
+            values: alpha.values,
+        });
+        ids[layer_index - 1] = Some(id);
+    }
+    Ok(ids)
+}
+
 fn append_chunk_mesh(
     chunk: &TerrainChunk,
-    tile_origin_x: f32,
-    tile_origin_z: f32,
-    material_id: Option<u32>,
+    tile_origin: [f32; 2],
+    material_ids: [Option<u32>; 4],
+    alpha_map_ids: [Option<u32>; 3],
     vertices: &mut Vec<TerrainVertex>,
     indices: &mut Vec<u32>,
     bounds: &mut Option<TerrainBounds>,
@@ -191,8 +249,8 @@ fn append_chunk_mesh(
     }
 
     let base_index = u32::try_from(vertices.len()).map_err(|_| RenderError::TooManyVertices)?;
-    let chunk_origin_x = tile_origin_x + chunk.x as f32 * CHUNK_SIZE;
-    let chunk_origin_z = tile_origin_z + chunk.y as f32 * CHUNK_SIZE;
+    let chunk_origin_x = tile_origin[0] + chunk.x as f32 * CHUNK_SIZE;
+    let chunk_origin_z = tile_origin[1] + chunk.y as f32 * CHUNK_SIZE;
     let step = CHUNK_SIZE / CHUNK_GRID_STEPS as f32;
     let mut lookup = [[None; 9]; MCVT_ROWS];
     let mut height_index = 0usize;
@@ -218,7 +276,8 @@ fn append_chunk_mesh(
                 position,
                 normal,
                 tex_coord,
-                material_id,
+                material_ids,
+                alpha_map_ids,
             });
             *lookup_cell = Some(
                 base_index
@@ -321,11 +380,20 @@ mod tests {
 
         assert_eq!(mesh.vertices().len(), 145);
         assert_eq!(mesh.indices().len(), 8 * 8 * 4 * 3);
-        assert_eq!(mesh.materials(), &["tiles/rock.blp".to_owned()]);
+        assert_eq!(
+            mesh.materials(),
+            &["tiles/rock.blp".to_owned(), "tiles/dirt.blp".to_owned()]
+        );
+        assert_eq!(mesh.alpha_maps().len(), 1);
+        assert_eq!(mesh.alpha_maps()[0].values[7], 7);
         assert_eq!(mesh.vertices()[0].position, [0.0, 10.0, 0.0]);
         assert_eq!(mesh.vertices()[0].tex_coord, [0.0, 0.0]);
         assert_eq!(mesh.vertices()[9].tex_coord, [0.5, 0.5]);
-        assert_eq!(mesh.vertices()[0].material_id, Some(0));
+        assert_eq!(
+            mesh.vertices()[0].material_ids,
+            [Some(0), Some(1), None, None]
+        );
+        assert_eq!(mesh.vertices()[0].alpha_map_ids, [Some(0), None, None]);
         assert_eq!(
             mesh.vertices()[144].position,
             [CHUNK_SIZE, 154.0, CHUNK_SIZE]
@@ -344,8 +412,18 @@ mod tests {
     fn fixture_adt() -> Vec<u8> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&stored_chunk(b"MVER", &18_u32.to_le_bytes()));
-        bytes.extend_from_slice(&stored_chunk(b"MTEX", &string_block(&["tiles/rock.blp"])));
+        bytes.extend_from_slice(&stored_chunk(b"MHDR", &mhdr()));
+        bytes.extend_from_slice(&stored_chunk(
+            b"MTEX",
+            &string_block(&["tiles/rock.blp", "tiles/dirt.blp"]),
+        ));
         bytes.extend_from_slice(&stored_chunk(b"MCNK", &mcnk()));
+        bytes
+    }
+
+    fn mhdr() -> Vec<u8> {
+        let mut bytes = vec![0; 64];
+        write_u32(&mut bytes, 0, 0x0004);
         bytes
     }
 
@@ -353,10 +431,14 @@ mod tests {
         let mut bytes = vec![0; 128];
         write_u32(&mut bytes, 4, 0);
         write_u32(&mut bytes, 8, 0);
+        write_u32(&mut bytes, 12, 2);
         write_f32(&mut bytes, 112, 10.0);
         push_subchunk(&mut bytes, 20, b"MCVT", &mcvt());
         push_subchunk(&mut bytes, 24, b"MCNR", &mcnr());
         push_subchunk(&mut bytes, 28, b"MCLY", &mcly());
+        let mcal = mcal();
+        write_u32(&mut bytes, 40, (8 + mcal.len()) as u32);
+        push_subchunk(&mut bytes, 36, b"MCAL", &mcal);
         bytes
     }
 
@@ -371,9 +453,15 @@ mod tests {
     }
 
     fn mcly() -> Vec<u8> {
-        [0_u32, 0, 0, 0xFFFF_FFFF]
+        [0_u32, 0, 0, 0xFFFF_FFFF, 1, 0x100, 0, 0xFFFF_FFFF]
             .into_iter()
             .flat_map(u32::to_le_bytes)
+            .collect()
+    }
+
+    fn mcal() -> Vec<u8> {
+        (0..TERRAIN_ALPHA_MAP_SIZE)
+            .map(|index| (index % 251) as u8)
             .collect()
     }
 

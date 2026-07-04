@@ -1,7 +1,7 @@
 //! Terrain preview window for the Rust rewrite.
 
 use std::borrow::Cow;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -27,6 +27,9 @@ const BACKGROUND: wgpu::Color = wgpu::Color {
     a: 1.0,
 };
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth24Plus;
+const TERRAIN_DETAIL_UV_SCALE: f32 = 8.0;
+const TERRAIN_ALPHA_MAP_SIDE: u32 = 64;
+const TERRAIN_ALPHA_MAP_BYTES: usize = 64 * 64;
 
 fn main() -> ExitCode {
     match run() {
@@ -46,7 +49,10 @@ fn run() -> Result<(), String> {
     let mut material_images = load_material_images(mesh.materials(), &options)?;
     let fallback_material_id = material_images.len();
     material_images.push(missing_material_image());
-    let gpu_mesh = GpuMesh::from_terrain_mesh(mesh, fallback_material_id)?;
+    let mut alpha_images = load_alpha_images(mesh.alpha_maps());
+    let fallback_alpha_id = alpha_images.len();
+    alpha_images.push(empty_alpha_image());
+    let gpu_mesh = GpuMesh::from_terrain_mesh(mesh, fallback_material_id, fallback_alpha_id)?;
     let mut camera = Camera::new(gpu_mesh.bounds);
 
     let event_loop =
@@ -64,6 +70,7 @@ fn run() -> Result<(), String> {
         window,
         &gpu_mesh,
         &material_images,
+        &alpha_images,
         camera.uniform(window.inner_size()),
     ))?;
     let mut input = InputState::default();
@@ -176,7 +183,12 @@ impl PreviewOptions {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct MaterialImage {
-    image: RgbaImage,
+    mipmaps: Vec<RgbaImage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AlphaImage {
+    values: [u8; TERRAIN_ALPHA_MAP_BYTES],
 }
 
 fn load_material_images(
@@ -216,8 +228,9 @@ fn load_material_image(client: &WowClient, material: &str) -> Option<MaterialIma
     let path = VfsPath::new(material).ok()?;
     let bytes = client.read_file(&path).ok()?;
     let blp = BlpFile::parse(&bytes).ok()?;
-    let image = blp.decode_rgba_mipmap(0).ok()?;
-    Some(MaterialImage { image })
+    let mut mipmaps = decode_blp_mipmaps(&blp)?;
+    complete_material_mipmaps(&mut mipmaps);
+    Some(MaterialImage { mipmaps })
 }
 
 fn missing_material_image() -> MaterialImage {
@@ -232,12 +245,115 @@ fn missing_material_image() -> MaterialImage {
         }
     }
 
-    MaterialImage {
-        image: RgbaImage {
-            width: 4,
-            height: 4,
-            pixels,
-        },
+    let mut mipmaps = vec![RgbaImage {
+        width: 4,
+        height: 4,
+        pixels,
+    }];
+    complete_material_mipmaps(&mut mipmaps);
+
+    MaterialImage { mipmaps }
+}
+
+fn decode_blp_mipmaps(blp: &BlpFile) -> Option<Vec<RgbaImage>> {
+    let mut mipmaps = Vec::new();
+    for (level, (&offset, &size)) in blp
+        .header()
+        .mipmap_offsets
+        .iter()
+        .zip(blp.header().mipmap_sizes.iter())
+        .enumerate()
+    {
+        if offset == 0 || size == 0 {
+            break;
+        }
+
+        match blp.decode_rgba_mipmap(level) {
+            Ok(image) => mipmaps.push(image),
+            Err(_) if !mipmaps.is_empty() => break,
+            Err(_) => return None,
+        }
+    }
+
+    if mipmaps.is_empty() {
+        None
+    } else {
+        Some(mipmaps)
+    }
+}
+
+fn complete_material_mipmaps(mipmaps: &mut Vec<RgbaImage>) {
+    while mipmaps
+        .last()
+        .is_some_and(|image| image.width > 1 || image.height > 1)
+    {
+        let Some(next) = mipmaps.last().and_then(downsample_rgba) else {
+            break;
+        };
+        mipmaps.push(next);
+    }
+}
+
+fn downsample_rgba(image: &RgbaImage) -> Option<RgbaImage> {
+    if image.width == 0 || image.height == 0 {
+        return None;
+    }
+
+    let width = (image.width / 2).max(1);
+    let height = (image.height / 2).max(1);
+    let pixel_count = usize::try_from(width)
+        .ok()
+        .and_then(|w| usize::try_from(height).ok().and_then(|h| w.checked_mul(h)))?;
+    let mut pixels = Vec::with_capacity(pixel_count * 4);
+
+    for y in 0..height {
+        for x in 0..width {
+            let mut sum = [0_u16; 4];
+            for offset_y in 0..2 {
+                for offset_x in 0..2 {
+                    let source_x = (x * 2 + offset_x).min(image.width - 1);
+                    let source_y = (y * 2 + offset_y).min(image.height - 1);
+                    let pixel_offset = rgba_pixel_offset(image.width, source_x, source_y)?;
+                    for (channel, value) in sum.iter_mut().enumerate() {
+                        *value += u16::from(image.pixels[pixel_offset + channel]);
+                    }
+                }
+            }
+            pixels.extend(sum.map(|value| (value / 4) as u8));
+        }
+    }
+
+    Some(RgbaImage {
+        width,
+        height,
+        pixels,
+    })
+}
+
+fn rgba_pixel_offset(width: u32, x: u32, y: u32) -> Option<usize> {
+    usize::try_from(y)
+        .ok()
+        .and_then(|y| {
+            usize::try_from(width)
+                .ok()
+                .and_then(|width| y.checked_mul(width))
+        })
+        .and_then(|row| usize::try_from(x).ok().and_then(|x| row.checked_add(x)))
+        .and_then(|pixel| pixel.checked_mul(4))
+}
+
+fn load_alpha_images(alpha_maps: &[noggit_render::TerrainAlphaMap]) -> Vec<AlphaImage> {
+    alpha_maps
+        .iter()
+        .map(|alpha| AlphaImage {
+            values: alpha.values,
+        })
+        .collect()
+}
+
+fn empty_alpha_image() -> AlphaImage {
+    AlphaImage {
+        values: [0; TERRAIN_ALPHA_MAP_BYTES],
     }
 }
 
@@ -247,6 +363,7 @@ struct GpuVertex {
     position: [f32; 3],
     normal: [f32; 3],
     tex_coord: [f32; 2],
+    alpha_coord: [f32; 2],
 }
 
 impl GpuVertex {
@@ -270,6 +387,12 @@ impl GpuVertex {
                     shader_location: 2,
                     format: wgpu::VertexFormat::Float32x2,
                 },
+                wgpu::VertexAttribute {
+                    offset: (std::mem::size_of::<[f32; 3]>() * 2 + std::mem::size_of::<[f32; 2]>())
+                        as wgpu::BufferAddress,
+                    shader_location: 3,
+                    format: wgpu::VertexFormat::Float32x2,
+                },
             ],
         }
     }
@@ -281,13 +404,18 @@ struct GpuMesh {
 }
 
 struct GpuMeshGroup {
-    material_id: usize,
+    material_ids: [usize; 4],
+    alpha_map_ids: [usize; 3],
     vertices: Vec<GpuVertex>,
     indices: Vec<u32>,
 }
 
 impl GpuMesh {
-    fn from_terrain_mesh(mesh: TerrainMesh, fallback_material_id: usize) -> Result<Self, String> {
+    fn from_terrain_mesh(
+        mesh: TerrainMesh,
+        fallback_material_id: usize,
+        fallback_alpha_id: usize,
+    ) -> Result<Self, String> {
         let Some(bounds) = mesh.bounds() else {
             return Err("map has no renderable terrain chunks".to_string());
         };
@@ -295,13 +423,8 @@ impl GpuMesh {
             return Err("map has no renderable terrain triangles".to_string());
         }
 
-        let mut groups = (0..=fallback_material_id)
-            .map(|material_id| GpuMeshGroup {
-                material_id,
-                vertices: Vec::new(),
-                indices: Vec::new(),
-            })
-            .collect::<Vec<_>>();
+        let mut group_lookup = BTreeMap::new();
+        let mut groups = Vec::new();
 
         for triangle in mesh.indices().chunks_exact(3) {
             let a = mesh
@@ -316,12 +439,27 @@ impl GpuMesh {
                 .vertices()
                 .get(triangle[2] as usize)
                 .ok_or_else(|| "terrain triangle references missing vertex".to_string())?;
-            let material_id = triangle_material_id([a, b, c], fallback_material_id);
+            let (material_ids, alpha_map_ids) =
+                vertex_layer_set(a, fallback_material_id, fallback_alpha_id);
+            let key = (material_ids, alpha_map_ids);
+            let group_index = if let Some(index) = group_lookup.get(&key) {
+                *index
+            } else {
+                let index = groups.len();
+                groups.push(GpuMeshGroup {
+                    material_ids,
+                    alpha_map_ids,
+                    vertices: Vec::new(),
+                    indices: Vec::new(),
+                });
+                group_lookup.insert(key, index);
+                index
+            };
             let group = groups
-                .get_mut(material_id)
-                .ok_or_else(|| "terrain triangle references missing material".to_string())?;
+                .get_mut(group_index)
+                .ok_or_else(|| "terrain triangle references missing layer group".to_string())?;
             let base_index = u32::try_from(group.vertices.len())
-                .map_err(|_| "terrain material group has too many vertices".to_string())?;
+                .map_err(|_| "terrain layer group has too many vertices".to_string())?;
 
             group.vertices.extend([a, b, c].map(gpu_vertex));
             group
@@ -335,19 +473,36 @@ impl GpuMesh {
     }
 }
 
-fn triangle_material_id(vertices: [&TerrainVertex; 3], fallback_material_id: usize) -> usize {
-    vertices
-        .into_iter()
-        .find_map(|vertex| vertex.material_id.and_then(|id| usize::try_from(id).ok()))
-        .filter(|id| *id < fallback_material_id)
-        .unwrap_or(fallback_material_id)
+fn vertex_layer_set(
+    vertex: &TerrainVertex,
+    fallback_material_id: usize,
+    fallback_alpha_id: usize,
+) -> ([usize; 4], [usize; 3]) {
+    (
+        vertex
+            .material_ids
+            .map(|id| bounded_resource_id(id, fallback_material_id)),
+        vertex
+            .alpha_map_ids
+            .map(|id| bounded_resource_id(id, fallback_alpha_id)),
+    )
+}
+
+fn bounded_resource_id(id: Option<u32>, fallback_id: usize) -> usize {
+    id.and_then(|id| usize::try_from(id).ok())
+        .filter(|id| *id < fallback_id)
+        .unwrap_or(fallback_id)
 }
 
 fn gpu_vertex(vertex: &TerrainVertex) -> GpuVertex {
     GpuVertex {
         position: vertex.position,
         normal: normalize(vertex.normal),
-        tex_coord: [vertex.tex_coord[0] / 8.0, vertex.tex_coord[1] / 8.0],
+        tex_coord: vertex.tex_coord,
+        alpha_coord: [
+            vertex.tex_coord[0] / TERRAIN_DETAIL_UV_SCALE,
+            vertex.tex_coord[1] / TERRAIN_DETAIL_UV_SCALE,
+        ],
     }
 }
 
@@ -360,15 +515,35 @@ struct GpuState<'window> {
     pipeline: wgpu::RenderPipeline,
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
-    material_bind_groups: Vec<wgpu::BindGroup>,
+    _material_textures: Vec<GpuTextureResource>,
+    _alpha_textures: Vec<GpuTextureResource>,
     draw_groups: Vec<GpuDrawGroup>,
 }
 
+struct GpuTextureResource {
+    _texture: wgpu::Texture,
+    view: wgpu::TextureView,
+}
+
+struct LayerBindResources<'a> {
+    layout: &'a wgpu::BindGroupLayout,
+    material_sampler: &'a wgpu::Sampler,
+    alpha_sampler: &'a wgpu::Sampler,
+    material_textures: &'a [GpuTextureResource],
+    alpha_textures: &'a [GpuTextureResource],
+}
+
 struct GpuDrawGroup {
-    material_id: usize,
+    bind_group: wgpu::BindGroup,
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
     index_count: u32,
+}
+
+impl GpuTextureResource {
+    fn view(&self) -> &wgpu::TextureView {
+        &self.view
+    }
 }
 
 impl<'window> GpuState<'window> {
@@ -376,6 +551,7 @@ impl<'window> GpuState<'window> {
         window: &'window Window,
         mesh: &GpuMesh,
         material_images: &[MaterialImage],
+        alpha_images: &[AlphaImage],
         camera_uniform: CameraUniform,
     ) -> Result<Self, String> {
         let size = window.inner_size();
@@ -467,26 +643,19 @@ impl<'window> GpuState<'window> {
                 resource: camera_buffer.as_entire_binding(),
             }],
         });
-        let material_bind_group_layout =
+        let layer_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("material-bind-group-layout"),
+                label: Some("terrain-layer-bind-group-layout"),
                 entries: &[
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                            multisampled: false,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                        count: None,
-                    },
+                    texture_layout_entry(0),
+                    texture_layout_entry(1),
+                    texture_layout_entry(2),
+                    texture_layout_entry(3),
+                    texture_layout_entry(4),
+                    texture_layout_entry(5),
+                    texture_layout_entry(6),
+                    sampler_layout_entry(7),
+                    sampler_layout_entry(8),
                 ],
             });
         let material_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -496,22 +665,28 @@ impl<'window> GpuState<'window> {
             address_mode_w: wgpu::AddressMode::Repeat,
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Linear,
+            ..wgpu::SamplerDescriptor::default()
+        });
+        let alpha_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("terrain-alpha-sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
             mipmap_filter: wgpu::FilterMode::Nearest,
             ..wgpu::SamplerDescriptor::default()
         });
-        let material_bind_groups = material_images
+        let material_textures = material_images
             .iter()
             .enumerate()
-            .map(|(index, material)| {
-                create_material_bind_group(
-                    &device,
-                    &queue,
-                    &material_bind_group_layout,
-                    &material_sampler,
-                    index,
-                    material,
-                )
-            })
+            .map(|(index, material)| create_material_texture(&device, &queue, index, material))
+            .collect::<Result<Vec<_>, _>>()?;
+        let alpha_textures = alpha_images
+            .iter()
+            .enumerate()
+            .map(|(index, alpha)| create_alpha_texture(&device, &queue, index, alpha))
             .collect::<Vec<_>>();
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -520,7 +695,7 @@ impl<'window> GpuState<'window> {
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("terrain-pipeline-layout"),
-            bind_group_layouts: &[&camera_bind_group_layout, &material_bind_group_layout],
+            bind_group_layouts: &[&camera_bind_group_layout, &layer_bind_group_layout],
             push_constant_ranges: &[],
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -565,7 +740,16 @@ impl<'window> GpuState<'window> {
             .groups
             .iter()
             .enumerate()
-            .map(|(index, group)| create_draw_group(&device, index, group))
+            .map(|(index, group)| {
+                let resources = LayerBindResources {
+                    layout: &layer_bind_group_layout,
+                    material_sampler: &material_sampler,
+                    alpha_sampler: &alpha_sampler,
+                    material_textures: &material_textures,
+                    alpha_textures: &alpha_textures,
+                };
+                create_draw_group(&device, index, group, &resources)
+            })
             .collect::<Result<Vec<_>, _>>()?;
         let depth = DepthTarget::new(&device, &config);
 
@@ -578,7 +762,8 @@ impl<'window> GpuState<'window> {
             pipeline,
             camera_buffer,
             camera_bind_group,
-            material_bind_groups,
+            _material_textures: material_textures,
+            _alpha_textures: alpha_textures,
             draw_groups,
         })
     }
@@ -635,10 +820,7 @@ impl<'window> GpuState<'window> {
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.camera_bind_group, &[]);
             for group in &self.draw_groups {
-                let Some(material) = self.material_bind_groups.get(group.material_id) else {
-                    continue;
-                };
-                pass.set_bind_group(1, material, &[]);
+                pass.set_bind_group(1, &group.bind_group, &[]);
                 pass.set_vertex_buffer(0, group.vertex_buffer.slice(..));
                 pass.set_index_buffer(group.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..group.index_count, 0, 0..1);
@@ -651,27 +833,104 @@ impl<'window> GpuState<'window> {
     }
 }
 
-fn create_material_bind_group(
+fn texture_layout_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
+        count: None,
+    }
+}
+
+fn sampler_layout_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+        count: None,
+    }
+}
+
+fn create_material_texture(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
-    layout: &wgpu::BindGroupLayout,
-    sampler: &wgpu::Sampler,
     index: usize,
     material: &MaterialImage,
-) -> wgpu::BindGroup {
-    let image = &material.image;
+) -> Result<GpuTextureResource, String> {
+    let first = material
+        .mipmaps
+        .first()
+        .ok_or_else(|| "material image has no mipmaps".to_string())?;
+    let mip_level_count = u32::try_from(material.mipmaps.len())
+        .map_err(|_| "material image has too many mipmaps".to_string())?;
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(&format!("terrain-material-texture-{index}")),
+        size: wgpu::Extent3d {
+            width: first.width.max(1),
+            height: first.height.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+
+    for (level, image) in material.mipmaps.iter().enumerate() {
+        let mip_level =
+            u32::try_from(level).map_err(|_| "material mip level exceeds u32".to_string())?;
+        queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &texture,
+                mip_level,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &image.pixels,
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(image.width.max(1) * 4),
+                rows_per_image: Some(image.height.max(1)),
+            },
+            wgpu::Extent3d {
+                width: image.width.max(1),
+                height: image.height.max(1),
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    Ok(GpuTextureResource {
+        _texture: texture,
+        view,
+    })
+}
+
+fn create_alpha_texture(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    index: usize,
+    alpha: &AlphaImage,
+) -> GpuTextureResource {
     let size = wgpu::Extent3d {
-        width: image.width.max(1),
-        height: image.height.max(1),
+        width: TERRAIN_ALPHA_MAP_SIDE,
+        height: TERRAIN_ALPHA_MAP_SIDE,
         depth_or_array_layers: 1,
     };
     let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some(&format!("terrain-material-texture-{index}")),
+        label: Some(&format!("terrain-alpha-texture-{index}")),
         size,
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        format: wgpu::TextureFormat::R8Unorm,
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
@@ -682,37 +941,108 @@ fn create_material_bind_group(
             origin: wgpu::Origin3d::ZERO,
             aspect: wgpu::TextureAspect::All,
         },
-        &image.pixels,
+        &alpha.values,
         wgpu::ImageDataLayout {
             offset: 0,
-            bytes_per_row: Some(image.width.max(1) * 4),
-            rows_per_image: Some(image.height.max(1)),
+            bytes_per_row: Some(TERRAIN_ALPHA_MAP_SIDE),
+            rows_per_image: Some(TERRAIN_ALPHA_MAP_SIDE),
         },
         size,
     );
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-    device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some(&format!("terrain-material-bind-group-{index}")),
-        layout,
+    GpuTextureResource {
+        _texture: texture,
+        view,
+    }
+}
+
+fn create_layer_bind_group(
+    device: &wgpu::Device,
+    index: usize,
+    group: &GpuMeshGroup,
+    resources: &LayerBindResources<'_>,
+) -> Result<wgpu::BindGroup, String> {
+    let material_0 = resources
+        .material_textures
+        .get(group.material_ids[0])
+        .ok_or_else(|| "terrain layer references missing material 0".to_string())?;
+    let material_1 = resources
+        .material_textures
+        .get(group.material_ids[1])
+        .ok_or_else(|| "terrain layer references missing material 1".to_string())?;
+    let material_2 = resources
+        .material_textures
+        .get(group.material_ids[2])
+        .ok_or_else(|| "terrain layer references missing material 2".to_string())?;
+    let material_3 = resources
+        .material_textures
+        .get(group.material_ids[3])
+        .ok_or_else(|| "terrain layer references missing material 3".to_string())?;
+    let alpha_1 = resources
+        .alpha_textures
+        .get(group.alpha_map_ids[0])
+        .ok_or_else(|| "terrain layer references missing alpha map 1".to_string())?;
+    let alpha_2 = resources
+        .alpha_textures
+        .get(group.alpha_map_ids[1])
+        .ok_or_else(|| "terrain layer references missing alpha map 2".to_string())?;
+    let alpha_3 = resources
+        .alpha_textures
+        .get(group.alpha_map_ids[2])
+        .ok_or_else(|| "terrain layer references missing alpha map 3".to_string())?;
+
+    Ok(device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some(&format!("terrain-layer-bind-group-{index}")),
+        layout: resources.layout,
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
-                resource: wgpu::BindingResource::TextureView(&view),
+                resource: wgpu::BindingResource::TextureView(material_0.view()),
             },
             wgpu::BindGroupEntry {
                 binding: 1,
-                resource: wgpu::BindingResource::Sampler(sampler),
+                resource: wgpu::BindingResource::TextureView(material_1.view()),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::TextureView(material_2.view()),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: wgpu::BindingResource::TextureView(material_3.view()),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: wgpu::BindingResource::TextureView(alpha_1.view()),
+            },
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: wgpu::BindingResource::TextureView(alpha_2.view()),
+            },
+            wgpu::BindGroupEntry {
+                binding: 6,
+                resource: wgpu::BindingResource::TextureView(alpha_3.view()),
+            },
+            wgpu::BindGroupEntry {
+                binding: 7,
+                resource: wgpu::BindingResource::Sampler(resources.material_sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 8,
+                resource: wgpu::BindingResource::Sampler(resources.alpha_sampler),
             },
         ],
-    })
+    }))
 }
 
 fn create_draw_group(
     device: &wgpu::Device,
     index: usize,
     group: &GpuMeshGroup,
+    resources: &LayerBindResources<'_>,
 ) -> Result<GpuDrawGroup, String> {
+    let bind_group = create_layer_bind_group(device, index, group, resources)?;
     let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some(&format!("terrain-vertex-buffer-{index}")),
         contents: bytemuck::cast_slice(&group.vertices),
@@ -727,7 +1057,7 @@ fn create_draw_group(
         .map_err(|_| "terrain index buffer exceeds u32 draw range".to_string())?;
 
     Ok(GpuDrawGroup {
-        material_id: group.material_id,
+        bind_group,
         vertex_buffer,
         index_buffer,
         index_count,
@@ -1048,21 +1378,44 @@ struct Camera {
 var<uniform> camera: Camera;
 
 @group(1) @binding(0)
-var terrain_texture: texture_2d<f32>;
+var terrain_texture_0: texture_2d<f32>;
 
 @group(1) @binding(1)
+var terrain_texture_1: texture_2d<f32>;
+
+@group(1) @binding(2)
+var terrain_texture_2: texture_2d<f32>;
+
+@group(1) @binding(3)
+var terrain_texture_3: texture_2d<f32>;
+
+@group(1) @binding(4)
+var terrain_alpha_1: texture_2d<f32>;
+
+@group(1) @binding(5)
+var terrain_alpha_2: texture_2d<f32>;
+
+@group(1) @binding(6)
+var terrain_alpha_3: texture_2d<f32>;
+
+@group(1) @binding(7)
 var terrain_sampler: sampler;
+
+@group(1) @binding(8)
+var alpha_sampler: sampler;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) tex_coord: vec2<f32>,
+    @location(3) alpha_coord: vec2<f32>,
 };
 
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) normal: vec3<f32>,
     @location(1) tex_coord: vec2<f32>,
+    @location(2) alpha_coord: vec2<f32>,
 };
 
 @vertex
@@ -1071,6 +1424,7 @@ fn vs_main(input: VertexInput) -> VertexOutput {
     output.clip_position = camera.view_projection * vec4<f32>(input.position, 1.0);
     output.normal = input.normal;
     output.tex_coord = input.tex_coord;
+    output.alpha_coord = input.alpha_coord;
     return output;
 }
 
@@ -1078,7 +1432,15 @@ fn vs_main(input: VertexInput) -> VertexOutput {
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let light = normalize(vec3<f32>(0.35, 0.88, 0.32));
     let shade = 0.58 + max(dot(normalize(input.normal), light), 0.0) * 0.42;
-    let tex_color = textureSample(terrain_texture, terrain_sampler, input.tex_coord).rgb;
+    let alpha_1 = textureSample(terrain_alpha_1, alpha_sampler, input.alpha_coord).r;
+    let alpha_2 = textureSample(terrain_alpha_2, alpha_sampler, input.alpha_coord).r;
+    let alpha_3 = textureSample(terrain_alpha_3, alpha_sampler, input.alpha_coord).r;
+    let base_alpha = 1.0 - (alpha_1 + alpha_2 + alpha_3);
+    let tex_color =
+        textureSample(terrain_texture_0, terrain_sampler, input.tex_coord).rgb * base_alpha
+        + textureSample(terrain_texture_1, terrain_sampler, input.tex_coord).rgb * alpha_1
+        + textureSample(terrain_texture_2, terrain_sampler, input.tex_coord).rgb * alpha_2
+        + textureSample(terrain_texture_3, terrain_sampler, input.tex_coord).rgb * alpha_3;
     return vec4<f32>(tex_color * shade, 1.0);
 }
 "#;
@@ -1110,22 +1472,42 @@ mod tests {
     fn builds_checkerboard_missing_material_texture() {
         let material = missing_material_image();
 
-        assert_eq!(material.image.width, 4);
-        assert_eq!(material.image.height, 4);
-        assert_eq!(&material.image.pixels[0..4], &[180, 24, 180, 255]);
-        assert_eq!(&material.image.pixels[4..8], &[24, 24, 24, 255]);
+        assert_eq!(material.mipmaps.len(), 3);
+        assert_eq!(material.mipmaps[0].width, 4);
+        assert_eq!(material.mipmaps[0].height, 4);
+        assert_eq!(material.mipmaps[1].width, 2);
+        assert_eq!(material.mipmaps[1].height, 2);
+        assert_eq!(material.mipmaps[2].width, 1);
+        assert_eq!(material.mipmaps[2].height, 1);
+        assert_eq!(&material.mipmaps[0].pixels[0..4], &[180, 24, 180, 255]);
+        assert_eq!(&material.mipmaps[0].pixels[4..8], &[24, 24, 24, 255]);
     }
 
     #[test]
-    fn normalizes_chunk_detail_uv_for_gpu_vertices() {
+    fn keeps_detail_uv_and_normalizes_alpha_uv_for_gpu_vertices() {
         let vertex = TerrainVertex {
             position: [0.0, 4.0, 0.0],
             normal: [0.0, 1.0, 0.0],
             tex_coord: [4.0, 8.0],
-            material_id: Some(0),
+            material_ids: [Some(0), None, None, None],
+            alpha_map_ids: [None, None, None],
         };
         let gpu_vertex = gpu_vertex(&vertex);
 
-        assert_eq!(gpu_vertex.tex_coord, [0.5, 1.0]);
+        assert_eq!(gpu_vertex.tex_coord, [4.0, 8.0]);
+        assert_eq!(gpu_vertex.alpha_coord, [0.5, 1.0]);
+    }
+
+    #[test]
+    fn builds_layer_set_with_fallback_resource_ids() {
+        let vertex = TerrainVertex {
+            position: [0.0, 4.0, 0.0],
+            normal: [0.0, 1.0, 0.0],
+            tex_coord: [4.0, 8.0],
+            material_ids: [Some(1), Some(99), None, Some(0)],
+            alpha_map_ids: [Some(2), Some(99), None],
+        };
+
+        assert_eq!(vertex_layer_set(&vertex, 3, 4), ([1, 3, 3, 0], [2, 4, 4]));
     }
 }

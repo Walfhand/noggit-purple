@@ -44,6 +44,8 @@ pub struct TerrainChunk {
     pub x: u32,
     /// Chunk Y index inside the ADT tile.
     pub y: u32,
+    /// Base height from the `MCNK` header, added to every `MCVT` sample.
+    pub base_height: f32,
     /// Area id assigned to this chunk.
     pub area_id: u32,
     /// Terrain hole mask.
@@ -242,6 +244,7 @@ impl WorldTile {
                 Ok(TerrainChunk {
                     x: chunk.header.ix,
                     y: chunk.header.iy,
+                    base_height: chunk.header.ypos,
                     area_id: chunk.header.area_id,
                     holes: chunk.header.holes,
                     heights,

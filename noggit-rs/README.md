@@ -40,6 +40,7 @@ cargo run -p noggit-cli -- inspect-adt /path/to/tile.adt
 cargo run -p noggit-cli -- inspect-map /path/to/World/Maps/guerilla
 cargo run -p noggit-cli -- inspect-client /path/to/WoWClient [/path/to/extra.MPQ ...]
 cargo run -p noggit-cli -- check-map-assets /path/to/guerilla /path/to/WoWClient [/path/to/extra.MPQ ...]
+cargo run -p noggit-ui -- /path/to/guerilla
 ```
 
 `inspect-adt` prints chunk counts, version, asset tables, placement asset usage,
@@ -55,3 +56,7 @@ StormLib is used so large patch archives such as `Patch-N.MPQ` can be opened
 the same way as in Noggit C++. `check-map-assets` verifies that the texture,
 M2, and WMO assets referenced by a loaded map can be read from the client MPQ
 chain.
+
+`noggit-ui` opens the first graphical preview: a software wireframe view of the
+loaded ADT terrain heights. This is intentionally a terrain-only slice; BLP
+textures, M2 doodads, and WMO rendering are next.

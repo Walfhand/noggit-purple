@@ -13,7 +13,7 @@ format reference until Rust tests supersede a feature.
 - `noggit-formats`: binary format parsing and serialization.
 - `noggit-core`: editor domain model and mutation logic.
 - `noggit-render`: future `wgpu` renderer.
-- `noggit-ui`: future desktop UI.
+- `noggit-ui`: desktop preview UI.
 - `noggit-scripting`: future Lua API.
 - `noggit-cli`: validation/debug commands.
 
@@ -72,6 +72,9 @@ Implemented:
 - ADT doodad and WMO placement tables: `MDDF`, `MODF`.
 - Core world-map model that loads local map directories into sorted ADT tiles,
   terrain chunks, assets, and placements.
+- Renderer terrain mesh extraction from loaded ADT `MCVT` chunks.
+- Desktop terrain preview window through `noggit-ui`, currently software
+  wireframe only.
 - `noggit-cli` commands: `inspect-dbc`, `inspect-adt`, `inspect-map`,
   `inspect-client`, `check-map-assets`.
 - `inspect-adt` summary for versions, asset tables, placements, terrain chunks,
@@ -85,10 +88,14 @@ Implemented:
   extra archive when checking that custom map files are resolvable. With the
   StormLib backend, the Guerilla asset check currently resolves all 85 referenced
   assets.
+- `cargo run -p noggit-ui -- /home/walfhand/Documents/wow-maps/guerilla`
+  opens the current terrain preview. It intentionally shows only height relief
+  wireframe until BLP terrain textures and model rendering are implemented.
 
 Next:
 
 - MPQ/local asset decoding for textures, M2, and WMO through `noggit-formats`.
-- Renderer-facing terrain mesh extraction from the core tile model.
+- Textured terrain rendering using decoded BLP assets.
+- Renderer-facing M2 and WMO placement loading.
 - Terrain editing mutations and byte-preserving save paths.
 - Real golden samples once stable fixtures are available.

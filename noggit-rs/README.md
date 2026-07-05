@@ -23,6 +23,7 @@ renderer, or UI.
 2. Parse WDT map flags plus ADT chunk containers, typed headers, terrain
    heights, normals, texture layers, alpha maps, asset filename blocks,
    filename offset tables, placement tables, and `MH2O` liquid layers.
+   `LiquidType.dbc` is parsed for liquid render metadata.
 3. Load a local map directory through `noggit-vfs` into a `noggit-core`
    `WorldMap` with sorted tiles, terrain chunks, liquid layers, assets, and
    placements.
@@ -75,7 +76,9 @@ from the client, uploads their primary BLP textures, and draws placed WMOs as
 static textured geometry. It loads M2 doodad root files plus their `00.skin`
 files, resolves direct diffuse textures, and draws placed M2s as static
 textured geometry. It also draws `MH2O` liquid surfaces with a transparent
-procedural animated water pass.
+animated water pass. With `--client`, liquid animation uses
+`DBFilesClient/LiquidType.dbc` plus the referenced BLP frame sequences uploaded
+as `wgpu` texture arrays.
 
 The UI also draws a debug placement overlay for loaded objects: M2 doodads are
 cyan wire boxes and WMO placements are orange wire boxes. Press `O` to toggle
@@ -84,5 +87,5 @@ real M2 meshes. Press `L` to toggle water. Camera movement is a free-fly
 camera: hold left mouse to look, `WASD` to move relative to the camera,
 `Q`/control to move down, `E`/space to move up, shift to accelerate, and mouse
 wheel to adjust movement speed. M2 animation, particles, advanced
-geoset/material behavior, LiquidType texture parity, WMO liquids/internal
+geoset/material behavior, water reflection/fog parity, WMO liquids/internal
 doodads, sky, and edit tools are still next.

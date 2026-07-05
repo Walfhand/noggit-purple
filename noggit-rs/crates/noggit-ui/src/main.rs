@@ -10,6 +10,7 @@ use std::time::Instant;
 use bytemuck::{Pod, Zeroable};
 use noggit_core::WorldMap;
 use noggit_formats::blp::{BlpFile, RgbaImage};
+use noggit_formats::dbc::{DbcFile, LiquidTypeRecord, LiquidTypeTable};
 use noggit_formats::m2::{M2File, M2SkinFile};
 use noggit_formats::wmo::{WmoFile, WmoGroupFile};
 use noggit_render::{
@@ -38,6 +39,8 @@ const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth24Plus;
 const TERRAIN_DETAIL_UV_SCALE: f32 = 8.0;
 const TERRAIN_ALPHA_MAP_SIDE: u32 = 64;
 const TERRAIN_ALPHA_MAP_BYTES: usize = 64 * 64;
+const LIQUID_TYPE_DBC_PATH: &str = "DBFilesClient/LiquidType.dbc";
+const WATER_MAX_TEXTURE_FRAMES: u32 = 30;
 
 fn main() -> ExitCode {
     match run() {
@@ -66,7 +69,15 @@ fn run() -> Result<(), String> {
     let gpu_mesh = GpuMesh::from_terrain_mesh(mesh, fallback_material_id, fallback_alpha_id)?;
     log_water_mesh_summary(&water_mesh);
     let water_bounds = water_mesh.bounds();
-    let gpu_water_mesh = GpuWaterMesh::from_water_mesh(water_mesh)?;
+    let water_liquid_ids = collect_water_liquid_ids(&water_mesh);
+    let mut water_material_images = load_water_material_images(&water_liquid_ids, client.as_ref())?;
+    let fallback_water_material_id = water_material_images.len();
+    water_material_images.push(missing_water_material_image());
+    let gpu_water_mesh = GpuWaterMesh::from_water_mesh(
+        water_mesh,
+        &water_material_images,
+        fallback_water_material_id,
+    )?;
     let m2_assets = load_m2_assets(&world, client.as_ref())?;
     let m2_mesh = build_m2_mesh(&world, &m2_assets).map_err(|err| err.to_string())?;
     log_m2_mesh_summary(&m2_mesh);
@@ -119,6 +130,7 @@ fn run() -> Result<(), String> {
         &gpu_marker_mesh,
         &material_images,
         &alpha_images,
+        &water_material_images,
         &m2_material_images,
         &wmo_material_images,
         camera.uniform(window.inner_size()),
@@ -240,6 +252,14 @@ struct MaterialImage {
     mipmaps: Vec<RgbaImage>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct WaterMaterialImage {
+    liquid_id: u16,
+    liquid_type: u32,
+    animation: [f32; 2],
+    frames: Vec<MaterialImage>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AlphaImage {
     values: [u8; TERRAIN_ALPHA_MAP_BYTES],
@@ -285,6 +305,168 @@ fn load_material_images(
     eprintln!("{label} textures loaded: {resolved}/{}", materials.len());
 
     Ok(images)
+}
+
+fn collect_water_liquid_ids(mesh: &WaterMesh) -> Vec<u16> {
+    let mut ids = BTreeSet::new();
+    for vertex in mesh.vertices() {
+        ids.insert(vertex.liquid_id);
+    }
+    ids.into_iter().collect()
+}
+
+fn load_water_material_images(
+    liquid_ids: &[u16],
+    client: Option<&WowClient>,
+) -> Result<Vec<WaterMaterialImage>, String> {
+    let Some(client) = client else {
+        return Ok(Vec::new());
+    };
+    let Some(liquid_types) = load_liquid_type_table(client)? else {
+        eprintln!(
+            "water textures loaded: 0/{} (missing LiquidType.dbc)",
+            liquid_ids.len()
+        );
+        return Ok(Vec::new());
+    };
+
+    let mut resolved = 0usize;
+    let mut frame_count = 0usize;
+    let mut materials = Vec::new();
+
+    for liquid_id in liquid_ids {
+        let Some(record) = liquid_types.get(u32::from(*liquid_id)) else {
+            eprintln!("water texture skipped: missing LiquidType.dbc id {liquid_id}");
+            continue;
+        };
+        let Some(material) = load_water_material_image(client, record) else {
+            eprintln!("water texture skipped: liquid id {liquid_id}");
+            continue;
+        };
+
+        resolved += 1;
+        frame_count += material.frames.len();
+        materials.push(material);
+    }
+
+    eprintln!(
+        "water textures loaded: {resolved}/{} frames={frame_count}",
+        liquid_ids.len()
+    );
+    Ok(materials)
+}
+
+fn load_liquid_type_table(client: &WowClient) -> Result<Option<LiquidTypeTable>, String> {
+    let path = VfsPath::new(LIQUID_TYPE_DBC_PATH).map_err(|err| err.to_string())?;
+    let bytes = match client.read_file(&path) {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(format!("failed to read {LIQUID_TYPE_DBC_PATH}: {err}")),
+    };
+    let dbc = DbcFile::parse(&bytes)
+        .map_err(|err| format!("failed to parse {LIQUID_TYPE_DBC_PATH}: {err}"))?;
+    LiquidTypeTable::parse(&dbc)
+        .map(Some)
+        .map_err(|err| format!("failed to decode {LIQUID_TYPE_DBC_PATH}: {err}"))
+}
+
+fn load_water_material_image(
+    client: &WowClient,
+    record: &LiquidTypeRecord,
+) -> Option<WaterMaterialImage> {
+    let bases = liquid_texture_base_candidates(record);
+    let frames = load_water_texture_frames(client, &bases)?;
+    let animation = if record.shader_type == 3 || record.animation == [0.0, 0.0] {
+        [1.0, 0.0]
+    } else {
+        record.animation
+    };
+
+    Some(WaterMaterialImage {
+        liquid_id: record.id.try_into().ok()?,
+        liquid_type: record.liquid_type,
+        animation,
+        frames,
+    })
+}
+
+fn load_water_texture_frames(client: &WowClient, bases: &[String]) -> Option<Vec<MaterialImage>> {
+    let first = load_water_texture_frame(client, bases, 1)?;
+    let mut frames = vec![first];
+
+    for frame in 2..=WATER_MAX_TEXTURE_FRAMES {
+        let Some(image) = load_water_texture_frame(client, bases, frame) else {
+            break;
+        };
+        if water_frame_compatible(&frames[0], &image) {
+            frames.push(image);
+        }
+    }
+
+    Some(frames)
+}
+
+fn load_water_texture_frame(
+    client: &WowClient,
+    bases: &[String],
+    frame: u32,
+) -> Option<MaterialImage> {
+    for base in bases {
+        for path in water_frame_path_candidates(base, frame) {
+            if let Some(image) = load_material_image(client, &path) {
+                return Some(image);
+            }
+        }
+    }
+    None
+}
+
+fn water_frame_compatible(first: &MaterialImage, next: &MaterialImage) -> bool {
+    first.mipmaps.len() == next.mipmaps.len()
+        && first
+            .mipmaps
+            .iter()
+            .zip(&next.mipmaps)
+            .all(|(left, right)| left.width == right.width && left.height == right.height)
+}
+
+fn liquid_texture_base_candidates(record: &LiquidTypeRecord) -> Vec<String> {
+    let mut candidates = Vec::new();
+
+    if record.shader_type == 3 {
+        candidates.push("XTextures/river/lake_a.".to_string());
+    }
+
+    for texture in &record.texture_filenames {
+        if texture.is_empty() {
+            continue;
+        }
+        let normalized = texture.replace('\\', "/");
+        candidates.push(liquid_texture_stem_without_frame(&normalized));
+        if normalized.len() > 6 {
+            candidates.push(normalized[..normalized.len() - 6].to_string());
+        }
+    }
+
+    dedup_strings(candidates)
+}
+
+fn liquid_texture_stem_without_frame(path: &str) -> String {
+    let without_extension = path
+        .strip_suffix(".blp")
+        .or_else(|| path.strip_suffix(".BLP"))
+        .unwrap_or(path);
+    without_extension
+        .trim_end_matches(|value: char| value.is_ascii_digit())
+        .to_string()
+}
+
+fn water_frame_path_candidates(base: &str, frame: u32) -> Vec<String> {
+    let mut candidates = vec![format!("{base}{frame}.blp")];
+    if frame < 10 {
+        candidates.push(format!("{base}0{frame}.blp"));
+    }
+    dedup_strings(candidates)
 }
 
 fn load_m2_assets(
@@ -512,6 +694,30 @@ fn missing_material_image() -> MaterialImage {
     complete_material_mipmaps(&mut mipmaps);
 
     MaterialImage { mipmaps }
+}
+
+fn missing_water_material_image() -> WaterMaterialImage {
+    let mut pixels = Vec::with_capacity(16 * 16 * 4);
+    for y in 0..16 {
+        for x in 0..16 {
+            let ripple = if (x + y) % 7 == 0 { 118 } else { 92 };
+            pixels.extend_from_slice(&[ripple / 3, ripple, ripple + 18, 255]);
+        }
+    }
+
+    let mut mipmaps = vec![RgbaImage {
+        width: 16,
+        height: 16,
+        pixels,
+    }];
+    complete_material_mipmaps(&mut mipmaps);
+
+    WaterMaterialImage {
+        liquid_id: u16::MAX,
+        liquid_type: 0,
+        animation: [1.0, 0.0],
+        frames: vec![MaterialImage { mipmaps }],
+    }
 }
 
 fn decode_blp_mipmaps(blp: &BlpFile) -> Option<Vec<RgbaImage>> {
@@ -867,6 +1073,11 @@ struct GpuMarkerMesh {
 }
 
 struct GpuWaterMesh {
+    groups: Vec<GpuWaterMeshGroup>,
+}
+
+struct GpuWaterMeshGroup {
+    material_id: usize,
     vertices: Vec<GpuWaterVertex>,
     indices: Vec<u32>,
 }
@@ -955,14 +1166,62 @@ impl GpuMesh {
 }
 
 impl GpuWaterMesh {
-    fn from_water_mesh(mesh: WaterMesh) -> Result<Self, String> {
-        let _ = u32::try_from(mesh.indices().len())
-            .map_err(|_| "water index buffer exceeds u32 draw range".to_string())?;
+    fn from_water_mesh(
+        mesh: WaterMesh,
+        water_materials: &[WaterMaterialImage],
+        fallback_material_id: usize,
+    ) -> Result<Self, String> {
+        let material_ids = water_materials
+            .iter()
+            .enumerate()
+            .map(|(index, material)| (material.liquid_id, index))
+            .collect::<BTreeMap<_, _>>();
+        let mut group_lookup = BTreeMap::new();
+        let mut groups = Vec::new();
 
-        Ok(Self {
-            vertices: mesh.vertices().iter().map(gpu_water_vertex).collect(),
-            indices: mesh.indices().to_vec(),
-        })
+        for triangle in mesh.indices().chunks_exact(3) {
+            let a = mesh
+                .vertices()
+                .get(triangle[0] as usize)
+                .ok_or_else(|| "water triangle references missing vertex".to_string())?;
+            let b = mesh
+                .vertices()
+                .get(triangle[1] as usize)
+                .ok_or_else(|| "water triangle references missing vertex".to_string())?;
+            let c = mesh
+                .vertices()
+                .get(triangle[2] as usize)
+                .ok_or_else(|| "water triangle references missing vertex".to_string())?;
+            let material_id = material_ids
+                .get(&a.liquid_id)
+                .copied()
+                .unwrap_or(fallback_material_id);
+            let group_index = if let Some(index) = group_lookup.get(&material_id) {
+                *index
+            } else {
+                let index = groups.len();
+                groups.push(GpuWaterMeshGroup {
+                    material_id,
+                    vertices: Vec::new(),
+                    indices: Vec::new(),
+                });
+                group_lookup.insert(material_id, index);
+                index
+            };
+            let group = groups
+                .get_mut(group_index)
+                .ok_or_else(|| "water triangle references missing material group".to_string())?;
+            let base_index = u32::try_from(group.vertices.len())
+                .map_err(|_| "water material group has too many vertices".to_string())?;
+
+            group.vertices.extend([a, b, c].map(gpu_water_vertex));
+            group
+                .indices
+                .extend_from_slice(&[base_index, base_index + 1, base_index + 2]);
+        }
+
+        groups.retain(|group| !group.indices.is_empty());
+        Ok(Self { groups })
     }
 }
 
@@ -1151,16 +1410,16 @@ struct GpuState<'window> {
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
     water_buffer: wgpu::Buffer,
-    water_bind_group: wgpu::BindGroup,
     started_at: Instant,
     _material_textures: Vec<GpuTextureResource>,
     _alpha_textures: Vec<GpuTextureResource>,
     _m2_textures: Vec<GpuTextureResource>,
     _wmo_textures: Vec<GpuTextureResource>,
+    _water_textures: Vec<GpuTextureResource>,
     draw_groups: Vec<GpuDrawGroup>,
     m2_draw_groups: Vec<GpuM2DrawGroup>,
     wmo_draw_groups: Vec<GpuWmoDrawGroup>,
-    water_draw: Option<GpuWaterDraw>,
+    water_draw_groups: Vec<GpuWaterDrawGroup>,
     marker_draw: Option<GpuMarkerDraw>,
 }
 
@@ -1181,6 +1440,14 @@ struct WmoBindResources<'a> {
     layout: &'a wgpu::BindGroupLayout,
     sampler: &'a wgpu::Sampler,
     textures: &'a [GpuTextureResource],
+}
+
+struct WaterBindResources<'a> {
+    layout: &'a wgpu::BindGroupLayout,
+    time_buffer: &'a wgpu::Buffer,
+    sampler: &'a wgpu::Sampler,
+    textures: &'a [GpuTextureResource],
+    materials: &'a [WaterMaterialImage],
 }
 
 struct GpuDrawGroup {
@@ -1204,7 +1471,9 @@ struct GpuM2DrawGroup {
     index_count: u32,
 }
 
-struct GpuWaterDraw {
+struct GpuWaterDrawGroup {
+    bind_group: wgpu::BindGroup,
+    _material_buffer: wgpu::Buffer,
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
     index_count: u32,
@@ -1233,6 +1502,7 @@ impl<'window> GpuState<'window> {
         marker_mesh: &GpuMarkerMesh,
         material_images: &[MaterialImage],
         alpha_images: &[AlphaImage],
+        water_material_images: &[WaterMaterialImage],
         m2_material_images: &[MaterialImage],
         wmo_material_images: &[MaterialImage],
         camera_uniform: CameraUniform,
@@ -1335,25 +1605,31 @@ impl<'window> GpuState<'window> {
         let water_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("water-bind-group-layout"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
                     },
-                    count: None,
-                }],
+                    texture_array_layout_entry(1),
+                    sampler_layout_entry(2),
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
             });
-        let water_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("water-bind-group"),
-            layout: &water_bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: water_buffer.as_entire_binding(),
-            }],
-        });
         let layer_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("terrain-layer-bind-group-layout"),
@@ -1404,6 +1680,16 @@ impl<'window> GpuState<'window> {
             mipmap_filter: wgpu::FilterMode::Linear,
             ..wgpu::SamplerDescriptor::default()
         });
+        let water_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("water-texture-sampler"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Linear,
+            ..wgpu::SamplerDescriptor::default()
+        });
         let material_textures = material_images
             .iter()
             .enumerate()
@@ -1424,6 +1710,11 @@ impl<'window> GpuState<'window> {
             .enumerate()
             .map(|(index, alpha)| create_alpha_texture(&device, &queue, index, alpha))
             .collect::<Vec<_>>();
+        let water_textures = water_material_images
+            .iter()
+            .enumerate()
+            .map(|(index, material)| create_water_texture_array(&device, &queue, index, material))
+            .collect::<Result<Vec<_>, _>>()?;
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("terrain-shader"),
@@ -1652,7 +1943,19 @@ impl<'window> GpuState<'window> {
             .enumerate()
             .map(|(index, group)| create_m2_draw_group(&device, index, group, &m2_resources))
             .collect::<Result<Vec<_>, _>>()?;
-        let water_draw = create_water_draw(&device, water_mesh)?;
+        let water_resources = WaterBindResources {
+            layout: &water_bind_group_layout,
+            time_buffer: &water_buffer,
+            sampler: &water_sampler,
+            textures: &water_textures,
+            materials: water_material_images,
+        };
+        let water_draw_groups = water_mesh
+            .groups
+            .iter()
+            .enumerate()
+            .map(|(index, group)| create_water_draw_group(&device, index, group, &water_resources))
+            .collect::<Result<Vec<_>, _>>()?;
         let marker_draw = create_marker_draw(&device, marker_mesh)?;
         let depth = DepthTarget::new(&device, &config);
 
@@ -1669,16 +1972,16 @@ impl<'window> GpuState<'window> {
             camera_buffer,
             camera_bind_group,
             water_buffer,
-            water_bind_group,
             started_at: Instant::now(),
             _material_textures: material_textures,
             _alpha_textures: alpha_textures,
             _m2_textures: m2_textures,
             _wmo_textures: wmo_textures,
+            _water_textures: water_textures,
             draw_groups,
             m2_draw_groups,
             wmo_draw_groups,
-            water_draw,
+            water_draw_groups,
             marker_draw,
         })
     }
@@ -1769,15 +2072,15 @@ impl<'window> GpuState<'window> {
                     pass.draw_indexed(0..group.index_count, 0, 0..1);
                 }
             }
-            if view_options.show_water
-                && let Some(water_draw) = &self.water_draw
-            {
+            if view_options.show_water {
                 pass.set_pipeline(&self.water_pipeline);
                 pass.set_bind_group(0, &self.camera_bind_group, &[]);
-                pass.set_bind_group(1, &self.water_bind_group, &[]);
-                pass.set_vertex_buffer(0, water_draw.vertex_buffer.slice(..));
-                pass.set_index_buffer(water_draw.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..water_draw.index_count, 0, 0..1);
+                for group in &self.water_draw_groups {
+                    pass.set_bind_group(1, &group.bind_group, &[]);
+                    pass.set_vertex_buffer(0, group.vertex_buffer.slice(..));
+                    pass.set_index_buffer(group.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..group.index_count, 0, 0..1);
+                }
             }
             if view_options.show_object_markers
                 && let Some(marker_draw) = &self.marker_draw
@@ -1806,6 +2109,19 @@ fn texture_layout_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
         ty: wgpu::BindingType::Texture {
             sample_type: wgpu::TextureSampleType::Float { filterable: true },
             view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
+        count: None,
+    }
+}
+
+fn texture_array_layout_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+            view_dimension: wgpu::TextureViewDimension::D2Array,
             multisampled: false,
         },
         count: None,
@@ -1873,6 +2189,82 @@ fn create_material_texture(
     }
 
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    Ok(GpuTextureResource {
+        _texture: texture,
+        view,
+    })
+}
+
+fn create_water_texture_array(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    index: usize,
+    material: &WaterMaterialImage,
+) -> Result<GpuTextureResource, String> {
+    let first_frame = material
+        .frames
+        .first()
+        .ok_or_else(|| "water material has no frames".to_string())?;
+    let first_mipmap = first_frame
+        .mipmaps
+        .first()
+        .ok_or_else(|| "water material frame has no mipmaps".to_string())?;
+    let mip_level_count = u32::try_from(first_frame.mipmaps.len())
+        .map_err(|_| "water material has too many mipmaps".to_string())?;
+    let array_layers = u32::try_from(material.frames.len())
+        .map_err(|_| "water material has too many frames".to_string())?;
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(&format!("water-material-texture-{index}")),
+        size: wgpu::Extent3d {
+            width: first_mipmap.width.max(1),
+            height: first_mipmap.height.max(1),
+            depth_or_array_layers: array_layers.max(1),
+        },
+        mip_level_count,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+
+    for (frame_index, frame) in material.frames.iter().enumerate() {
+        let frame_layer =
+            u32::try_from(frame_index).map_err(|_| "water frame index exceeds u32".to_string())?;
+        for (level, image) in frame.mipmaps.iter().enumerate() {
+            let mip_level =
+                u32::try_from(level).map_err(|_| "water mip level exceeds u32".to_string())?;
+            queue.write_texture(
+                wgpu::ImageCopyTexture {
+                    texture: &texture,
+                    mip_level,
+                    origin: wgpu::Origin3d {
+                        x: 0,
+                        y: 0,
+                        z: frame_layer,
+                    },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &image.pixels,
+                wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(image.width.max(1) * 4),
+                    rows_per_image: Some(image.height.max(1)),
+                },
+                wgpu::Extent3d {
+                    width: image.width.max(1),
+                    height: image.height.max(1),
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+    }
+
+    let view = texture.create_view(&wgpu::TextureViewDescriptor {
+        dimension: Some(wgpu::TextureViewDimension::D2Array),
+        array_layer_count: Some(array_layers.max(1)),
+        ..wgpu::TextureViewDescriptor::default()
+    });
     Ok(GpuTextureResource {
         _texture: texture,
         view,
@@ -2140,32 +2532,86 @@ fn create_m2_draw_group(
     })
 }
 
-fn create_water_draw(
+fn create_water_bind_group(
     device: &wgpu::Device,
-    mesh: &GpuWaterMesh,
-) -> Result<Option<GpuWaterDraw>, String> {
-    if mesh.indices.is_empty() {
-        return Ok(None);
-    }
+    index: usize,
+    group: &GpuWaterMeshGroup,
+    material_buffer: &wgpu::Buffer,
+    resources: &WaterBindResources<'_>,
+) -> Result<wgpu::BindGroup, String> {
+    let texture = resources
+        .textures
+        .get(group.material_id)
+        .ok_or_else(|| "water group references missing material texture".to_string())?;
 
-    let index_count = u32::try_from(mesh.indices.len())
+    Ok(device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some(&format!("water-bind-group-{index}")),
+        layout: resources.layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: resources.time_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(texture.view()),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::Sampler(resources.sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: material_buffer.as_entire_binding(),
+            },
+        ],
+    }))
+}
+
+fn create_water_draw_group(
+    device: &wgpu::Device,
+    index: usize,
+    group: &GpuWaterMeshGroup,
+    resources: &WaterBindResources<'_>,
+) -> Result<GpuWaterDrawGroup, String> {
+    let material = resources
+        .materials
+        .get(group.material_id)
+        .ok_or_else(|| "water group references missing material".to_string())?;
+    let material_uniform = WaterMaterialUniform {
+        params: [
+            material.liquid_type as f32,
+            material.frames.len() as f32,
+            material.animation[0],
+            material.animation[1],
+        ],
+    };
+    let material_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some(&format!("water-material-buffer-{index}")),
+        contents: bytemuck::bytes_of(&material_uniform),
+        usage: wgpu::BufferUsages::UNIFORM,
+    });
+    let bind_group = create_water_bind_group(device, index, group, &material_buffer, resources)?;
+    let index_count = u32::try_from(group.indices.len())
         .map_err(|_| "water index buffer exceeds u32 draw range".to_string())?;
     let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("water-vertex-buffer"),
-        contents: bytemuck::cast_slice(&mesh.vertices),
+        label: Some(&format!("water-vertex-buffer-{index}")),
+        contents: bytemuck::cast_slice(&group.vertices),
         usage: wgpu::BufferUsages::VERTEX,
     });
     let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("water-index-buffer"),
-        contents: bytemuck::cast_slice(&mesh.indices),
+        label: Some(&format!("water-index-buffer-{index}")),
+        contents: bytemuck::cast_slice(&group.indices),
         usage: wgpu::BufferUsages::INDEX,
     });
 
-    Ok(Some(GpuWaterDraw {
+    Ok(GpuWaterDrawGroup {
+        bind_group,
+        _material_buffer: material_buffer,
         vertex_buffer,
         index_buffer,
         index_count,
-    }))
+    })
 }
 
 fn create_marker_draw(
@@ -2231,6 +2677,12 @@ struct CameraUniform {
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct WaterUniform {
+    params: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct WaterMaterialUniform {
     params: [f32; 4],
 }
 
@@ -2648,11 +3100,24 @@ struct WaterState {
     params: vec4<f32>,
 };
 
+struct WaterMaterial {
+    params: vec4<f32>,
+};
+
 @group(0) @binding(0)
 var<uniform> camera: Camera;
 
 @group(1) @binding(0)
 var<uniform> water: WaterState;
+
+@group(1) @binding(1)
+var water_texture: texture_2d_array<f32>;
+
+@group(1) @binding(2)
+var water_sampler: sampler;
+
+@group(1) @binding(3)
+var<uniform> water_material: WaterMaterial;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
@@ -2666,7 +3131,6 @@ struct VertexOutput {
     @location(0) tex_coord: vec2<f32>,
     @location(1) depth: f32,
     @location(2) wave: f32,
-    @location(3) liquid_id: f32,
 };
 
 @vertex
@@ -2682,22 +3146,43 @@ fn vs_water(input: VertexInput) -> VertexOutput {
     output.tex_coord = input.tex_coord;
     output.depth = input.depth;
     output.wave = wave;
-    output.liquid_id = input.liquid_id;
     return output;
+}
+
+fn rotate_uv(value: vec2<f32>, degrees: f32) -> vec2<f32> {
+    let angle = degrees * 0.01745329252;
+    let s = sin(angle);
+    let c = cos(angle);
+    return vec2<f32>(value.x * c - value.y * s, value.x * s + value.y * c);
 }
 
 @fragment
 fn fs_water(input: VertexOutput) -> @location(0) vec4<f32> {
     let time = water.params.x;
+    let liquid_type = u32(water_material.params.x + 0.5);
+    let frame_count = max(i32(water_material.params.y + 0.5), 1);
+    let frame = i32(floor(time * 8.0)) % frame_count;
+    let anim = water_material.params.zw;
+
+    if (liquid_type == 2u || liquid_type == 3u) {
+        let uv = input.tex_coord + anim * (time / 48.0);
+        return textureSample(water_texture, water_sampler, uv, frame);
+    }
+
+    let uv_scale = max(abs(anim.x), 1.0);
+    let uv = rotate_uv(input.tex_coord * uv_scale, anim.y)
+        + vec2<f32>(time * 0.006, time * 0.004);
+    let texel = textureSample(water_texture, water_sampler, uv, frame);
     let wave_a = sin((input.tex_coord.x + time * 0.018) * 10.0);
     let wave_b = cos((input.tex_coord.y - time * 0.014) * 12.0);
-    let wave = clamp((wave_a + wave_b) * 0.08 + input.wave * 2.0, -0.25, 0.25);
-    let liquid_tint = clamp(input.liquid_id * 0.0008, 0.0, 0.07);
-    let shallow = vec3<f32>(0.16, 0.42 + liquid_tint, 0.48 + liquid_tint);
-    let deep = vec3<f32>(0.04, 0.20 + liquid_tint, 0.28 + liquid_tint);
-    let factor = clamp(input.depth * 0.85 + 0.08 + wave, 0.0, 1.0);
-    let color = shallow * (1.0 - factor) + deep * factor;
-    let alpha = clamp(0.24 + input.depth * 0.24, 0.22, 0.50);
+    let wave = clamp((wave_a + wave_b) * 0.05 + input.wave, -0.15, 0.15);
+    let shallow = vec3<f32>(0.16, 0.39, 0.45);
+    let deep = vec3<f32>(0.03, 0.18, 0.26);
+    let depth_factor = clamp(input.depth * 0.85 + 0.08 + wave, 0.0, 1.0);
+    let base = shallow * (1.0 - depth_factor) + deep * depth_factor;
+    let texture_detail = (texel.rgb - vec3<f32>(0.5)) * 0.32;
+    let color = clamp(base + texture_detail, vec3<f32>(0.0), vec3<f32>(1.0));
+    let alpha = clamp((0.24 + input.depth * 0.24) * max(texel.a, 0.55), 0.20, 0.52);
     return vec4<f32>(color, alpha);
 }
 "#;
@@ -2817,6 +3302,36 @@ mod tests {
         assert!(options.show_m2_meshes);
         assert!(options.show_wmo_meshes);
         assert!(options.show_water);
+    }
+
+    #[test]
+    fn builds_water_texture_frame_candidates_from_liquid_type_record() {
+        let record = LiquidTypeRecord {
+            id: 7,
+            liquid_type: 0,
+            shader_type: 0,
+            texture_filenames: [
+                "XTextures\\river\\lake_a.1.blp".to_string(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+            ],
+            animation: [1.0, 0.0],
+        };
+
+        assert_eq!(
+            liquid_texture_base_candidates(&record),
+            ["XTextures/river/lake_a.", "XTextures/river/lake_a"]
+        );
+        assert_eq!(
+            water_frame_path_candidates("XTextures/river/lake_a.", 1),
+            [
+                "XTextures/river/lake_a.1.blp",
+                "XTextures/river/lake_a.01.blp"
+            ]
+        );
     }
 
     #[test]

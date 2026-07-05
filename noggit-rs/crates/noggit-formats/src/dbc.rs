@@ -23,6 +23,36 @@ pub struct DbcFile {
     string_table: Vec<u8>,
 }
 
+/// One `LiquidType.dbc` record needed by liquid rendering.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LiquidTypeRecord {
+    /// Liquid id referenced by `MH2O`.
+    pub id: u32,
+    /// Basic liquid type: river, ocean, magma, or slime in WotLK data.
+    pub liquid_type: u32,
+    /// Raw shader type field.
+    pub shader_type: u32,
+    /// Texture filename templates from the DBC record.
+    pub texture_filenames: [String; LIQUID_TEXTURE_FILENAME_COUNT],
+    /// Liquid animation parameters.
+    pub animation: [f32; 2],
+}
+
+/// Parsed `LiquidType.dbc` table.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LiquidTypeTable {
+    records: Vec<LiquidTypeRecord>,
+}
+
+const LIQUID_TYPE_MIN_FIELD_COUNT: u32 = 25;
+const LIQUID_TYPE_ID_FIELD: usize = 0;
+const LIQUID_TYPE_TYPE_FIELD: usize = 3;
+const LIQUID_TYPE_SHADER_TYPE_FIELD: usize = 14;
+const LIQUID_TYPE_TEXTURE_FILENAME_FIELD: usize = 15;
+const LIQUID_TYPE_ANIMATION_X_FIELD: usize = 23;
+const LIQUID_TYPE_ANIMATION_Y_FIELD: usize = 24;
+const LIQUID_TEXTURE_FILENAME_COUNT: usize = 6;
+
 impl DbcFile {
     /// Parse a DBC file from bytes.
     pub fn parse(bytes: &[u8]) -> FormatResult<Self> {
@@ -146,6 +176,52 @@ impl DbcFile {
     }
 }
 
+impl LiquidTypeTable {
+    /// Build a typed LiquidType table from a parsed DBC file.
+    pub fn parse(dbc: &DbcFile) -> FormatResult<Self> {
+        if dbc.header().field_count < LIQUID_TYPE_MIN_FIELD_COUNT {
+            return Err(FormatError::InvalidRange {
+                field: "LiquidType field count",
+            });
+        }
+
+        let mut records = Vec::with_capacity(dbc.record_count());
+        for index in 0..dbc.record_count() {
+            let record = dbc.record(index)?;
+            let texture_filenames = std::array::from_fn(|offset| {
+                let field = LIQUID_TYPE_TEXTURE_FILENAME_FIELD + offset;
+                record
+                    .u32(field)
+                    .and_then(|offset| dbc.string_at(offset).map(str::to_owned))
+            });
+            let texture_filenames = collect_array_result(texture_filenames)?;
+
+            records.push(LiquidTypeRecord {
+                id: record.u32(LIQUID_TYPE_ID_FIELD)?,
+                liquid_type: record.u32(LIQUID_TYPE_TYPE_FIELD)?,
+                shader_type: record.u32(LIQUID_TYPE_SHADER_TYPE_FIELD)?,
+                texture_filenames,
+                animation: [
+                    record.f32(LIQUID_TYPE_ANIMATION_X_FIELD)?,
+                    record.f32(LIQUID_TYPE_ANIMATION_Y_FIELD)?,
+                ],
+            });
+        }
+
+        Ok(Self { records })
+    }
+
+    /// Return all liquid type records in file order.
+    pub fn records(&self) -> &[LiquidTypeRecord] {
+        &self.records
+    }
+
+    /// Find a liquid type by id.
+    pub fn get(&self, id: u32) -> Option<&LiquidTypeRecord> {
+        self.records.iter().find(|record| record.id == id)
+    }
+}
+
 /// Borrowed DBC record.
 #[derive(Debug, Clone, Copy)]
 pub struct DbcRecord<'a> {
@@ -184,4 +260,11 @@ fn checked_usize_mul_u(lhs: usize, rhs: usize, field: &'static str) -> FormatRes
 fn checked_usize_add(lhs: usize, rhs: usize, field: &'static str) -> FormatResult<usize> {
     lhs.checked_add(rhs)
         .ok_or(FormatError::InvalidRange { field })
+}
+
+fn collect_array_result<T, const N: usize>(values: [FormatResult<T>; N]) -> FormatResult<[T; N]> {
+    let values = values.into_iter().collect::<FormatResult<Vec<_>>>()?;
+    values.try_into().map_err(|_| FormatError::InvalidRange {
+        field: "array length",
+    })
 }

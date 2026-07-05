@@ -59,6 +59,7 @@ Implemented:
   C++ Noggit backend for WotLK MPQs including large patch archives.
 - DBC header/record/string parsing.
 - DBC byte-identical roundtrip.
+- Typed `LiquidType.dbc` metadata extraction for liquid render assets.
 - Raw ADT chunk container parsing.
 - Raw WDT chunk container parsing plus `MPHD` map flags.
 - ADT `MVER` version extraction.
@@ -117,9 +118,11 @@ Implemented:
   current `MDDF` doodad placements as static textured geometry. Press `N` to
   toggle real M2 meshes.
 - `noggit-ui` draws `MH2O` liquid surfaces through a separate transparent GPU
-  pass with simple procedural animation. Press `L` to toggle water. This does
-  not yet use `LiquidType.dbc` textures, reflection/fog parity, WMO liquids, or
-  legacy `MCLQ` water.
+  pass. With `--client`, it reads `DBFilesClient/LiquidType.dbc`, resolves the
+  referenced animated liquid BLP frame sequences, uploads them as `wgpu`
+  texture arrays, and samples the active frame in the water shader. Press `L`
+  to toggle water. This still leaves reflection/fog parity, WMO liquids, and
+  legacy `MCLQ` water for later slices.
 - Camera movement in `noggit-ui` is a free-fly camera: hold left mouse to look,
   `WASD` moves relative to the camera, `Q` or control moves down, `E` or space
   moves up, shift accelerates, and mouse wheel adjusts movement speed.
@@ -147,11 +150,12 @@ Implemented:
   geometry (`M2 assets loaded: 71/71`, `M2 textures loaded: 111/111`,
   `M2 mesh: placements=2246 ... triangles=314589` in the last smoke run) and
   the 6 WMO placements as static textured geometry (`WMO assets loaded: 2/2`,
-  `WMO textures loaded: 16/16`). Press `N` to toggle M2 meshes, `M` to toggle
-  WMO meshes, `L` to toggle water, and `O` to toggle debug placement boxes. The
-  preview still does not render M2 animation/particles/advanced material
-  behavior, LiquidType texture parity, WMO liquids, WMO internal doodads, sky,
-  or edit tools.
+  `WMO textures loaded: 16/16`) and current `MH2O` water with liquid textures
+  from `LiquidType.dbc` (`water textures loaded: 5/5 frames=150` in the last
+  smoke run). Press `N` to toggle M2 meshes, `M` to toggle WMO meshes, `L` to
+  toggle water, and `O` to toggle debug placement boxes. The preview still does
+  not render M2 animation/particles/advanced material behavior, water
+  reflection/fog parity, WMO liquids, WMO internal doodads, sky, or edit tools.
 - `cargo run -p noggit-cli -- check-map-textures /home/walfhand/Documents/wow-maps/guerilla /home/walfhand/Documents/Ultimate\ WotLK /home/walfhand/Documents/wow-maps/patch-guerilla.MPQ`
   currently decodes all 12 terrain textures referenced by Guerilla.
 
@@ -161,7 +165,7 @@ Next:
   parity, and selection.
 - WMO material parity, liquids, fog, doodad sets, internal doodads, and
   selection.
-- LiquidType.dbc texture parity, WMO liquids, legacy `MCLQ` liquid support, and
+- Water reflection/fog parity, WMO liquids, legacy `MCLQ` liquid support, and
   water editing/save paths.
 - Terrain editing mutations and byte-preserving save paths.
 - Real golden samples once stable fixtures are available.

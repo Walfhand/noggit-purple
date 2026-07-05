@@ -3161,18 +3161,25 @@ fn fs_water(input: VertexOutput) -> @location(0) vec4<f32> {
     let time = water.params.x;
     let liquid_type = u32(water_material.params.x + 0.5);
     let frame_count = max(i32(water_material.params.y + 0.5), 1);
-    let frame = i32(floor(time * 8.0)) % frame_count;
+    let frame_phase = time * 16.0;
+    let frame = i32(floor(frame_phase)) % frame_count;
+    let next_frame = (frame + 1) % frame_count;
+    let frame_blend = fract(frame_phase);
     let anim = water_material.params.zw;
 
     if (liquid_type == 2u || liquid_type == 3u) {
         let uv = input.tex_coord + anim * (time / 48.0);
-        return textureSample(water_texture, water_sampler, uv, frame);
+        let current = textureSample(water_texture, water_sampler, uv, frame);
+        let next = textureSample(water_texture, water_sampler, uv, next_frame);
+        return mix(current, next, frame_blend);
     }
 
     let uv_scale = max(abs(anim.x), 1.0);
     let uv = rotate_uv(input.tex_coord * uv_scale, anim.y)
-        + vec2<f32>(time * 0.006, time * 0.004);
-    let texel = textureSample(water_texture, water_sampler, uv, frame);
+        + vec2<f32>(time * 0.018, time * 0.011);
+    let current = textureSample(water_texture, water_sampler, uv, frame);
+    let next = textureSample(water_texture, water_sampler, uv, next_frame);
+    let texel = mix(current, next, frame_blend);
     let wave_a = sin((input.tex_coord.x + time * 0.018) * 10.0);
     let wave_b = cos((input.tex_coord.y - time * 0.014) * 12.0);
     let wave = clamp((wave_a + wave_b) * 0.05 + input.wave, -0.15, 0.15);

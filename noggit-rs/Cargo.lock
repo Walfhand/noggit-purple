@@ -1316,6 +1316,7 @@ name = "noggit-render"
 version = "0.1.0"
 dependencies = [
  "noggit-core",
+ "noggit-formats",
 ]
 
 [[package]]

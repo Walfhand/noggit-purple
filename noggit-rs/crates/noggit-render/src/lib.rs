@@ -1,10 +1,11 @@
 //! Renderer crate for the Rust rewrite.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
 use noggit_core::{ModelPlacement, TerrainChunk, WmoPlacement, WorldMap};
+use noggit_formats::wmo::{WmoBatch, WmoFile, WmoGroupFile, WmoMaterial};
 
 /// Full ADT tile width in yards.
 pub const TILE_SIZE: f32 = 1600.0 / 3.0;
@@ -19,6 +20,7 @@ const WMO_MARKER_COLOR: [f32; 4] = [1.0, 0.62, 0.16, 1.0];
 const MODEL_MARKER_HALF_SIZE: f32 = 3.0;
 const MODEL_MARKER_HEIGHT: f32 = 12.0;
 const MIN_MARKER_EXTENT: f32 = 2.0;
+const DEFAULT_WMO_TEXTURE: &str = "textures/shanecube.blp";
 
 /// Result type used by renderer preparation code.
 pub type RenderResult<T> = Result<T, RenderError>;
@@ -32,6 +34,8 @@ pub enum RenderError {
     TooManyMaterials,
     /// The terrain mesh would exceed `u32` alpha map id capacity.
     TooManyAlphaMaps,
+    /// A WMO asset could not be converted into render data.
+    WmoFormat(String),
 }
 
 /// One terrain vertex ready for renderer upload or software preview.
@@ -73,6 +77,39 @@ pub struct TerrainMesh {
 pub struct TerrainAlphaMap {
     /// Alpha values in row-major 64x64 order.
     pub values: [u8; TERRAIN_ALPHA_MAP_SIZE],
+}
+
+/// One WMO vertex in map-local render space.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WmoVertex {
+    /// Position in map-local render space.
+    pub position: [f32; 3],
+    /// Normal in render axis order.
+    pub normal: [f32; 3],
+    /// Texture coordinate.
+    pub tex_coord: [f32; 2],
+    /// Index into [`WmoMesh::materials`].
+    pub material_id: Option<u32>,
+}
+
+/// Parsed WMO root plus group files ready for renderer mesh extraction.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WmoRenderAsset {
+    /// Root WMO file.
+    pub root: WmoFile,
+    /// Group WMO files in group-index order.
+    pub groups: Vec<WmoGroupFile>,
+}
+
+/// Renderer-facing WMO scene mesh generated from loaded WMO placements.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WmoMesh {
+    vertices: Vec<WmoVertex>,
+    indices: Vec<u32>,
+    materials: Vec<String>,
+    bounds: Option<TerrainBounds>,
+    placement_count: usize,
+    loaded_asset_count: usize,
 }
 
 /// One colored vertex for a debug placement overlay.
@@ -117,6 +154,38 @@ impl TerrainMesh {
     /// Return mesh bounds when at least one vertex exists.
     pub fn bounds(&self) -> Option<TerrainBounds> {
         self.bounds
+    }
+}
+
+impl WmoMesh {
+    /// Return all WMO vertices.
+    pub fn vertices(&self) -> &[WmoVertex] {
+        &self.vertices
+    }
+
+    /// Return triangle indices.
+    pub fn indices(&self) -> &[u32] {
+        &self.indices
+    }
+
+    /// Return texture assets referenced by WMO vertices.
+    pub fn materials(&self) -> &[String] {
+        &self.materials
+    }
+
+    /// Return WMO mesh bounds when at least one vertex exists.
+    pub fn bounds(&self) -> Option<TerrainBounds> {
+        self.bounds
+    }
+
+    /// Return number of WMO placements emitted into this mesh.
+    pub fn placement_count(&self) -> usize {
+        self.placement_count
+    }
+
+    /// Return number of distinct WMO assets used by emitted placements.
+    pub fn loaded_asset_count(&self) -> usize {
+        self.loaded_asset_count
     }
 }
 
@@ -168,6 +237,7 @@ impl Display for RenderError {
             Self::TooManyVertices => write!(f, "terrain mesh has too many vertices"),
             Self::TooManyMaterials => write!(f, "terrain mesh has too many materials"),
             Self::TooManyAlphaMaps => write!(f, "terrain mesh has too many alpha maps"),
+            Self::WmoFormat(err) => write!(f, "WMO render data is invalid: {err}"),
         }
     }
 }
@@ -228,6 +298,315 @@ pub fn build_terrain_mesh(map: &WorldMap) -> RenderResult<TerrainMesh> {
         alpha_maps,
         bounds,
     })
+}
+
+/// Build transformed WMO triangle geometry for loaded map placements.
+pub fn build_wmo_mesh(
+    map: &WorldMap,
+    assets: &BTreeMap<String, WmoRenderAsset>,
+) -> RenderResult<WmoMesh> {
+    let min_tile_x = map.tiles().iter().map(|tile| tile.coord().x).min();
+    let min_tile_y = map.tiles().iter().map(|tile| tile.coord().y).min();
+    let Some(min_tile_x) = min_tile_x else {
+        return Ok(WmoMesh {
+            vertices: Vec::new(),
+            indices: Vec::new(),
+            materials: Vec::new(),
+            bounds: None,
+            placement_count: 0,
+            loaded_asset_count: 0,
+        });
+    };
+    let min_tile_y = min_tile_y.unwrap_or(0);
+
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+    let mut materials = Vec::new();
+    let mut material_ids = BTreeMap::new();
+    let mut bounds = None;
+    let mut placement_count = 0usize;
+    let mut loaded_assets = BTreeSet::new();
+
+    for tile in map.tiles() {
+        for placement in tile.wmo_placements() {
+            let Some(asset_name) = placement.asset.as_ref() else {
+                continue;
+            };
+            let Some(asset) = assets.get(asset_name) else {
+                continue;
+            };
+
+            append_wmo_placement_mesh(
+                placement,
+                asset,
+                min_tile_x,
+                min_tile_y,
+                &mut materials,
+                &mut material_ids,
+                &mut vertices,
+                &mut indices,
+                &mut bounds,
+            )?;
+            placement_count += 1;
+            loaded_assets.insert(asset_name.clone());
+        }
+    }
+
+    Ok(WmoMesh {
+        vertices,
+        indices,
+        materials,
+        bounds,
+        placement_count,
+        loaded_asset_count: loaded_assets.len(),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_wmo_placement_mesh(
+    placement: &WmoPlacement,
+    asset: &WmoRenderAsset,
+    min_tile_x: u32,
+    min_tile_y: u32,
+    materials: &mut Vec<String>,
+    material_ids: &mut BTreeMap<String, u32>,
+    vertices: &mut Vec<WmoVertex>,
+    indices: &mut Vec<u32>,
+    bounds: &mut Option<TerrainBounds>,
+) -> RenderResult<()> {
+    let root_materials = asset
+        .root
+        .materials()
+        .map_err(render_wmo_error)?
+        .unwrap_or_default();
+    let root_textures = asset
+        .root
+        .texture_filenames()
+        .map_err(render_wmo_error)?
+        .unwrap_or_default();
+
+    for group in &asset.groups {
+        let Some(group_indices) = group.indices().map_err(render_wmo_error)? else {
+            continue;
+        };
+        let Some(group_vertices) = group.vertices().map_err(render_wmo_error)? else {
+            continue;
+        };
+        let group_normals = group.normals().map_err(render_wmo_error)?;
+        let group_tex_coords = group.tex_coords().map_err(render_wmo_error)?;
+        let batches = group
+            .batches()
+            .map_err(render_wmo_error)?
+            .unwrap_or_else(|| {
+                vec![WmoBatch {
+                    unused: [0; 6],
+                    index_start: 0,
+                    index_count: group_indices.len().min(u16::MAX as usize) as u16,
+                    vertex_start: 0,
+                    vertex_end: group_vertices
+                        .len()
+                        .saturating_sub(1)
+                        .min(u16::MAX as usize) as u16,
+                    flags: 0,
+                    texture: 0,
+                }]
+            });
+
+        for batch in batches {
+            append_wmo_batch_mesh(
+                placement,
+                &root_materials,
+                &root_textures,
+                &group_indices,
+                &group_vertices,
+                group_normals.as_deref(),
+                group_tex_coords.as_deref(),
+                batch,
+                min_tile_x,
+                min_tile_y,
+                materials,
+                material_ids,
+                vertices,
+                indices,
+                bounds,
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_wmo_batch_mesh(
+    placement: &WmoPlacement,
+    root_materials: &[WmoMaterial],
+    root_textures: &[String],
+    group_indices: &[u16],
+    group_vertices: &[[f32; 3]],
+    group_normals: Option<&[[f32; 3]]>,
+    group_tex_coords: Option<&[[f32; 2]]>,
+    batch: WmoBatch,
+    min_tile_x: u32,
+    min_tile_y: u32,
+    materials: &mut Vec<String>,
+    material_ids: &mut BTreeMap<String, u32>,
+    vertices: &mut Vec<WmoVertex>,
+    indices: &mut Vec<u32>,
+    bounds: &mut Option<TerrainBounds>,
+) -> RenderResult<()> {
+    let start = usize::try_from(batch.index_start).map_err(|_| {
+        RenderError::WmoFormat("MOBA index_start exceeds usize capacity".to_string())
+    })?;
+    let count = usize::from(batch.index_count);
+    let end = start.checked_add(count).ok_or_else(|| {
+        RenderError::WmoFormat("MOBA index range exceeds usize capacity".to_string())
+    })?;
+    let batch_indices = group_indices.get(start..end).ok_or_else(|| {
+        RenderError::WmoFormat("MOBA references missing MOVI indices".to_string())
+    })?;
+    let material_index = wmo_batch_material_index(batch);
+    let material_id = root_materials
+        .get(material_index)
+        .and_then(|material| wmo_texture_by_offset(root_textures, material.texture_offset_1))
+        .map(|asset| material_id_for(asset, materials, material_ids))
+        .transpose()?;
+
+    for index in batch_indices {
+        let source_index = usize::from(*index);
+        let source_position = group_vertices.get(source_index).ok_or_else(|| {
+            RenderError::WmoFormat("MOVI references missing MOVT vertex".to_string())
+        })?;
+        let source_normal = group_normals
+            .and_then(|normals| normals.get(source_index).copied())
+            .unwrap_or([0.0, 0.0, 1.0]);
+        let tex_coord = group_tex_coords
+            .and_then(|tex_coords| tex_coords.get(source_index).copied())
+            .unwrap_or([0.0, 0.0]);
+        let position = transform_wmo_position(
+            wmo_vec3_to_render(*source_position),
+            placement,
+            min_tile_x,
+            min_tile_y,
+        );
+        let normal = transform_wmo_normal(wmo_vec3_to_render(source_normal), placement.rotation);
+        let index = u32::try_from(vertices.len()).map_err(|_| RenderError::TooManyVertices)?;
+
+        extend_bounds(bounds, position);
+        vertices.push(WmoVertex {
+            position,
+            normal,
+            tex_coord,
+            material_id,
+        });
+        indices.push(index);
+    }
+
+    Ok(())
+}
+
+fn wmo_batch_material_index(batch: WmoBatch) -> usize {
+    if batch.flags == 2
+        && let Ok(index) = usize::try_from(batch.unused[5])
+    {
+        index
+    } else {
+        usize::from(batch.texture)
+    }
+}
+
+fn wmo_texture_by_offset(textures: &[String], offset: u32) -> Option<&str> {
+    let mut current_offset = 0u32;
+    for texture in textures {
+        if current_offset == offset {
+            return if texture.is_empty() {
+                Some(DEFAULT_WMO_TEXTURE)
+            } else {
+                Some(texture)
+            };
+        }
+        current_offset =
+            current_offset.checked_add(u32::try_from(texture.len()).ok()?.checked_add(1)?)?;
+    }
+    None
+}
+
+fn transform_wmo_position(
+    local_position: [f32; 3],
+    placement: &WmoPlacement,
+    min_tile_x: u32,
+    min_tile_y: u32,
+) -> [f32; 3] {
+    let scale = if placement.scale == 0 {
+        1.0
+    } else {
+        placement.scale as f32 / 1024.0
+    };
+    let rotated = rotate_wmo_vector(scale_vec3(local_position, scale), placement.rotation);
+    let world_position = [
+        placement.position[0] + rotated[0],
+        placement.position[1] + rotated[1],
+        placement.position[2] + rotated[2],
+    ];
+
+    world_position_to_render_local(world_position, min_tile_x, min_tile_y)
+}
+
+fn transform_wmo_normal(local_normal: [f32; 3], rotation: [f32; 3]) -> [f32; 3] {
+    normalize_vec3(rotate_wmo_vector(local_normal, rotation))
+}
+
+fn rotate_wmo_vector(value: [f32; 3], rotation_degrees: [f32; 3]) -> [f32; 3] {
+    let value = rotate_x(value, rotation_degrees[2].to_radians());
+    let value = rotate_z(value, (-rotation_degrees[0]).to_radians());
+    rotate_y(value, (rotation_degrees[1] - 90.0).to_radians())
+}
+
+fn wmo_vec3_to_render(value: [f32; 3]) -> [f32; 3] {
+    [value[0], value[2], -value[1]]
+}
+
+fn rotate_x(value: [f32; 3], angle: f32) -> [f32; 3] {
+    let (sin, cos) = angle.sin_cos();
+    [
+        value[0],
+        value[1] * cos - value[2] * sin,
+        value[1] * sin + value[2] * cos,
+    ]
+}
+
+fn rotate_y(value: [f32; 3], angle: f32) -> [f32; 3] {
+    let (sin, cos) = angle.sin_cos();
+    [
+        value[0] * cos + value[2] * sin,
+        value[1],
+        -value[0] * sin + value[2] * cos,
+    ]
+}
+
+fn rotate_z(value: [f32; 3], angle: f32) -> [f32; 3] {
+    let (sin, cos) = angle.sin_cos();
+    [
+        value[0] * cos - value[1] * sin,
+        value[0] * sin + value[1] * cos,
+        value[2],
+    ]
+}
+
+fn scale_vec3(value: [f32; 3], factor: f32) -> [f32; 3] {
+    [value[0] * factor, value[1] * factor, value[2] * factor]
+}
+
+fn normalize_vec3(value: [f32; 3]) -> [f32; 3] {
+    let length = (value[0] * value[0] + value[1] * value[1] + value[2] * value[2]).sqrt();
+    if length <= f32::EPSILON {
+        [0.0, 1.0, 0.0]
+    } else {
+        scale_vec3(value, 1.0 / length)
+    }
+}
+
+fn render_wmo_error(error: noggit_formats::FormatError) -> RenderError {
+    RenderError::WmoFormat(error.to_string())
 }
 
 /// Build debug line boxes for loaded M2 and WMO placements.
@@ -582,6 +961,7 @@ fn mcvt_row_columns(row: usize) -> usize {
 mod tests {
     use super::*;
     use noggit_core::WorldMap;
+    use noggit_formats::wmo::{WmoFile, WmoGroupFile};
     use std::error::Error;
     use std::fs;
     use std::path::PathBuf;
@@ -660,6 +1040,37 @@ mod tests {
         assert_eq!(markers.vertices()[0].color, MODEL_MARKER_COLOR);
         assert_eq!(markers.vertices()[8].color, WMO_MARKER_COLOR);
         assert!(markers.bounds().is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn builds_wmo_mesh_from_loaded_placement_and_asset() -> Result<(), Box<dyn Error>> {
+        let root = test_root("noggit-render-wmo-mesh")?;
+        let map_dir = root.join("testmap");
+        fs::create_dir_all(&map_dir)?;
+        fs::write(map_dir.join("testmap.wdt"), fixture_wdt())?;
+        fs::write(map_dir.join("testmap_27_25.adt"), fixture_adt())?;
+
+        let map = WorldMap::load_from_local_directory(&map_dir)?;
+        let mut assets = BTreeMap::new();
+        assets.insert(
+            "world/bridge.wmo".to_string(),
+            WmoRenderAsset {
+                root: WmoFile::parse(&fixture_wmo_root())?,
+                groups: vec![WmoGroupFile::parse(&fixture_wmo_group())?],
+            },
+        );
+        let mesh = build_wmo_mesh(&map, &assets)?;
+
+        fs::remove_dir_all(&root)?;
+
+        assert_eq!(mesh.materials(), &["textures/stone.blp".to_string()]);
+        assert_eq!(mesh.vertices().len(), 3);
+        assert_eq!(mesh.indices(), &[0, 1, 2]);
+        assert_eq!(mesh.placement_count(), 1);
+        assert_eq!(mesh.loaded_asset_count(), 1);
+        assert_close(mesh.vertices()[0].position, [60.0, 20.0, 80.0]);
+        assert_eq!(mesh.vertices()[0].material_id, Some(0));
         Ok(())
     }
 
@@ -783,10 +1194,114 @@ mod tests {
         bytes
     }
 
+    fn fixture_wmo_root() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&chunk(b"MVER", &17_u32.to_le_bytes()));
+        bytes.extend_from_slice(&chunk(b"MOHD", &wmo_mohd()));
+        bytes.extend_from_slice(&chunk(b"MOTX", b"textures/stone.blp\0"));
+        bytes.extend_from_slice(&chunk(b"MOMT", &wmo_momt()));
+        bytes.extend_from_slice(&chunk(b"MOGN", b"group\0"));
+        bytes.extend_from_slice(&chunk(b"MOGI", &wmo_mogi()));
+        bytes
+    }
+
+    fn fixture_wmo_group() -> Vec<u8> {
+        let mut mogp = wmo_mogp_header();
+        mogp.extend_from_slice(&chunk(b"MOPY", &[0x20, 0]));
+        mogp.extend_from_slice(&chunk(
+            b"MOVI",
+            &[0_u16, 1, 2]
+                .into_iter()
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<_>>(),
+        ));
+        mogp.extend_from_slice(&chunk(
+            b"MOVT",
+            &[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]
+                .into_iter()
+                .flatten()
+                .flat_map(f32::to_le_bytes)
+                .collect::<Vec<_>>(),
+        ));
+        mogp.extend_from_slice(&chunk(
+            b"MONR",
+            &[[0.0, 0.0, 1.0]; 3]
+                .into_iter()
+                .flatten()
+                .flat_map(f32::to_le_bytes)
+                .collect::<Vec<_>>(),
+        ));
+        mogp.extend_from_slice(&chunk(
+            b"MOTV",
+            &[[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]]
+                .into_iter()
+                .flatten()
+                .flat_map(f32::to_le_bytes)
+                .collect::<Vec<_>>(),
+        ));
+        mogp.extend_from_slice(&chunk(b"MOBA", &wmo_moba()));
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&chunk(b"MVER", &17_u32.to_le_bytes()));
+        bytes.extend_from_slice(&chunk(b"MOGP", &mogp));
+        bytes
+    }
+
+    fn wmo_mohd() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for value in [1_u32, 1, 0, 0, 0, 0, 0, 0, 42] {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        push_vec3(&mut bytes, [-1.0, -2.0, -3.0]);
+        push_vec3(&mut bytes, [1.0, 2.0, 3.0]);
+        bytes.extend_from_slice(&0_u16.to_le_bytes());
+        bytes.extend_from_slice(&0_u16.to_le_bytes());
+        bytes
+    }
+
+    fn wmo_momt() -> Vec<u8> {
+        let mut bytes = vec![0; 64];
+        write_u32(&mut bytes, 12, 0);
+        bytes
+    }
+
+    fn wmo_mogi() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0_u32.to_le_bytes());
+        push_vec3(&mut bytes, [1.0, 2.0, 3.0]);
+        push_vec3(&mut bytes, [-1.0, -2.0, -3.0]);
+        bytes.extend_from_slice(&0_i32.to_le_bytes());
+        bytes
+    }
+
+    fn wmo_mogp_header() -> Vec<u8> {
+        let mut bytes = vec![0; 68];
+        write_u32(&mut bytes, 56, 99);
+        bytes
+    }
+
+    fn wmo_moba() -> Vec<u8> {
+        let mut bytes = vec![0; 24];
+        write_u32(&mut bytes, 12, 0);
+        write_u16(&mut bytes, 16, 3);
+        write_u16(&mut bytes, 18, 0);
+        write_u16(&mut bytes, 20, 2);
+        bytes[23] = 0;
+        bytes
+    }
+
     fn push_vec3(bytes: &mut Vec<u8>, values: [f32; 3]) {
         for value in values {
             bytes.extend_from_slice(&value.to_le_bytes());
         }
+    }
+
+    fn chunk(id: &[u8; 4], data: &[u8]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(id);
+        bytes.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(data);
+        bytes
     }
 
     fn stored_chunk(id: &[u8; 4], data: &[u8]) -> Vec<u8> {
@@ -807,8 +1322,21 @@ mod tests {
         bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
     }
 
+    fn write_u16(bytes: &mut [u8], offset: usize, value: u16) {
+        bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+    }
+
     fn write_f32(bytes: &mut [u8], offset: usize, value: f32) {
         bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn assert_close(actual: [f32; 3], expected: [f32; 3]) {
+        for (actual, expected) in actual.into_iter().zip(expected) {
+            assert!(
+                (actual - expected).abs() < 0.001,
+                "expected {actual} ~= {expected}"
+            );
+        }
     }
 
     fn test_root(prefix: &str) -> Result<PathBuf, Box<dyn Error>> {

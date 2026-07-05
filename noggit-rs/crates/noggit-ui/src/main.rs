@@ -9,9 +9,10 @@ use std::process::ExitCode;
 use bytemuck::{Pod, Zeroable};
 use noggit_core::WorldMap;
 use noggit_formats::blp::{BlpFile, RgbaImage};
+use noggit_formats::wmo::{WmoFile, WmoGroupFile};
 use noggit_render::{
-    PlacementMarkerMesh, PlacementMarkerVertex, TerrainBounds, TerrainMesh, TerrainVertex,
-    build_placement_marker_mesh, build_terrain_mesh,
+    PlacementMarkerMesh, PlacementMarkerVertex, TerrainBounds, TerrainMesh, TerrainVertex, WmoMesh,
+    WmoRenderAsset, WmoVertex, build_placement_marker_mesh, build_terrain_mesh, build_wmo_mesh,
 };
 use noggit_vfs::{ArchiveLoadState, FileSource, VfsPath, WowClient, WowClientConfig};
 use wgpu::util::DeviceExt;
@@ -50,16 +51,26 @@ fn run() -> Result<(), String> {
         WorldMap::load_from_local_directory(&options.map_path).map_err(|err| err.to_string())?;
     let mesh = build_terrain_mesh(&world).map_err(|err| err.to_string())?;
     let marker_mesh = build_placement_marker_mesh(&world).map_err(|err| err.to_string())?;
-    let mut material_images = load_material_images(mesh.materials(), &options)?;
+    let client = open_preview_client(&options)?;
+    let mut material_images = load_material_images("terrain", mesh.materials(), client.as_ref())?;
     let fallback_material_id = material_images.len();
     material_images.push(missing_material_image());
     let mut alpha_images = load_alpha_images(mesh.alpha_maps());
     let fallback_alpha_id = alpha_images.len();
     alpha_images.push(empty_alpha_image());
     let gpu_mesh = GpuMesh::from_terrain_mesh(mesh, fallback_material_id, fallback_alpha_id)?;
+    let wmo_assets = load_wmo_assets(&world, client.as_ref())?;
+    let wmo_mesh = build_wmo_mesh(&world, &wmo_assets).map_err(|err| err.to_string())?;
+    log_wmo_mesh_summary(&wmo_mesh);
+    let wmo_bounds = wmo_mesh.bounds();
+    let mut wmo_material_images =
+        load_material_images("WMO", wmo_mesh.materials(), client.as_ref())?;
+    let fallback_wmo_material_id = wmo_material_images.len();
+    wmo_material_images.push(missing_material_image());
+    let gpu_wmo_mesh = GpuWmoMesh::from_wmo_mesh(wmo_mesh, fallback_wmo_material_id)?;
     let gpu_marker_mesh = GpuMarkerMesh::from_marker_mesh(&marker_mesh)?;
     let mut camera = Camera::new(gpu_mesh.bounds);
-    log_render_bounds(gpu_mesh.bounds, marker_mesh.bounds());
+    log_render_bounds(gpu_mesh.bounds, marker_mesh.bounds(), wmo_bounds);
     eprintln!(
         "object placement markers: {} placements, {} lines",
         marker_mesh.marker_count(),
@@ -80,9 +91,11 @@ fn run() -> Result<(), String> {
     let mut gpu = pollster::block_on(GpuState::new(
         window,
         &gpu_mesh,
+        &gpu_wmo_mesh,
         &gpu_marker_mesh,
         &material_images,
         &alpha_images,
+        &wmo_material_images,
         camera.uniform(window.inner_size()),
     ))?;
     let mut input = InputState::default();
@@ -207,12 +220,9 @@ struct AlphaImage {
     values: [u8; TERRAIN_ALPHA_MAP_BYTES],
 }
 
-fn load_material_images(
-    materials: &[String],
-    options: &PreviewOptions,
-) -> Result<Vec<MaterialImage>, String> {
+fn open_preview_client(options: &PreviewOptions) -> Result<Option<WowClient>, String> {
     let Some(client_path) = &options.client_path else {
-        return Ok(vec![missing_material_image(); materials.len()]);
+        return Ok(None);
     };
 
     let client = WowClient::open_with_config(
@@ -224,11 +234,22 @@ fn load_material_images(
     )
     .map_err(|err| format!("failed to open WoW client {}: {err}", client_path.display()))?;
     log_client_archive_summary(&client);
+    Ok(Some(client))
+}
+
+fn load_material_images(
+    label: &str,
+    materials: &[String],
+    client: Option<&WowClient>,
+) -> Result<Vec<MaterialImage>, String> {
+    let Some(client) = client else {
+        return Ok(vec![missing_material_image(); materials.len()]);
+    };
 
     let mut resolved = 0usize;
     let images = materials
         .iter()
-        .map(|material| match load_material_image(&client, material) {
+        .map(|material| match load_material_image(client, material) {
             Some(image) => {
                 resolved += 1;
                 image
@@ -236,9 +257,81 @@ fn load_material_images(
             None => missing_material_image(),
         })
         .collect::<Vec<_>>();
-    eprintln!("terrain textures loaded: {resolved}/{}", materials.len());
+    eprintln!("{label} textures loaded: {resolved}/{}", materials.len());
 
     Ok(images)
+}
+
+fn load_wmo_assets(
+    world: &WorldMap,
+    client: Option<&WowClient>,
+) -> Result<BTreeMap<String, WmoRenderAsset>, String> {
+    let Some(client) = client else {
+        return Ok(BTreeMap::new());
+    };
+
+    let mut asset_names = BTreeSet::new();
+    for tile in world.tiles() {
+        for placement in tile.wmo_placements() {
+            if let Some(asset) = placement.asset.as_ref() {
+                asset_names.insert(asset.clone());
+            }
+        }
+    }
+
+    let mut assets = BTreeMap::new();
+    for asset in &asset_names {
+        match load_wmo_asset(client, asset) {
+            Ok(asset_data) => {
+                assets.insert(asset.clone(), asset_data);
+            }
+            Err(error) => {
+                eprintln!("WMO asset skipped: {asset}: {error}");
+            }
+        }
+    }
+    eprintln!("WMO assets loaded: {}/{}", assets.len(), asset_names.len());
+
+    Ok(assets)
+}
+
+fn load_wmo_asset(client: &WowClient, asset: &str) -> Result<WmoRenderAsset, String> {
+    let root_path =
+        VfsPath::new(asset).map_err(|err| format!("invalid WMO path {asset}: {err}"))?;
+    let root_bytes = client
+        .read_file(&root_path)
+        .map_err(|err| format!("failed to read root WMO: {err}"))?;
+    let root = WmoFile::parse(&root_bytes).map_err(|err| format!("failed to parse root: {err}"))?;
+    let group_count = root
+        .header()
+        .map_err(|err| format!("failed to parse root header: {err}"))?
+        .map(|header| header.group_count)
+        .unwrap_or(0);
+    let mut groups = Vec::new();
+
+    for group_index in 0..group_count {
+        let group_path = wmo_group_path(asset, group_index)?;
+        let group_vfs_path = VfsPath::new(&group_path)
+            .map_err(|err| format!("invalid WMO group path {group_path}: {err}"))?;
+        let group_bytes = client
+            .read_file(&group_vfs_path)
+            .map_err(|err| format!("failed to read group {group_index}: {err}"))?;
+        let group = WmoGroupFile::parse(&group_bytes)
+            .map_err(|err| format!("failed to parse group {group_index}: {err}"))?;
+        groups.push(group);
+    }
+
+    Ok(WmoRenderAsset { root, groups })
+}
+
+fn wmo_group_path(asset: &str, group_index: u32) -> Result<String, String> {
+    let lower = asset.to_ascii_lowercase();
+    if !lower.ends_with(".wmo") {
+        return Err("WMO path does not end with .wmo".to_string());
+    }
+
+    let stem = &asset[..asset.len() - 4];
+    Ok(format!("{stem}_{group_index:03}.wmo"))
 }
 
 fn log_client_archive_summary(client: &WowClient) {
@@ -396,7 +489,22 @@ fn empty_alpha_image() -> AlphaImage {
     }
 }
 
-fn log_render_bounds(terrain: TerrainBounds, markers: Option<TerrainBounds>) {
+fn log_wmo_mesh_summary(mesh: &WmoMesh) {
+    eprintln!(
+        "WMO mesh: placements={} assets={} materials={} vertices={} triangles={}",
+        mesh.placement_count(),
+        mesh.loaded_asset_count(),
+        mesh.materials().len(),
+        mesh.vertices().len(),
+        mesh.indices().len() / 3
+    );
+}
+
+fn log_render_bounds(
+    terrain: TerrainBounds,
+    markers: Option<TerrainBounds>,
+    wmo: Option<TerrainBounds>,
+) {
     eprintln!(
         "terrain bounds: min=({:.1},{:.1},{:.1}) max=({:.1},{:.1},{:.1})",
         terrain.min[0],
@@ -418,6 +526,14 @@ fn log_render_bounds(terrain: TerrainBounds, markers: Option<TerrainBounds>) {
         );
     } else {
         eprintln!("marker bounds: none");
+    }
+    if let Some(wmo) = wmo {
+        eprintln!(
+            "WMO bounds: min=({:.1},{:.1},{:.1}) max=({:.1},{:.1},{:.1})",
+            wmo.min[0], wmo.min[1], wmo.min[2], wmo.max[0], wmo.max[1], wmo.max[2]
+        );
+    } else {
+        eprintln!("WMO bounds: none");
     }
 }
 
@@ -490,6 +606,40 @@ impl GpuMarkerVertex {
     }
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct GpuWmoVertex {
+    position: [f32; 3],
+    normal: [f32; 3],
+    tex_coord: [f32; 2],
+}
+
+impl GpuWmoVertex {
+    fn layout() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<GpuWmoVertex>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &[
+                wgpu::VertexAttribute {
+                    offset: 0,
+                    shader_location: 0,
+                    format: wgpu::VertexFormat::Float32x3,
+                },
+                wgpu::VertexAttribute {
+                    offset: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
+                    shader_location: 1,
+                    format: wgpu::VertexFormat::Float32x3,
+                },
+                wgpu::VertexAttribute {
+                    offset: (std::mem::size_of::<[f32; 3]>() * 2) as wgpu::BufferAddress,
+                    shader_location: 2,
+                    format: wgpu::VertexFormat::Float32x2,
+                },
+            ],
+        }
+    }
+}
+
 struct GpuMesh {
     groups: Vec<GpuMeshGroup>,
     bounds: TerrainBounds,
@@ -504,6 +654,16 @@ struct GpuMeshGroup {
 
 struct GpuMarkerMesh {
     vertices: Vec<GpuMarkerVertex>,
+    indices: Vec<u32>,
+}
+
+struct GpuWmoMesh {
+    groups: Vec<GpuWmoMeshGroup>,
+}
+
+struct GpuWmoMeshGroup {
+    material_id: usize,
+    vertices: Vec<GpuWmoVertex>,
     indices: Vec<u32>,
 }
 
@@ -570,6 +730,54 @@ impl GpuMesh {
     }
 }
 
+impl GpuWmoMesh {
+    fn from_wmo_mesh(mesh: WmoMesh, fallback_material_id: usize) -> Result<Self, String> {
+        let mut group_lookup = BTreeMap::new();
+        let mut groups = Vec::new();
+
+        for triangle in mesh.indices().chunks_exact(3) {
+            let a = mesh
+                .vertices()
+                .get(triangle[0] as usize)
+                .ok_or_else(|| "WMO triangle references missing vertex".to_string())?;
+            let b = mesh
+                .vertices()
+                .get(triangle[1] as usize)
+                .ok_or_else(|| "WMO triangle references missing vertex".to_string())?;
+            let c = mesh
+                .vertices()
+                .get(triangle[2] as usize)
+                .ok_or_else(|| "WMO triangle references missing vertex".to_string())?;
+            let material_id = bounded_resource_id(a.material_id, fallback_material_id);
+            let group_index = if let Some(index) = group_lookup.get(&material_id) {
+                *index
+            } else {
+                let index = groups.len();
+                groups.push(GpuWmoMeshGroup {
+                    material_id,
+                    vertices: Vec::new(),
+                    indices: Vec::new(),
+                });
+                group_lookup.insert(material_id, index);
+                index
+            };
+            let group = groups
+                .get_mut(group_index)
+                .ok_or_else(|| "WMO triangle references missing material group".to_string())?;
+            let base_index = u32::try_from(group.vertices.len())
+                .map_err(|_| "WMO material group has too many vertices".to_string())?;
+
+            group.vertices.extend([a, b, c].map(gpu_wmo_vertex));
+            group
+                .indices
+                .extend_from_slice(&[base_index, base_index + 1, base_index + 2]);
+        }
+
+        groups.retain(|group| !group.indices.is_empty());
+        Ok(Self { groups })
+    }
+}
+
 impl GpuMarkerMesh {
     fn from_marker_mesh(mesh: &PlacementMarkerMesh) -> Result<Self, String> {
         let _ = u32::try_from(mesh.indices().len())
@@ -621,6 +829,14 @@ fn gpu_marker_vertex(vertex: &PlacementMarkerVertex) -> GpuMarkerVertex {
     }
 }
 
+fn gpu_wmo_vertex(vertex: &WmoVertex) -> GpuWmoVertex {
+    GpuWmoVertex {
+        position: vertex.position,
+        normal: normalize(vertex.normal),
+        tex_coord: vertex.tex_coord,
+    }
+}
+
 struct GpuState<'window> {
     surface: wgpu::Surface<'window>,
     device: wgpu::Device,
@@ -628,12 +844,15 @@ struct GpuState<'window> {
     config: wgpu::SurfaceConfiguration,
     depth: DepthTarget,
     pipeline: wgpu::RenderPipeline,
+    wmo_pipeline: wgpu::RenderPipeline,
     marker_pipeline: wgpu::RenderPipeline,
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
     _material_textures: Vec<GpuTextureResource>,
     _alpha_textures: Vec<GpuTextureResource>,
+    _wmo_textures: Vec<GpuTextureResource>,
     draw_groups: Vec<GpuDrawGroup>,
+    wmo_draw_groups: Vec<GpuWmoDrawGroup>,
     marker_draw: Option<GpuMarkerDraw>,
 }
 
@@ -650,7 +869,20 @@ struct LayerBindResources<'a> {
     alpha_textures: &'a [GpuTextureResource],
 }
 
+struct WmoBindResources<'a> {
+    layout: &'a wgpu::BindGroupLayout,
+    sampler: &'a wgpu::Sampler,
+    textures: &'a [GpuTextureResource],
+}
+
 struct GpuDrawGroup {
+    bind_group: wgpu::BindGroup,
+    vertex_buffer: wgpu::Buffer,
+    index_buffer: wgpu::Buffer,
+    index_count: u32,
+}
+
+struct GpuWmoDrawGroup {
     bind_group: wgpu::BindGroup,
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
@@ -670,12 +902,15 @@ impl GpuTextureResource {
 }
 
 impl<'window> GpuState<'window> {
+    #[allow(clippy::too_many_arguments)]
     async fn new(
         window: &'window Window,
         mesh: &GpuMesh,
+        wmo_mesh: &GpuWmoMesh,
         marker_mesh: &GpuMarkerMesh,
         material_images: &[MaterialImage],
         alpha_images: &[AlphaImage],
+        wmo_material_images: &[MaterialImage],
         camera_uniform: CameraUniform,
     ) -> Result<Self, String> {
         let size = window.inner_size();
@@ -782,6 +1017,11 @@ impl<'window> GpuState<'window> {
                     sampler_layout_entry(8),
                 ],
             });
+        let wmo_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("wmo-bind-group-layout"),
+                entries: &[texture_layout_entry(0), sampler_layout_entry(1)],
+            });
         let material_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("terrain-material-sampler"),
             address_mode_u: wgpu::AddressMode::Repeat,
@@ -802,7 +1042,22 @@ impl<'window> GpuState<'window> {
             mipmap_filter: wgpu::FilterMode::Nearest,
             ..wgpu::SamplerDescriptor::default()
         });
+        let wmo_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("wmo-material-sampler"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            address_mode_w: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Linear,
+            ..wgpu::SamplerDescriptor::default()
+        });
         let material_textures = material_images
+            .iter()
+            .enumerate()
+            .map(|(index, material)| create_material_texture(&device, &queue, index, material))
+            .collect::<Result<Vec<_>, _>>()?;
+        let wmo_textures = wmo_material_images
             .iter()
             .enumerate()
             .map(|(index, material)| create_material_texture(&device, &queue, index, material))
@@ -837,6 +1092,53 @@ impl<'window> GpuState<'window> {
                 targets: &[Some(wgpu::ColorTargetState {
                     format,
                     blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+        });
+        let wmo_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("wmo-shader"),
+            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(WMO_SHADER)),
+        });
+        let wmo_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("wmo-pipeline-layout"),
+            bind_group_layouts: &[&camera_bind_group_layout, &wmo_bind_group_layout],
+            push_constant_ranges: &[],
+        });
+        let wmo_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("wmo-pipeline"),
+            layout: Some(&wmo_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &wmo_shader,
+                entry_point: "vs_wmo",
+                buffers: &[GpuWmoVertex::layout()],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &wmo_shader,
+                entry_point: "fs_wmo",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
@@ -923,6 +1225,17 @@ impl<'window> GpuState<'window> {
                 create_draw_group(&device, index, group, &resources)
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let wmo_resources = WmoBindResources {
+            layout: &wmo_bind_group_layout,
+            sampler: &wmo_sampler,
+            textures: &wmo_textures,
+        };
+        let wmo_draw_groups = wmo_mesh
+            .groups
+            .iter()
+            .enumerate()
+            .map(|(index, group)| create_wmo_draw_group(&device, index, group, &wmo_resources))
+            .collect::<Result<Vec<_>, _>>()?;
         let marker_draw = create_marker_draw(&device, marker_mesh)?;
         let depth = DepthTarget::new(&device, &config);
 
@@ -933,12 +1246,15 @@ impl<'window> GpuState<'window> {
             config,
             depth,
             pipeline,
+            wmo_pipeline,
             marker_pipeline,
             camera_buffer,
             camera_bind_group,
             _material_textures: material_textures,
             _alpha_textures: alpha_textures,
+            _wmo_textures: wmo_textures,
             draw_groups,
+            wmo_draw_groups,
             marker_draw,
         })
     }
@@ -999,6 +1315,16 @@ impl<'window> GpuState<'window> {
                 pass.set_vertex_buffer(0, group.vertex_buffer.slice(..));
                 pass.set_index_buffer(group.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..group.index_count, 0, 0..1);
+            }
+            if view_options.show_wmo_meshes {
+                pass.set_pipeline(&self.wmo_pipeline);
+                pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                for group in &self.wmo_draw_groups {
+                    pass.set_bind_group(1, &group.bind_group, &[]);
+                    pass.set_vertex_buffer(0, group.vertex_buffer.slice(..));
+                    pass.set_index_buffer(group.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..group.index_count, 0, 0..1);
+                }
             }
             if view_options.show_object_markers
                 && let Some(marker_draw) = &self.marker_draw
@@ -1251,6 +1577,61 @@ fn create_draw_group(
     })
 }
 
+fn create_wmo_bind_group(
+    device: &wgpu::Device,
+    index: usize,
+    group: &GpuWmoMeshGroup,
+    resources: &WmoBindResources<'_>,
+) -> Result<wgpu::BindGroup, String> {
+    let texture = resources
+        .textures
+        .get(group.material_id)
+        .ok_or_else(|| "WMO group references missing material texture".to_string())?;
+
+    Ok(device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some(&format!("wmo-bind-group-{index}")),
+        layout: resources.layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(texture.view()),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(resources.sampler),
+            },
+        ],
+    }))
+}
+
+fn create_wmo_draw_group(
+    device: &wgpu::Device,
+    index: usize,
+    group: &GpuWmoMeshGroup,
+    resources: &WmoBindResources<'_>,
+) -> Result<GpuWmoDrawGroup, String> {
+    let bind_group = create_wmo_bind_group(device, index, group, resources)?;
+    let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some(&format!("wmo-vertex-buffer-{index}")),
+        contents: bytemuck::cast_slice(&group.vertices),
+        usage: wgpu::BufferUsages::VERTEX,
+    });
+    let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some(&format!("wmo-index-buffer-{index}")),
+        contents: bytemuck::cast_slice(&group.indices),
+        usage: wgpu::BufferUsages::INDEX,
+    });
+    let index_count = u32::try_from(group.indices.len())
+        .map_err(|_| "WMO index buffer exceeds u32 draw range".to_string())?;
+
+    Ok(GpuWmoDrawGroup {
+        bind_group,
+        vertex_buffer,
+        index_buffer,
+        index_count,
+    })
+}
+
 fn create_marker_draw(
     device: &wgpu::Device,
     mesh: &GpuMarkerMesh,
@@ -1443,12 +1824,14 @@ struct CameraBasis {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ViewOptions {
     show_object_markers: bool,
+    show_wmo_meshes: bool,
 }
 
 impl Default for ViewOptions {
     fn default() -> Self {
         Self {
             show_object_markers: true,
+            show_wmo_meshes: true,
         }
     }
 }
@@ -1458,6 +1841,10 @@ impl ViewOptions {
         match code {
             KeyCode::KeyO => {
                 self.show_object_markers = !self.show_object_markers;
+                true
+            }
+            KeyCode::KeyM => {
+                self.show_wmo_meshes = !self.show_wmo_meshes;
                 true
             }
             _ => false,
@@ -1685,6 +2072,53 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
 }
 "#;
 
+const WMO_SHADER: &str = r#"
+struct Camera {
+    view_projection: mat4x4<f32>,
+};
+
+@group(0) @binding(0)
+var<uniform> camera: Camera;
+
+@group(1) @binding(0)
+var wmo_texture: texture_2d<f32>;
+
+@group(1) @binding(1)
+var wmo_sampler: sampler;
+
+struct VertexInput {
+    @location(0) position: vec3<f32>,
+    @location(1) normal: vec3<f32>,
+    @location(2) tex_coord: vec2<f32>,
+};
+
+struct VertexOutput {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) normal: vec3<f32>,
+    @location(1) tex_coord: vec2<f32>,
+};
+
+@vertex
+fn vs_wmo(input: VertexInput) -> VertexOutput {
+    var output: VertexOutput;
+    output.clip_position = camera.view_projection * vec4<f32>(input.position, 1.0);
+    output.normal = input.normal;
+    output.tex_coord = input.tex_coord;
+    return output;
+}
+
+@fragment
+fn fs_wmo(input: VertexOutput) -> @location(0) vec4<f32> {
+    let tex = textureSample(wmo_texture, wmo_sampler, input.tex_coord);
+    if (tex.a < 0.05) {
+        discard;
+    }
+    let light = normalize(vec3<f32>(0.35, 0.88, 0.32));
+    let shade = 0.55 + max(dot(normalize(input.normal), light), 0.0) * 0.45;
+    return vec4<f32>(tex.rgb * shade, tex.a);
+}
+"#;
+
 const MARKER_SHADER: &str = r#"
 struct Camera {
     view_projection: mat4x4<f32>,
@@ -1726,12 +2160,19 @@ mod tests {
         let mut options = ViewOptions::default();
 
         assert!(options.show_object_markers);
+        assert!(options.show_wmo_meshes);
         assert!(options.handle_key_press(KeyCode::KeyO));
         assert!(!options.show_object_markers);
+        assert!(options.show_wmo_meshes);
         assert!(options.handle_key_press(KeyCode::KeyO));
         assert!(options.show_object_markers);
+        assert!(options.handle_key_press(KeyCode::KeyM));
+        assert!(!options.show_wmo_meshes);
+        assert!(options.handle_key_press(KeyCode::KeyM));
+        assert!(options.show_wmo_meshes);
         assert!(!options.handle_key_press(KeyCode::KeyP));
         assert!(options.show_object_markers);
+        assert!(options.show_wmo_meshes);
     }
 
     #[test]
@@ -1750,6 +2191,16 @@ mod tests {
             options.extra_archives,
             vec![PathBuf::from("/maps/patch-guerilla.MPQ")]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn builds_wmo_group_paths_from_root_path() -> Result<(), String> {
+        assert_eq!(
+            wmo_group_path("world/wmo/foo/bar.wmo", 7)?,
+            "world/wmo/foo/bar_007.wmo"
+        );
+        assert!(wmo_group_path("world/wmo/foo/bar.m2", 0).is_err());
         Ok(())
     }
 

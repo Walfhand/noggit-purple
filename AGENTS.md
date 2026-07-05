@@ -71,6 +71,9 @@ Implemented:
 - ADT asset filename blocks: `MTEX`, `MMDX`, `MWMO`.
 - ADT asset filename offset tables: `MMID`, `MWID`.
 - ADT doodad and WMO placement tables: `MDDF`, `MODF`.
+- WMO root parsing for `MOHD`, `MOTX`, `MOMT`, `MOGN`, and `MOGI`.
+- WMO group parsing for `MOGP` child mesh chunks: `MOPY`, `MOVI`, `MOVT`,
+  `MONR`, `MOTV`, and `MOBA`.
 - BLP header parsing and RGBA decoding for paletted textures plus DXT1, DXT3,
   and DXT5 mipmaps.
 - Core world-map model that loads local map directories into sorted ADT tiles,
@@ -81,10 +84,18 @@ Implemented:
 - Renderer debug marker extraction for loaded `MDDF` M2 doodad placements and
   `MODF` WMO placements. ADT placement coordinates are converted from global
   tile/world coordinates into the same map-local render space as terrain.
+- Renderer WMO mesh extraction from loaded WMO root/group assets. This first
+  WMO pass applies ADT placement position/rotation/scale on the CPU, emits
+  static triangles, maps primary `MOMT` textures through `MOTX`, and leaves WMO
+  liquids, fog, internal doodads, advanced material shaders, and selection for
+  later slices.
 - Desktop terrain preview window through `noggit-ui`, using `winit`/`wgpu` for
   filled terrain triangles, depth buffering, camera controls, repeated BLP
   texture sampling, generated/decoded mipmaps, and GPU blending of terrain
   `MCLY` layers through `MCAL` alpha maps.
+- `noggit-ui` loads WMO root/group files and their BLP textures from the same
+  WoW client/extra MPQ chain as terrain, then draws the current WMO placements
+  as static textured geometry. Press `M` to toggle real WMO meshes.
 - `noggit-ui` draws a debug object-placement overlay as colored wire boxes:
   cyan for M2 doodads and orange for WMO placements. The overlay is visible by
   default and can be toggled with `O`; this is the first small UI action state
@@ -104,17 +115,18 @@ Implemented:
   assets.
 - `cargo run -p noggit-ui -- /home/walfhand/Documents/wow-maps/guerilla --client /home/walfhand/Documents/Ultimate\ WotLK --extra-mpq /home/walfhand/Documents/wow-maps/patch-guerilla.MPQ`
   opens the current terrain preview and blends up to four terrain BLP layers
-  from the WoW client/extra MPQ using decoded `MCAL` alpha maps. It also draws
-  debug placement boxes for the loaded M2/WMO placements; press `O` to toggle
-  them. The preview still does not render real M2 doodad meshes, WMO geometry,
-  water, sky, or edit tools.
+  from the WoW client/extra MPQ using decoded `MCAL` alpha maps. It also loads
+  and renders the 6 WMO placements in Guerilla as static textured geometry
+  (`WMO assets loaded: 2/2`, `WMO textures loaded: 16/16` in the last smoke
+  run). Press `M` to toggle WMO meshes and `O` to toggle debug placement boxes.
+  The preview still does not render real M2 doodad meshes, WMO liquids, WMO
+  internal doodads, sky, or edit tools.
 - `cargo run -p noggit-cli -- check-map-textures /home/walfhand/Documents/wow-maps/guerilla /home/walfhand/Documents/Ultimate\ WotLK /home/walfhand/Documents/wow-maps/patch-guerilla.MPQ`
   currently decodes all 12 terrain textures referenced by Guerilla.
 
 Next:
 
-- MPQ/local asset decoding for M2 and WMO through `noggit-formats`.
-- Renderer-facing real M2 and WMO mesh loading using the placement data now
-  validated by debug markers.
+- M2 parsing/loading/rendering for doodads.
+- WMO material parity, liquids, fog, doodad sets, and selection.
 - Terrain editing mutations and byte-preserving save paths.
 - Real golden samples once stable fixtures are available.

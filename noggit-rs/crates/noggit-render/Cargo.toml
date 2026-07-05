@@ -7,6 +7,7 @@ repository.workspace = true
 
 [dependencies]
 noggit-core = { path = "../noggit-core" }
+noggit-formats = { path = "../noggit-formats" }
 
 [lints]
 workspace = true

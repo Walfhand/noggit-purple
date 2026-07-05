@@ -71,6 +71,10 @@ Implemented:
 - ADT asset filename blocks: `MTEX`, `MMDX`, `MWMO`.
 - ADT asset filename offset tables: `MMID`, `MWID`.
 - ADT doodad and WMO placement tables: `MDDF`, `MODF`.
+- M2 root parsing for WotLK `MD20` headers, static vertices, direct texture
+  definitions, and texture lookup tables.
+- M2 skin parsing for `SKIN` index lookup tables, triangle buffers, submeshes,
+  and texture units.
 - WMO root parsing for `MOHD`, `MOTX`, `MOMT`, `MOGN`, and `MOGI`.
 - WMO group parsing for `MOGP` child mesh chunks: `MOPY`, `MOVI`, `MOVT`,
   `MONR`, `MOTV`, and `MOBA`.
@@ -89,6 +93,12 @@ Implemented:
   static triangles, maps primary `MOMT` textures through `MOTX`, and leaves WMO
   liquids, fog, internal doodads, advanced material shaders, and selection for
   later slices.
+- Renderer M2 mesh extraction from loaded M2 root plus `00.skin` assets. This
+  first M2 pass resolves skin triangle indices through the model vertex lookup,
+  applies ADT `MDDF` placement position/rotation/scale on the CPU, maps direct
+  diffuse texture filenames through the M2 texture lookup table, and leaves M2
+  animation, particles, billboards, replacement textures, and advanced material
+  behavior for later slices.
 - Desktop terrain preview window through `noggit-ui`, using `winit`/`wgpu` for
   filled terrain triangles, depth buffering, camera controls, repeated BLP
   texture sampling, generated/decoded mipmaps, and GPU blending of terrain
@@ -96,6 +106,12 @@ Implemented:
 - `noggit-ui` loads WMO root/group files and their BLP textures from the same
   WoW client/extra MPQ chain as terrain, then draws the current WMO placements
   as static textured geometry. Press `M` to toggle real WMO meshes.
+- `noggit-ui` loads M2 root files, their `00.skin` files, and direct BLP
+  textures from the same WoW client/extra MPQ chain as terrain, then draws
+  current `MDDF` doodad placements as static textured geometry. Press `N` to
+  toggle real M2 meshes.
+- Camera movement in `noggit-ui` now supports vertical travel: `Q` or left
+  shift moves down, `E` or space moves up, and mouse wheel remains zoom.
 - `noggit-ui` draws a debug object-placement overlay as colored wire boxes:
   cyan for M2 doodads and orange for WMO placements. The overlay is visible by
   default and can be toggled with `O`; this is the first small UI action state
@@ -116,17 +132,22 @@ Implemented:
 - `cargo run -p noggit-ui -- /home/walfhand/Documents/wow-maps/guerilla --client /home/walfhand/Documents/Ultimate\ WotLK --extra-mpq /home/walfhand/Documents/wow-maps/patch-guerilla.MPQ`
   opens the current terrain preview and blends up to four terrain BLP layers
   from the WoW client/extra MPQ using decoded `MCAL` alpha maps. It also loads
-  and renders the 6 WMO placements in Guerilla as static textured geometry
-  (`WMO assets loaded: 2/2`, `WMO textures loaded: 16/16` in the last smoke
-  run). Press `M` to toggle WMO meshes and `O` to toggle debug placement boxes.
-  The preview still does not render real M2 doodad meshes, WMO liquids, WMO
-  internal doodads, sky, or edit tools.
+  and renders all current Guerilla M2 doodad placements as static textured
+  geometry (`M2 assets loaded: 71/71`, `M2 textures loaded: 111/111`,
+  `M2 mesh: placements=2246 ... triangles=314589` in the last smoke run) and
+  the 6 WMO placements as static textured geometry (`WMO assets loaded: 2/2`,
+  `WMO textures loaded: 16/16`). Press `N` to toggle M2 meshes, `M` to toggle
+  WMO meshes, and `O` to toggle debug placement boxes. The preview still does
+  not render M2 animation/particles/advanced material behavior, WMO liquids,
+  WMO internal doodads, sky, or edit tools.
 - `cargo run -p noggit-cli -- check-map-textures /home/walfhand/Documents/wow-maps/guerilla /home/walfhand/Documents/Ultimate\ WotLK /home/walfhand/Documents/wow-maps/patch-guerilla.MPQ`
   currently decodes all 12 terrain textures referenced by Guerilla.
 
 Next:
 
-- M2 parsing/loading/rendering for doodads.
-- WMO material parity, liquids, fog, doodad sets, and selection.
+- M2 animation, particles, billboards, replacement textures, geoset/material
+  parity, and selection.
+- WMO material parity, liquids, fog, doodad sets, internal doodads, and
+  selection.
 - Terrain editing mutations and byte-preserving save paths.
 - Real golden samples once stable fixtures are available.

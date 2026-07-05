@@ -4,6 +4,7 @@ pub mod adt;
 pub mod blp;
 pub mod dbc;
 pub mod error;
+pub mod m2;
 pub mod wdt;
 pub mod wmo;
 

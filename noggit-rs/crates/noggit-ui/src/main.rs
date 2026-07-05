@@ -9,10 +9,12 @@ use std::process::ExitCode;
 use bytemuck::{Pod, Zeroable};
 use noggit_core::WorldMap;
 use noggit_formats::blp::{BlpFile, RgbaImage};
+use noggit_formats::m2::{M2File, M2SkinFile};
 use noggit_formats::wmo::{WmoFile, WmoGroupFile};
 use noggit_render::{
-    PlacementMarkerMesh, PlacementMarkerVertex, TerrainBounds, TerrainMesh, TerrainVertex, WmoMesh,
-    WmoRenderAsset, WmoVertex, build_placement_marker_mesh, build_terrain_mesh, build_wmo_mesh,
+    M2Mesh, M2RenderAsset, M2RenderVertex, PlacementMarkerMesh, PlacementMarkerVertex,
+    TerrainBounds, TerrainMesh, TerrainVertex, WmoMesh, WmoRenderAsset, WmoVertex, build_m2_mesh,
+    build_placement_marker_mesh, build_terrain_mesh, build_wmo_mesh,
 };
 use noggit_vfs::{ArchiveLoadState, FileSource, VfsPath, WowClient, WowClientConfig};
 use wgpu::util::DeviceExt;
@@ -59,6 +61,14 @@ fn run() -> Result<(), String> {
     let fallback_alpha_id = alpha_images.len();
     alpha_images.push(empty_alpha_image());
     let gpu_mesh = GpuMesh::from_terrain_mesh(mesh, fallback_material_id, fallback_alpha_id)?;
+    let m2_assets = load_m2_assets(&world, client.as_ref())?;
+    let m2_mesh = build_m2_mesh(&world, &m2_assets).map_err(|err| err.to_string())?;
+    log_m2_mesh_summary(&m2_mesh);
+    let m2_bounds = m2_mesh.bounds();
+    let mut m2_material_images = load_material_images("M2", m2_mesh.materials(), client.as_ref())?;
+    let fallback_m2_material_id = m2_material_images.len();
+    m2_material_images.push(missing_material_image());
+    let gpu_m2_mesh = GpuM2Mesh::from_m2_mesh(m2_mesh, fallback_m2_material_id)?;
     let wmo_assets = load_wmo_assets(&world, client.as_ref())?;
     let wmo_mesh = build_wmo_mesh(&world, &wmo_assets).map_err(|err| err.to_string())?;
     log_wmo_mesh_summary(&wmo_mesh);
@@ -70,7 +80,7 @@ fn run() -> Result<(), String> {
     let gpu_wmo_mesh = GpuWmoMesh::from_wmo_mesh(wmo_mesh, fallback_wmo_material_id)?;
     let gpu_marker_mesh = GpuMarkerMesh::from_marker_mesh(&marker_mesh)?;
     let mut camera = Camera::new(gpu_mesh.bounds);
-    log_render_bounds(gpu_mesh.bounds, marker_mesh.bounds(), wmo_bounds);
+    log_render_bounds(gpu_mesh.bounds, marker_mesh.bounds(), m2_bounds, wmo_bounds);
     eprintln!(
         "object placement markers: {} placements, {} lines",
         marker_mesh.marker_count(),
@@ -91,10 +101,12 @@ fn run() -> Result<(), String> {
     let mut gpu = pollster::block_on(GpuState::new(
         window,
         &gpu_mesh,
+        &gpu_m2_mesh,
         &gpu_wmo_mesh,
         &gpu_marker_mesh,
         &material_images,
         &alpha_images,
+        &m2_material_images,
         &wmo_material_images,
         camera.uniform(window.inner_size()),
     ))?;
@@ -260,6 +272,108 @@ fn load_material_images(
     eprintln!("{label} textures loaded: {resolved}/{}", materials.len());
 
     Ok(images)
+}
+
+fn load_m2_assets(
+    world: &WorldMap,
+    client: Option<&WowClient>,
+) -> Result<BTreeMap<String, M2RenderAsset>, String> {
+    let Some(client) = client else {
+        return Ok(BTreeMap::new());
+    };
+
+    let mut asset_names = BTreeSet::new();
+    for tile in world.tiles() {
+        for placement in tile.model_placements() {
+            if let Some(asset) = placement.asset.as_ref() {
+                asset_names.insert(asset.clone());
+            }
+        }
+    }
+
+    let mut assets = BTreeMap::new();
+    for asset in &asset_names {
+        match load_m2_asset(client, asset) {
+            Ok(asset_data) => {
+                assets.insert(asset.clone(), asset_data);
+            }
+            Err(error) => {
+                eprintln!("M2 asset skipped: {asset}: {error}");
+            }
+        }
+    }
+    eprintln!("M2 assets loaded: {}/{}", assets.len(), asset_names.len());
+
+    Ok(assets)
+}
+
+fn load_m2_asset(client: &WowClient, asset: &str) -> Result<M2RenderAsset, String> {
+    let (model_path, model_bytes) = read_first_existing(client, &m2_model_path_candidates(asset))?;
+    let model = M2File::parse(&model_bytes)
+        .map_err(|err| format!("failed to parse model {model_path}: {err}"))?;
+    let (_, skin_bytes) = read_first_existing(client, &m2_skin_path_candidates(&model_path)?)?;
+    let skin = M2SkinFile::parse(&skin_bytes)
+        .map_err(|err| format!("failed to parse skin for {model_path}: {err}"))?;
+
+    Ok(M2RenderAsset { model, skin })
+}
+
+fn read_first_existing(
+    client: &WowClient,
+    candidates: &[String],
+) -> Result<(String, Vec<u8>), String> {
+    let mut not_found = Vec::new();
+    for candidate in candidates {
+        let path = VfsPath::new(candidate)
+            .map_err(|err| format!("invalid virtual path {candidate}: {err}"))?;
+        match client.read_file(&path) {
+            Ok(bytes) => return Ok((candidate.clone(), bytes)),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                not_found.push(candidate.clone());
+            }
+            Err(err) => return Err(format!("failed to read {candidate}: {err}")),
+        }
+    }
+
+    Err(format!("missing candidates: {}", not_found.join(", ")))
+}
+
+fn m2_model_path_candidates(asset: &str) -> Vec<String> {
+    let mut candidates = vec![asset.to_string()];
+    let lower = asset.to_ascii_lowercase();
+    if lower.ends_with(".mdx") {
+        candidates.push(format!("{}m2", &asset[..asset.len() - 3]));
+    } else if lower.ends_with(".m2") {
+        candidates.push(format!("{}mdx", &asset[..asset.len() - 2]));
+    }
+    dedup_strings(candidates)
+}
+
+fn m2_skin_path_candidates(asset: &str) -> Result<Vec<String>, String> {
+    let lower = asset.to_ascii_lowercase();
+    let candidates = if lower.ends_with(".m2") {
+        vec![format!("{}00.skin", &asset[..asset.len() - 3])]
+    } else if lower.ends_with(".mdx") {
+        vec![
+            format!("{}00.skin", &asset[..asset.len() - 4]),
+            format!("{}00.skin", &asset[..asset.len() - 3]),
+        ]
+    } else {
+        return Err("M2 path does not end with .m2 or .mdx".to_string());
+    };
+
+    Ok(dedup_strings(candidates))
+}
+
+fn dedup_strings(values: Vec<String>) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut out = Vec::new();
+    for value in values {
+        if seen.insert(value.clone()) {
+            out.push(value);
+        }
+    }
+    out
 }
 
 fn load_wmo_assets(
@@ -500,9 +614,21 @@ fn log_wmo_mesh_summary(mesh: &WmoMesh) {
     );
 }
 
+fn log_m2_mesh_summary(mesh: &M2Mesh) {
+    eprintln!(
+        "M2 mesh: placements={} assets={} materials={} vertices={} triangles={}",
+        mesh.placement_count(),
+        mesh.loaded_asset_count(),
+        mesh.materials().len(),
+        mesh.vertices().len(),
+        mesh.indices().len() / 3
+    );
+}
+
 fn log_render_bounds(
     terrain: TerrainBounds,
     markers: Option<TerrainBounds>,
+    m2: Option<TerrainBounds>,
     wmo: Option<TerrainBounds>,
 ) {
     eprintln!(
@@ -526,6 +652,14 @@ fn log_render_bounds(
         );
     } else {
         eprintln!("marker bounds: none");
+    }
+    if let Some(m2) = m2 {
+        eprintln!(
+            "M2 bounds: min=({:.1},{:.1},{:.1}) max=({:.1},{:.1},{:.1})",
+            m2.min[0], m2.min[1], m2.min[2], m2.max[0], m2.max[1], m2.max[2]
+        );
+    } else {
+        eprintln!("M2 bounds: none");
     }
     if let Some(wmo) = wmo {
         eprintln!(
@@ -667,6 +801,16 @@ struct GpuWmoMeshGroup {
     indices: Vec<u32>,
 }
 
+struct GpuM2Mesh {
+    groups: Vec<GpuM2MeshGroup>,
+}
+
+struct GpuM2MeshGroup {
+    material_id: usize,
+    vertices: Vec<GpuWmoVertex>,
+    indices: Vec<u32>,
+}
+
 impl GpuMesh {
     fn from_terrain_mesh(
         mesh: TerrainMesh,
@@ -778,6 +922,54 @@ impl GpuWmoMesh {
     }
 }
 
+impl GpuM2Mesh {
+    fn from_m2_mesh(mesh: M2Mesh, fallback_material_id: usize) -> Result<Self, String> {
+        let mut group_lookup = BTreeMap::new();
+        let mut groups = Vec::new();
+
+        for triangle in mesh.indices().chunks_exact(3) {
+            let a = mesh
+                .vertices()
+                .get(triangle[0] as usize)
+                .ok_or_else(|| "M2 triangle references missing vertex".to_string())?;
+            let b = mesh
+                .vertices()
+                .get(triangle[1] as usize)
+                .ok_or_else(|| "M2 triangle references missing vertex".to_string())?;
+            let c = mesh
+                .vertices()
+                .get(triangle[2] as usize)
+                .ok_or_else(|| "M2 triangle references missing vertex".to_string())?;
+            let material_id = bounded_resource_id(a.material_id, fallback_material_id);
+            let group_index = if let Some(index) = group_lookup.get(&material_id) {
+                *index
+            } else {
+                let index = groups.len();
+                groups.push(GpuM2MeshGroup {
+                    material_id,
+                    vertices: Vec::new(),
+                    indices: Vec::new(),
+                });
+                group_lookup.insert(material_id, index);
+                index
+            };
+            let group = groups
+                .get_mut(group_index)
+                .ok_or_else(|| "M2 triangle references missing material group".to_string())?;
+            let base_index = u32::try_from(group.vertices.len())
+                .map_err(|_| "M2 material group has too many vertices".to_string())?;
+
+            group.vertices.extend([a, b, c].map(gpu_m2_vertex));
+            group
+                .indices
+                .extend_from_slice(&[base_index, base_index + 1, base_index + 2]);
+        }
+
+        groups.retain(|group| !group.indices.is_empty());
+        Ok(Self { groups })
+    }
+}
+
 impl GpuMarkerMesh {
     fn from_marker_mesh(mesh: &PlacementMarkerMesh) -> Result<Self, String> {
         let _ = u32::try_from(mesh.indices().len())
@@ -837,6 +1029,14 @@ fn gpu_wmo_vertex(vertex: &WmoVertex) -> GpuWmoVertex {
     }
 }
 
+fn gpu_m2_vertex(vertex: &M2RenderVertex) -> GpuWmoVertex {
+    GpuWmoVertex {
+        position: vertex.position,
+        normal: normalize(vertex.normal),
+        tex_coord: vertex.tex_coord,
+    }
+}
+
 struct GpuState<'window> {
     surface: wgpu::Surface<'window>,
     device: wgpu::Device,
@@ -850,8 +1050,10 @@ struct GpuState<'window> {
     camera_bind_group: wgpu::BindGroup,
     _material_textures: Vec<GpuTextureResource>,
     _alpha_textures: Vec<GpuTextureResource>,
+    _m2_textures: Vec<GpuTextureResource>,
     _wmo_textures: Vec<GpuTextureResource>,
     draw_groups: Vec<GpuDrawGroup>,
+    m2_draw_groups: Vec<GpuM2DrawGroup>,
     wmo_draw_groups: Vec<GpuWmoDrawGroup>,
     marker_draw: Option<GpuMarkerDraw>,
 }
@@ -889,6 +1091,13 @@ struct GpuWmoDrawGroup {
     index_count: u32,
 }
 
+struct GpuM2DrawGroup {
+    bind_group: wgpu::BindGroup,
+    vertex_buffer: wgpu::Buffer,
+    index_buffer: wgpu::Buffer,
+    index_count: u32,
+}
+
 struct GpuMarkerDraw {
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
@@ -906,10 +1115,12 @@ impl<'window> GpuState<'window> {
     async fn new(
         window: &'window Window,
         mesh: &GpuMesh,
+        m2_mesh: &GpuM2Mesh,
         wmo_mesh: &GpuWmoMesh,
         marker_mesh: &GpuMarkerMesh,
         material_images: &[MaterialImage],
         alpha_images: &[AlphaImage],
+        m2_material_images: &[MaterialImage],
         wmo_material_images: &[MaterialImage],
         camera_uniform: CameraUniform,
     ) -> Result<Self, String> {
@@ -1058,6 +1269,11 @@ impl<'window> GpuState<'window> {
             .map(|(index, material)| create_material_texture(&device, &queue, index, material))
             .collect::<Result<Vec<_>, _>>()?;
         let wmo_textures = wmo_material_images
+            .iter()
+            .enumerate()
+            .map(|(index, material)| create_material_texture(&device, &queue, index, material))
+            .collect::<Result<Vec<_>, _>>()?;
+        let m2_textures = m2_material_images
             .iter()
             .enumerate()
             .map(|(index, material)| create_material_texture(&device, &queue, index, material))
@@ -1236,6 +1452,17 @@ impl<'window> GpuState<'window> {
             .enumerate()
             .map(|(index, group)| create_wmo_draw_group(&device, index, group, &wmo_resources))
             .collect::<Result<Vec<_>, _>>()?;
+        let m2_resources = WmoBindResources {
+            layout: &wmo_bind_group_layout,
+            sampler: &wmo_sampler,
+            textures: &m2_textures,
+        };
+        let m2_draw_groups = m2_mesh
+            .groups
+            .iter()
+            .enumerate()
+            .map(|(index, group)| create_m2_draw_group(&device, index, group, &m2_resources))
+            .collect::<Result<Vec<_>, _>>()?;
         let marker_draw = create_marker_draw(&device, marker_mesh)?;
         let depth = DepthTarget::new(&device, &config);
 
@@ -1252,8 +1479,10 @@ impl<'window> GpuState<'window> {
             camera_bind_group,
             _material_textures: material_textures,
             _alpha_textures: alpha_textures,
+            _m2_textures: m2_textures,
             _wmo_textures: wmo_textures,
             draw_groups,
+            m2_draw_groups,
             wmo_draw_groups,
             marker_draw,
         })
@@ -1320,6 +1549,16 @@ impl<'window> GpuState<'window> {
                 pass.set_pipeline(&self.wmo_pipeline);
                 pass.set_bind_group(0, &self.camera_bind_group, &[]);
                 for group in &self.wmo_draw_groups {
+                    pass.set_bind_group(1, &group.bind_group, &[]);
+                    pass.set_vertex_buffer(0, group.vertex_buffer.slice(..));
+                    pass.set_index_buffer(group.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..group.index_count, 0, 0..1);
+                }
+            }
+            if view_options.show_m2_meshes {
+                pass.set_pipeline(&self.wmo_pipeline);
+                pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                for group in &self.m2_draw_groups {
                     pass.set_bind_group(1, &group.bind_group, &[]);
                     pass.set_vertex_buffer(0, group.vertex_buffer.slice(..));
                     pass.set_index_buffer(group.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
@@ -1632,6 +1871,61 @@ fn create_wmo_draw_group(
     })
 }
 
+fn create_m2_bind_group(
+    device: &wgpu::Device,
+    index: usize,
+    group: &GpuM2MeshGroup,
+    resources: &WmoBindResources<'_>,
+) -> Result<wgpu::BindGroup, String> {
+    let texture = resources
+        .textures
+        .get(group.material_id)
+        .ok_or_else(|| "M2 group references missing material texture".to_string())?;
+
+    Ok(device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some(&format!("m2-bind-group-{index}")),
+        layout: resources.layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(texture.view()),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(resources.sampler),
+            },
+        ],
+    }))
+}
+
+fn create_m2_draw_group(
+    device: &wgpu::Device,
+    index: usize,
+    group: &GpuM2MeshGroup,
+    resources: &WmoBindResources<'_>,
+) -> Result<GpuM2DrawGroup, String> {
+    let bind_group = create_m2_bind_group(device, index, group, resources)?;
+    let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some(&format!("m2-vertex-buffer-{index}")),
+        contents: bytemuck::cast_slice(&group.vertices),
+        usage: wgpu::BufferUsages::VERTEX,
+    });
+    let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some(&format!("m2-index-buffer-{index}")),
+        contents: bytemuck::cast_slice(&group.indices),
+        usage: wgpu::BufferUsages::INDEX,
+    });
+    let index_count = u32::try_from(group.indices.len())
+        .map_err(|_| "M2 index buffer exceeds u32 draw range".to_string())?;
+
+    Ok(GpuM2DrawGroup {
+        bind_group,
+        vertex_buffer,
+        index_buffer,
+        index_count,
+    })
+}
+
 fn create_marker_draw(
     device: &wgpu::Device,
     mesh: &GpuMarkerMesh,
@@ -1735,10 +2029,16 @@ impl Camera {
             self.pitch -= turn_step;
         }
         if input.key_down(KeyCode::KeyQ) {
-            self.distance *= 1.035;
+            self.target[1] -= pan_step;
         }
         if input.key_down(KeyCode::KeyE) {
-            self.distance *= 0.965;
+            self.target[1] += pan_step;
+        }
+        if input.key_down(KeyCode::ShiftLeft) || input.key_down(KeyCode::ShiftRight) {
+            self.target[1] -= pan_step;
+        }
+        if input.key_down(KeyCode::Space) {
+            self.target[1] += pan_step;
         }
 
         let scroll = input.take_scroll();
@@ -1824,6 +2124,7 @@ struct CameraBasis {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ViewOptions {
     show_object_markers: bool,
+    show_m2_meshes: bool,
     show_wmo_meshes: bool,
 }
 
@@ -1831,6 +2132,7 @@ impl Default for ViewOptions {
     fn default() -> Self {
         Self {
             show_object_markers: true,
+            show_m2_meshes: true,
             show_wmo_meshes: true,
         }
     }
@@ -1845,6 +2147,10 @@ impl ViewOptions {
             }
             KeyCode::KeyM => {
                 self.show_wmo_meshes = !self.show_wmo_meshes;
+                true
+            }
+            KeyCode::KeyN => {
+                self.show_m2_meshes = !self.show_m2_meshes;
                 true
             }
             _ => false,
@@ -2160,9 +2466,11 @@ mod tests {
         let mut options = ViewOptions::default();
 
         assert!(options.show_object_markers);
+        assert!(options.show_m2_meshes);
         assert!(options.show_wmo_meshes);
         assert!(options.handle_key_press(KeyCode::KeyO));
         assert!(!options.show_object_markers);
+        assert!(options.show_m2_meshes);
         assert!(options.show_wmo_meshes);
         assert!(options.handle_key_press(KeyCode::KeyO));
         assert!(options.show_object_markers);
@@ -2170,8 +2478,13 @@ mod tests {
         assert!(!options.show_wmo_meshes);
         assert!(options.handle_key_press(KeyCode::KeyM));
         assert!(options.show_wmo_meshes);
+        assert!(options.handle_key_press(KeyCode::KeyN));
+        assert!(!options.show_m2_meshes);
+        assert!(options.handle_key_press(KeyCode::KeyN));
+        assert!(options.show_m2_meshes);
         assert!(!options.handle_key_press(KeyCode::KeyP));
         assert!(options.show_object_markers);
+        assert!(options.show_m2_meshes);
         assert!(options.show_wmo_meshes);
     }
 
@@ -2202,6 +2515,44 @@ mod tests {
         );
         assert!(wmo_group_path("world/wmo/foo/bar.m2", 0).is_err());
         Ok(())
+    }
+
+    #[test]
+    fn builds_m2_model_and_skin_path_candidates() -> Result<(), String> {
+        assert_eq!(
+            m2_model_path_candidates("world/foo/bar.MDX"),
+            vec!["world/foo/bar.MDX", "world/foo/bar.m2"]
+        );
+        assert_eq!(
+            m2_skin_path_candidates("world/foo/bar.M2")?,
+            vec!["world/foo/bar00.skin"]
+        );
+        assert_eq!(
+            m2_skin_path_candidates("world/foo/bar.MDX")?,
+            vec!["world/foo/bar00.skin", "world/foo/bar.00.skin"]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn camera_moves_vertically_from_keyboard_input() {
+        let bounds = TerrainBounds {
+            min: [0.0, 0.0, 0.0],
+            max: [100.0, 100.0, 100.0],
+        };
+        let mut camera = Camera::new(bounds);
+        let start_y = camera.target[1];
+        let mut input = InputState::default();
+
+        input.set_key(KeyCode::KeyQ, ElementState::Pressed);
+        assert!(camera.update(&mut input));
+        assert!(camera.target[1] < start_y);
+
+        input.set_key(KeyCode::KeyQ, ElementState::Released);
+        input.set_key(KeyCode::KeyE, ElementState::Pressed);
+        let lowered_y = camera.target[1];
+        assert!(camera.update(&mut input));
+        assert!(camera.target[1] > lowered_y);
     }
 
     #[test]

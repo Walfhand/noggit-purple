@@ -71,10 +71,14 @@ reads BLP assets from the WoW client/extra MPQs, uploads decoded/generated
 mipmaps, and blends up to four `MCLY` terrain texture layers through decoded
 `MCAL` alpha maps in the terrain shader. It also loads WMO root/group files
 from the client, uploads their primary BLP textures, and draws placed WMOs as
-static textured geometry.
+static textured geometry. It loads M2 doodad root files plus their `00.skin`
+files, resolves direct diffuse textures, and draws placed M2s as static
+textured geometry.
 
 The UI also draws a debug placement overlay for loaded objects: M2 doodads are
 cyan wire boxes and WMO placements are orange wire boxes. Press `O` to toggle
-that overlay. Press `M` to toggle the real WMO meshes. M2 mesh rendering, WMO
-liquids/internal doodads/material parity, water, sky, and edit tools are still
-next.
+that overlay. Press `M` to toggle the real WMO meshes and `N` to toggle the
+real M2 meshes. Camera movement uses `WASD` for planar movement, mouse wheel
+for zoom, `Q`/left shift to move down, and `E`/space to move up. M2 animation,
+particles, advanced geoset/material behavior, WMO liquids/internal doodads,
+water, sky, and edit tools are still next.

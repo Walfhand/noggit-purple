@@ -5,6 +5,7 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 
 use noggit_core::{ModelPlacement, TerrainChunk, WmoPlacement, WorldMap};
+use noggit_formats::m2::{M2File, M2SkinFile, M2TextureUnit};
 use noggit_formats::wmo::{WmoBatch, WmoFile, WmoGroupFile, WmoMaterial};
 
 /// Full ADT tile width in yards.
@@ -20,6 +21,7 @@ const WMO_MARKER_COLOR: [f32; 4] = [1.0, 0.62, 0.16, 1.0];
 const MODEL_MARKER_HALF_SIZE: f32 = 3.0;
 const MODEL_MARKER_HEIGHT: f32 = 12.0;
 const MIN_MARKER_EXTENT: f32 = 2.0;
+const DEFAULT_M2_TEXTURE: &str = "tileset/generic/black.blp";
 const DEFAULT_WMO_TEXTURE: &str = "textures/shanecube.blp";
 
 /// Result type used by renderer preparation code.
@@ -36,6 +38,8 @@ pub enum RenderError {
     TooManyAlphaMaps,
     /// A WMO asset could not be converted into render data.
     WmoFormat(String),
+    /// An M2 asset could not be converted into render data.
+    M2Format(String),
 }
 
 /// One terrain vertex ready for renderer upload or software preview.
@@ -105,6 +109,39 @@ pub struct WmoRenderAsset {
 #[derive(Debug, Clone, PartialEq)]
 pub struct WmoMesh {
     vertices: Vec<WmoVertex>,
+    indices: Vec<u32>,
+    materials: Vec<String>,
+    bounds: Option<TerrainBounds>,
+    placement_count: usize,
+    loaded_asset_count: usize,
+}
+
+/// One M2 vertex in map-local render space.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct M2RenderVertex {
+    /// Position in map-local render space.
+    pub position: [f32; 3],
+    /// Normal in render axis order.
+    pub normal: [f32; 3],
+    /// Texture coordinate.
+    pub tex_coord: [f32; 2],
+    /// Index into [`M2Mesh::materials`].
+    pub material_id: Option<u32>,
+}
+
+/// Parsed M2 root plus first skin file ready for renderer mesh extraction.
+#[derive(Debug, Clone, PartialEq)]
+pub struct M2RenderAsset {
+    /// Root M2 file.
+    pub model: M2File,
+    /// First skin view, normally `<model>00.skin`.
+    pub skin: M2SkinFile,
+}
+
+/// Renderer-facing M2 scene mesh generated from loaded doodad placements.
+#[derive(Debug, Clone, PartialEq)]
+pub struct M2Mesh {
+    vertices: Vec<M2RenderVertex>,
     indices: Vec<u32>,
     materials: Vec<String>,
     bounds: Option<TerrainBounds>,
@@ -189,6 +226,38 @@ impl WmoMesh {
     }
 }
 
+impl M2Mesh {
+    /// Return all M2 vertices.
+    pub fn vertices(&self) -> &[M2RenderVertex] {
+        &self.vertices
+    }
+
+    /// Return triangle indices.
+    pub fn indices(&self) -> &[u32] {
+        &self.indices
+    }
+
+    /// Return texture assets referenced by M2 vertices.
+    pub fn materials(&self) -> &[String] {
+        &self.materials
+    }
+
+    /// Return M2 mesh bounds when at least one vertex exists.
+    pub fn bounds(&self) -> Option<TerrainBounds> {
+        self.bounds
+    }
+
+    /// Return number of M2 placements emitted into this mesh.
+    pub fn placement_count(&self) -> usize {
+        self.placement_count
+    }
+
+    /// Return number of distinct M2 assets used by emitted placements.
+    pub fn loaded_asset_count(&self) -> usize {
+        self.loaded_asset_count
+    }
+}
+
 impl PlacementMarkerMesh {
     /// Return overlay line vertices.
     pub fn vertices(&self) -> &[PlacementMarkerVertex] {
@@ -238,6 +307,7 @@ impl Display for RenderError {
             Self::TooManyMaterials => write!(f, "terrain mesh has too many materials"),
             Self::TooManyAlphaMaps => write!(f, "terrain mesh has too many alpha maps"),
             Self::WmoFormat(err) => write!(f, "WMO render data is invalid: {err}"),
+            Self::M2Format(err) => write!(f, "M2 render data is invalid: {err}"),
         }
     }
 }
@@ -360,6 +430,159 @@ pub fn build_wmo_mesh(
         placement_count,
         loaded_asset_count: loaded_assets.len(),
     })
+}
+
+/// Build transformed M2 triangle geometry for loaded doodad placements.
+pub fn build_m2_mesh(
+    map: &WorldMap,
+    assets: &BTreeMap<String, M2RenderAsset>,
+) -> RenderResult<M2Mesh> {
+    let min_tile_x = map.tiles().iter().map(|tile| tile.coord().x).min();
+    let min_tile_y = map.tiles().iter().map(|tile| tile.coord().y).min();
+    let Some(min_tile_x) = min_tile_x else {
+        return Ok(M2Mesh {
+            vertices: Vec::new(),
+            indices: Vec::new(),
+            materials: Vec::new(),
+            bounds: None,
+            placement_count: 0,
+            loaded_asset_count: 0,
+        });
+    };
+    let min_tile_y = min_tile_y.unwrap_or(0);
+
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+    let mut materials = Vec::new();
+    let mut material_ids = BTreeMap::new();
+    let mut bounds = None;
+    let mut placement_count = 0usize;
+    let mut loaded_assets = BTreeSet::new();
+
+    for tile in map.tiles() {
+        for placement in tile.model_placements() {
+            let Some(asset_name) = placement.asset.as_ref() else {
+                continue;
+            };
+            let Some(asset) = assets.get(asset_name) else {
+                continue;
+            };
+
+            append_m2_placement_mesh(
+                placement,
+                asset,
+                min_tile_x,
+                min_tile_y,
+                &mut materials,
+                &mut material_ids,
+                &mut vertices,
+                &mut indices,
+                &mut bounds,
+            )?;
+            placement_count += 1;
+            loaded_assets.insert(asset_name.clone());
+        }
+    }
+
+    Ok(M2Mesh {
+        vertices,
+        indices,
+        materials,
+        bounds,
+        placement_count,
+        loaded_asset_count: loaded_assets.len(),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_m2_placement_mesh(
+    placement: &ModelPlacement,
+    asset: &M2RenderAsset,
+    min_tile_x: u32,
+    min_tile_y: u32,
+    materials: &mut Vec<String>,
+    material_ids: &mut BTreeMap<String, u32>,
+    vertices: &mut Vec<M2RenderVertex>,
+    indices: &mut Vec<u32>,
+    bounds: &mut Option<TerrainBounds>,
+) -> RenderResult<()> {
+    let texture_units_by_submesh = first_m2_texture_units_by_submesh(asset.skin.texture_units());
+
+    for (submesh_index, submesh) in asset.skin.submeshes().iter().enumerate() {
+        let texture_unit = u16::try_from(submesh_index)
+            .ok()
+            .and_then(|index| texture_units_by_submesh.get(&index).copied());
+        let material_id = texture_unit
+            .and_then(|unit| m2_texture_for_unit(&asset.model, unit))
+            .map(|asset| material_id_for(asset, materials, material_ids))
+            .transpose()?;
+        let index_start = usize::from(submesh.index_start);
+        let index_count = usize::from(submesh.index_count);
+        let index_end = index_start.checked_add(index_count).ok_or_else(|| {
+            RenderError::M2Format("skin submesh index range exceeds usize capacity".to_string())
+        })?;
+        let triangle_indices = asset
+            .skin
+            .triangles()
+            .get(index_start..index_end)
+            .ok_or_else(|| {
+                RenderError::M2Format("submesh references missing skin triangles".to_string())
+            })?;
+
+        for triangle_index in triangle_indices {
+            let lookup_index = usize::from(*triangle_index);
+            let model_vertex_index = asset.skin.indices().get(lookup_index).ok_or_else(|| {
+                RenderError::M2Format("skin triangle references missing vertex lookup".to_string())
+            })?;
+            let source_vertex = asset
+                .model
+                .vertices()
+                .get(usize::from(*model_vertex_index))
+                .ok_or_else(|| {
+                    RenderError::M2Format(
+                        "skin vertex lookup references missing M2 vertex".to_string(),
+                    )
+                })?;
+            let position = transform_model_position(
+                m2_vec3_to_render(source_vertex.position),
+                placement,
+                min_tile_x,
+                min_tile_y,
+            );
+            let normal =
+                transform_model_normal(m2_vec3_to_render(source_vertex.normal), placement.rotation);
+            let index = u32::try_from(vertices.len()).map_err(|_| RenderError::TooManyVertices)?;
+
+            extend_bounds(bounds, position);
+            vertices.push(M2RenderVertex {
+                position,
+                normal,
+                tex_coord: source_vertex.tex_coords[0],
+                material_id,
+            });
+            indices.push(index);
+        }
+    }
+
+    Ok(())
+}
+
+fn first_m2_texture_units_by_submesh(units: &[M2TextureUnit]) -> BTreeMap<u16, M2TextureUnit> {
+    let mut by_submesh = BTreeMap::new();
+    for unit in units {
+        by_submesh.entry(unit.submesh).or_insert(*unit);
+    }
+    by_submesh
+}
+
+fn m2_texture_for_unit(model: &M2File, unit: M2TextureUnit) -> Option<&str> {
+    let texture_lookup_index = usize::from(unit.texture_combo_index);
+    let texture_index = usize::from(*model.texture_lookup().get(texture_lookup_index)?);
+    let texture = model.textures().get(texture_index)?;
+    match texture.filename.as_deref() {
+        Some("") | None => Some(DEFAULT_M2_TEXTURE),
+        Some(filename) => Some(filename),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -555,6 +778,31 @@ fn transform_wmo_normal(local_normal: [f32; 3], rotation: [f32; 3]) -> [f32; 3] 
     normalize_vec3(rotate_wmo_vector(local_normal, rotation))
 }
 
+fn transform_model_position(
+    local_position: [f32; 3],
+    placement: &ModelPlacement,
+    min_tile_x: u32,
+    min_tile_y: u32,
+) -> [f32; 3] {
+    let scale = if placement.scale == 0 {
+        1.0
+    } else {
+        placement.scale as f32 / 1024.0
+    };
+    let rotated = rotate_wmo_vector(scale_vec3(local_position, scale), placement.rotation);
+    let world_position = [
+        placement.position[0] + rotated[0],
+        placement.position[1] + rotated[1],
+        placement.position[2] + rotated[2],
+    ];
+
+    world_position_to_render_local(world_position, min_tile_x, min_tile_y)
+}
+
+fn transform_model_normal(local_normal: [f32; 3], rotation: [f32; 3]) -> [f32; 3] {
+    normalize_vec3(rotate_wmo_vector(local_normal, rotation))
+}
+
 fn rotate_wmo_vector(value: [f32; 3], rotation_degrees: [f32; 3]) -> [f32; 3] {
     let value = rotate_x(value, rotation_degrees[2].to_radians());
     let value = rotate_z(value, (-rotation_degrees[0]).to_radians());
@@ -562,6 +810,10 @@ fn rotate_wmo_vector(value: [f32; 3], rotation_degrees: [f32; 3]) -> [f32; 3] {
 }
 
 fn wmo_vec3_to_render(value: [f32; 3]) -> [f32; 3] {
+    [value[0], value[2], -value[1]]
+}
+
+fn m2_vec3_to_render(value: [f32; 3]) -> [f32; 3] {
     [value[0], value[2], -value[1]]
 }
 
@@ -961,6 +1213,7 @@ fn mcvt_row_columns(row: usize) -> usize {
 mod tests {
     use super::*;
     use noggit_core::WorldMap;
+    use noggit_formats::m2::{M2_HEADER_SIZE, M2File, M2SkinFile};
     use noggit_formats::wmo::{WmoFile, WmoGroupFile};
     use std::error::Error;
     use std::fs;
@@ -1070,6 +1323,39 @@ mod tests {
         assert_eq!(mesh.placement_count(), 1);
         assert_eq!(mesh.loaded_asset_count(), 1);
         assert_close(mesh.vertices()[0].position, [60.0, 20.0, 80.0]);
+        assert_eq!(mesh.vertices()[0].material_id, Some(0));
+        Ok(())
+    }
+
+    #[test]
+    fn builds_m2_mesh_from_loaded_placement_and_asset() -> Result<(), Box<dyn Error>> {
+        let root = test_root("noggit-render-m2-mesh")?;
+        let map_dir = root.join("testmap");
+        fs::create_dir_all(&map_dir)?;
+        fs::write(map_dir.join("testmap.wdt"), fixture_wdt())?;
+        fs::write(map_dir.join("testmap_27_25.adt"), fixture_adt())?;
+
+        let map = WorldMap::load_from_local_directory(&map_dir)?;
+        let mut assets = BTreeMap::new();
+        assets.insert(
+            "models/tree.m2".to_string(),
+            M2RenderAsset {
+                model: M2File::parse(&fixture_m2())?,
+                skin: M2SkinFile::parse(&fixture_m2_skin())?,
+            },
+        );
+        let mesh = build_m2_mesh(&map, &assets)?;
+
+        fs::remove_dir_all(&root)?;
+
+        assert_eq!(mesh.materials(), &["textures/tree.blp".to_string()]);
+        assert_eq!(mesh.vertices().len(), 3);
+        assert_eq!(mesh.indices(), &[0, 1, 2]);
+        assert_eq!(mesh.placement_count(), 1);
+        assert_eq!(mesh.loaded_asset_count(), 1);
+        assert_close(mesh.vertices()[0].position, [10.0, 7.0, 20.0]);
+        assert_close(mesh.vertices()[1].position, [10.0, 7.0, 21.0]);
+        assert_close(mesh.vertices()[2].position, [11.0, 7.0, 20.0]);
         assert_eq!(mesh.vertices()[0].material_id, Some(0));
         Ok(())
     }
@@ -1205,6 +1491,96 @@ mod tests {
         bytes
     }
 
+    fn fixture_m2() -> Vec<u8> {
+        let texture_offset = M2_HEADER_SIZE + 3 * 48;
+        let texture_lookup_offset = texture_offset + 16;
+        let texture_name_offset = texture_lookup_offset + 2;
+        let texture_name = b"textures/tree.blp\0";
+        let mut bytes = vec![0; texture_name_offset + texture_name.len()];
+
+        bytes[0..4].copy_from_slice(b"MD20");
+        write_u32(&mut bytes, 4, 264);
+        write_u32(&mut bytes, 60, 3);
+        write_u32(&mut bytes, 64, M2_HEADER_SIZE as u32);
+        write_u32(&mut bytes, 68, 1);
+        write_u32(&mut bytes, 80, 1);
+        write_u32(&mut bytes, 84, texture_offset as u32);
+        write_u32(&mut bytes, 128, 1);
+        write_u32(&mut bytes, 132, texture_lookup_offset as u32);
+        write_vec3_at(&mut bytes, 160, [-1.0, -1.0, -1.0]);
+        write_vec3_at(&mut bytes, 172, [1.0, 1.0, 1.0]);
+        write_f32(&mut bytes, 184, 2.0);
+
+        write_m2_vertex(
+            &mut bytes,
+            M2_HEADER_SIZE,
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0],
+        );
+        write_m2_vertex(
+            &mut bytes,
+            M2_HEADER_SIZE + 48,
+            [1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [1.0, 0.0],
+        );
+        write_m2_vertex(
+            &mut bytes,
+            M2_HEADER_SIZE + 96,
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [0.0, 1.0],
+        );
+
+        write_u32(&mut bytes, texture_offset, 0);
+        write_u32(&mut bytes, texture_offset + 8, texture_name.len() as u32);
+        write_u32(&mut bytes, texture_offset + 12, texture_name_offset as u32);
+        write_u16(&mut bytes, texture_lookup_offset, 0);
+        bytes[texture_name_offset..][..texture_name.len()].copy_from_slice(texture_name);
+
+        bytes
+    }
+
+    fn fixture_m2_skin() -> Vec<u8> {
+        let index_offset = 48;
+        let triangle_offset = index_offset + 3 * 2;
+        let submesh_offset = triangle_offset + 3 * 2;
+        let texture_unit_offset = submesh_offset + 48;
+        let mut bytes = vec![0; texture_unit_offset + 24];
+
+        bytes[0..4].copy_from_slice(b"SKIN");
+        write_u32(&mut bytes, 4, 3);
+        write_u32(&mut bytes, 8, index_offset as u32);
+        write_u32(&mut bytes, 12, 3);
+        write_u32(&mut bytes, 16, triangle_offset as u32);
+        write_u32(&mut bytes, 28, 1);
+        write_u32(&mut bytes, 32, submesh_offset as u32);
+        write_u32(&mut bytes, 36, 1);
+        write_u32(&mut bytes, 40, texture_unit_offset as u32);
+
+        for (index, value) in [0_u16, 1, 2].into_iter().enumerate() {
+            write_u16(&mut bytes, index_offset + index * 2, value);
+            write_u16(&mut bytes, triangle_offset + index * 2, value);
+        }
+
+        write_u16(&mut bytes, submesh_offset, 7);
+        write_u16(&mut bytes, submesh_offset + 4, 0);
+        write_u16(&mut bytes, submesh_offset + 6, 3);
+        write_u16(&mut bytes, submesh_offset + 8, 0);
+        write_u16(&mut bytes, submesh_offset + 10, 3);
+        write_vec3_at(&mut bytes, submesh_offset + 20, [-1.0, -1.0, -1.0]);
+        write_vec3_at(&mut bytes, submesh_offset + 32, [1.0, 1.0, 1.0]);
+        write_f32(&mut bytes, submesh_offset + 44, 2.0);
+
+        write_u16(&mut bytes, texture_unit_offset + 4, 0);
+        write_u16(&mut bytes, texture_unit_offset + 8, u16::MAX);
+        write_u16(&mut bytes, texture_unit_offset + 14, 1);
+        write_u16(&mut bytes, texture_unit_offset + 16, 0);
+
+        bytes
+    }
+
     fn fixture_wmo_group() -> Vec<u8> {
         let mut mogp = wmo_mogp_header();
         mogp.extend_from_slice(&chunk(b"MOPY", &[0x20, 0]));
@@ -1328,6 +1704,26 @@ mod tests {
 
     fn write_f32(bytes: &mut [u8], offset: usize, value: f32) {
         bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn write_vec3_at(bytes: &mut [u8], offset: usize, values: [f32; 3]) {
+        write_f32(bytes, offset, values[0]);
+        write_f32(bytes, offset + 4, values[1]);
+        write_f32(bytes, offset + 8, values[2]);
+    }
+
+    fn write_m2_vertex(
+        bytes: &mut [u8],
+        offset: usize,
+        position: [f32; 3],
+        normal: [f32; 3],
+        tex_coord: [f32; 2],
+    ) {
+        write_vec3_at(bytes, offset, position);
+        bytes[offset + 12] = 255;
+        write_vec3_at(bytes, offset + 20, normal);
+        write_f32(bytes, offset + 32, tex_coord[0]);
+        write_f32(bytes, offset + 36, tex_coord[1]);
     }
 
     fn assert_close(actual: [f32; 3], expected: [f32; 3]) {

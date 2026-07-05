@@ -110,8 +110,9 @@ Implemented:
   textures from the same WoW client/extra MPQ chain as terrain, then draws
   current `MDDF` doodad placements as static textured geometry. Press `N` to
   toggle real M2 meshes.
-- Camera movement in `noggit-ui` now supports vertical travel: `Q` or left
-  shift moves down, `E` or space moves up, and mouse wheel remains zoom.
+- Camera movement in `noggit-ui` is a free-fly camera: hold left mouse to look,
+  `WASD` moves relative to the camera, `Q` or control moves down, `E` or space
+  moves up, shift accelerates, and mouse wheel adjusts movement speed.
 - `noggit-ui` draws a debug object-placement overlay as colored wire boxes:
   cyan for M2 doodads and orange for WMO placements. The overlay is visible by
   default and can be toggled with `O`; this is the first small UI action state

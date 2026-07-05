@@ -78,7 +78,8 @@ textured geometry.
 The UI also draws a debug placement overlay for loaded objects: M2 doodads are
 cyan wire boxes and WMO placements are orange wire boxes. Press `O` to toggle
 that overlay. Press `M` to toggle the real WMO meshes and `N` to toggle the
-real M2 meshes. Camera movement uses `WASD` for planar movement, mouse wheel
-for zoom, `Q`/left shift to move down, and `E`/space to move up. M2 animation,
-particles, advanced geoset/material behavior, WMO liquids/internal doodads,
-water, sky, and edit tools are still next.
+real M2 meshes. Camera movement is a free-fly camera: hold left mouse to look,
+`WASD` to move relative to the camera, `Q`/control to move down, `E`/space to
+move up, shift to accelerate, and mouse wheel to adjust movement speed. M2
+animation, particles, advanced geoset/material behavior, WMO liquids/internal
+doodads, water, sky, and edit tools are still next.

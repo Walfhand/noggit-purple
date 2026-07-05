@@ -1986,99 +1986,115 @@ struct CameraUniform {
     view_projection: [[f32; 4]; 4],
 }
 
+const CAMERA_MOUSE_SENSITIVITY: f32 = 0.006;
+const CAMERA_KEY_TURN_STEP: f32 = 0.035;
+const CAMERA_MIN_PITCH: f32 = -1.45;
+const CAMERA_MAX_PITCH: f32 = 1.45;
+const CAMERA_MIN_SPEED: f32 = 0.25;
+const CAMERA_MAX_SPEED: f32 = 250.0;
+const CAMERA_SHIFT_SPEED_MULTIPLIER: f32 = 4.0;
+
 struct Camera {
-    target: [f32; 3],
+    position: [f32; 3],
     yaw: f32,
     pitch: f32,
-    distance: f32,
+    movement_speed: f32,
 }
 
 impl Camera {
     fn new(bounds: TerrainBounds) -> Self {
         let size = bounds.size();
         let planar_size = size[0].max(size[2]).max(1.0);
-        let mut target = bounds.center();
-        target[1] += size[1] * 0.08;
+        let target = bounds.center();
+        let position = [
+            target[0],
+            bounds.max[1] + size[1].max(80.0) * 0.35,
+            target[2] - planar_size * 0.55,
+        ];
+        let forward = normalize(sub(target, position));
 
         Self {
-            target,
-            yaw: 0.75,
-            pitch: 0.68,
-            distance: planar_size * 0.95,
+            position,
+            yaw: forward[0].atan2(forward[2]),
+            pitch: forward[1].asin(),
+            movement_speed: (planar_size * 0.01).clamp(CAMERA_MIN_SPEED, CAMERA_MAX_SPEED),
         }
     }
 
     fn update(&mut self, input: &mut InputState) -> bool {
-        let previous_target = self.target;
+        let previous_position = self.position;
         let previous_yaw = self.yaw;
         let previous_pitch = self.pitch;
-        let previous_distance = self.distance;
-        let turn_step = 0.035;
-        let pan_step = self.distance * 0.012;
+        let previous_speed = self.movement_speed;
 
         if input.key_down(KeyCode::ArrowLeft) {
-            self.yaw -= turn_step;
+            self.yaw -= CAMERA_KEY_TURN_STEP;
         }
         if input.key_down(KeyCode::ArrowRight) {
-            self.yaw += turn_step;
+            self.yaw += CAMERA_KEY_TURN_STEP;
         }
         if input.key_down(KeyCode::ArrowUp) {
-            self.pitch += turn_step;
+            self.pitch += CAMERA_KEY_TURN_STEP;
         }
         if input.key_down(KeyCode::ArrowDown) {
-            self.pitch -= turn_step;
-        }
-        if input.key_down(KeyCode::KeyQ) {
-            self.target[1] -= pan_step;
-        }
-        if input.key_down(KeyCode::KeyE) {
-            self.target[1] += pan_step;
-        }
-        if input.key_down(KeyCode::ShiftLeft) || input.key_down(KeyCode::ShiftRight) {
-            self.target[1] -= pan_step;
-        }
-        if input.key_down(KeyCode::Space) {
-            self.target[1] += pan_step;
+            self.pitch -= CAMERA_KEY_TURN_STEP;
         }
 
         let scroll = input.take_scroll();
         if scroll.abs() > f32::EPSILON {
-            self.distance *= (1.0 - scroll * 0.12).clamp(0.35, 1.65);
+            self.movement_speed *= (1.0 + scroll * 0.18).clamp(0.45, 1.8);
         }
 
         let mouse_delta = input.take_mouse_delta();
         if input.left_mouse_down() {
-            self.yaw += mouse_delta.0 * 0.006;
-            self.pitch += mouse_delta.1 * 0.006;
+            self.yaw += mouse_delta.0 * CAMERA_MOUSE_SENSITIVITY;
+            self.pitch -= mouse_delta.1 * CAMERA_MOUSE_SENSITIVITY;
         }
+
+        self.pitch = self.pitch.clamp(CAMERA_MIN_PITCH, CAMERA_MAX_PITCH);
+        self.movement_speed = self
+            .movement_speed
+            .clamp(CAMERA_MIN_SPEED, CAMERA_MAX_SPEED);
 
         let basis = self.basis();
+        let mut movement = [0.0, 0.0, 0.0];
         if input.key_down(KeyCode::KeyW) {
-            self.target = add(
-                self.target,
-                scale(horizontal_forward(basis.forward), pan_step),
-            );
+            movement = add(movement, basis.forward);
         }
         if input.key_down(KeyCode::KeyS) {
-            self.target = sub(
-                self.target,
-                scale(horizontal_forward(basis.forward), pan_step),
-            );
+            movement = sub(movement, basis.forward);
         }
         if input.key_down(KeyCode::KeyA) {
-            self.target = sub(self.target, scale(basis.right, pan_step));
+            movement = sub(movement, basis.right);
         }
         if input.key_down(KeyCode::KeyD) {
-            self.target = add(self.target, scale(basis.right, pan_step));
+            movement = add(movement, basis.right);
+        }
+        if input.key_down(KeyCode::KeyQ)
+            || input.key_down(KeyCode::ControlLeft)
+            || input.key_down(KeyCode::ControlRight)
+        {
+            movement[1] -= 1.0;
+        }
+        if input.key_down(KeyCode::KeyE) || input.key_down(KeyCode::Space) {
+            movement[1] += 1.0;
         }
 
-        self.pitch = self.pitch.clamp(0.12, 1.42);
-        self.distance = self.distance.clamp(20.0, 4000.0);
+        let movement = normalize(movement);
+        if movement != [0.0, 0.0, 0.0] {
+            let speed = if input.key_down(KeyCode::ShiftLeft) || input.key_down(KeyCode::ShiftRight)
+            {
+                self.movement_speed * CAMERA_SHIFT_SPEED_MULTIPLIER
+            } else {
+                self.movement_speed
+            };
+            self.position = add(self.position, scale(movement, speed));
+        }
 
-        self.target != previous_target
+        self.position != previous_position
             || (self.yaw - previous_yaw).abs() > f32::EPSILON
             || (self.pitch - previous_pitch).abs() > f32::EPSILON
-            || (self.distance - previous_distance).abs() > f32::EPSILON
+            || (self.movement_speed - previous_speed).abs() > f32::EPSILON
     }
 
     fn uniform(&self, size: PhysicalSize<u32>) -> CameraUniform {
@@ -2093,30 +2109,25 @@ impl Camera {
 
     fn view_matrix(&self) -> [[f32; 4]; 4] {
         let basis = self.basis();
-        look_at(basis.position, self.target, [0.0, 1.0, 0.0])
+        look_at(
+            self.position,
+            add(self.position, basis.forward),
+            [0.0, 1.0, 0.0],
+        )
     }
 
     fn basis(&self) -> CameraBasis {
-        let offset = [
-            self.yaw.sin() * self.pitch.cos() * self.distance,
-            self.pitch.sin() * self.distance,
-            self.yaw.cos() * self.pitch.cos() * self.distance,
-        ];
-        let position = add(self.target, offset);
-        let forward = normalize(sub(self.target, position));
-        let right = normalize(cross(forward, [0.0, 1.0, 0.0]));
+        let (yaw_sin, yaw_cos) = self.yaw.sin_cos();
+        let (pitch_sin, pitch_cos) = self.pitch.sin_cos();
+        let forward = normalize([yaw_sin * pitch_cos, pitch_sin, yaw_cos * pitch_cos]);
+        let right = normalize(cross([0.0, 1.0, 0.0], forward));
 
-        CameraBasis {
-            position,
-            forward,
-            right,
-        }
+        CameraBasis { forward, right }
     }
 }
 
 #[derive(Clone, Copy)]
 struct CameraBasis {
-    position: [f32; 3],
     forward: [f32; 3],
     right: [f32; 3],
 }
@@ -2263,10 +2274,6 @@ fn look_at(eye: [f32; 3], target: [f32; 3], up: [f32; 3]) -> [[f32; 4]; 4] {
         [right[2], up[2], -forward[2], 0.0],
         [-dot(right, eye), -dot(up, eye), dot(forward, eye), 1.0],
     ]
-}
-
-fn horizontal_forward(forward: [f32; 3]) -> [f32; 3] {
-    normalize([forward[0], 0.0, forward[2]])
 }
 
 fn add(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
@@ -2541,18 +2548,56 @@ mod tests {
             max: [100.0, 100.0, 100.0],
         };
         let mut camera = Camera::new(bounds);
-        let start_y = camera.target[1];
+        let start_y = camera.position[1];
         let mut input = InputState::default();
 
         input.set_key(KeyCode::KeyQ, ElementState::Pressed);
         assert!(camera.update(&mut input));
-        assert!(camera.target[1] < start_y);
+        assert!(camera.position[1] < start_y);
 
         input.set_key(KeyCode::KeyQ, ElementState::Released);
         input.set_key(KeyCode::KeyE, ElementState::Pressed);
-        let lowered_y = camera.target[1];
+        let lowered_y = camera.position[1];
         assert!(camera.update(&mut input));
-        assert!(camera.target[1] > lowered_y);
+        assert!(camera.position[1] > lowered_y);
+    }
+
+    #[test]
+    fn camera_moves_forward_from_camera_position() {
+        let bounds = TerrainBounds {
+            min: [0.0, 0.0, 0.0],
+            max: [100.0, 100.0, 100.0],
+        };
+        let mut camera = Camera::new(bounds);
+        let start = camera.position;
+        let forward = camera.basis().forward;
+        let mut input = InputState::default();
+
+        input.set_key(KeyCode::KeyW, ElementState::Pressed);
+        assert!(camera.update(&mut input));
+
+        assert_close(
+            camera.position,
+            add(start, scale(forward, camera.movement_speed)),
+        );
+    }
+
+    #[test]
+    fn camera_scroll_changes_movement_speed_without_moving_position() {
+        let bounds = TerrainBounds {
+            min: [0.0, 0.0, 0.0],
+            max: [100.0, 100.0, 100.0],
+        };
+        let mut camera = Camera::new(bounds);
+        let start = camera.position;
+        let start_speed = camera.movement_speed;
+        let mut input = InputState::default();
+
+        input.add_scroll(MouseScrollDelta::LineDelta(0.0, 1.0));
+        assert!(camera.update(&mut input));
+
+        assert_eq!(camera.position, start);
+        assert!(camera.movement_speed > start_speed);
     }
 
     #[test]
@@ -2596,5 +2641,14 @@ mod tests {
         };
 
         assert_eq!(vertex_layer_set(&vertex, 3, 4), ([1, 3, 3, 0], [2, 4, 4]));
+    }
+
+    fn assert_close(actual: [f32; 3], expected: [f32; 3]) {
+        for (actual, expected) in actual.into_iter().zip(expected) {
+            assert!(
+                (actual - expected).abs() < 0.001,
+                "expected {actual} ~= {expected}"
+            );
+        }
     }
 }

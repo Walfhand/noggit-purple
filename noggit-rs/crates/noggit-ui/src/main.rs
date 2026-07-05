@@ -2675,9 +2675,9 @@ fn vs_water(input: VertexInput) -> VertexOutput {
     let time = water.params.x;
     let scroll = vec2<f32>(time * 0.035, -time * 0.022);
     let wave =
-        sin((input.tex_coord.x + scroll.x) * 18.0) * 0.08
-        + cos((input.tex_coord.y + scroll.y) * 21.0) * 0.06;
-    let position = input.position + vec3<f32>(0.0, wave + 0.025, 0.0);
+        sin((input.tex_coord.x + scroll.x) * 7.0) * 0.018
+        + cos((input.tex_coord.y + scroll.y) * 9.0) * 0.014;
+    let position = input.position + vec3<f32>(0.0, wave + 0.01, 0.0);
     output.clip_position = camera.view_projection * vec4<f32>(position, 1.0);
     output.tex_coord = input.tex_coord;
     output.depth = input.depth;
@@ -2689,16 +2689,15 @@ fn vs_water(input: VertexInput) -> VertexOutput {
 @fragment
 fn fs_water(input: VertexOutput) -> @location(0) vec4<f32> {
     let time = water.params.x;
-    let wave_a = sin((input.tex_coord.x + time * 0.045) * 28.0);
-    let wave_b = cos((input.tex_coord.y - time * 0.035) * 23.0);
-    let wave = clamp((wave_a + wave_b) * 0.5 + input.wave, -1.0, 1.0);
-    let liquid_tint = clamp(input.liquid_id * 0.002, 0.0, 0.18);
-    let deep = vec3<f32>(0.02, 0.17 + liquid_tint, 0.24 + liquid_tint);
-    let shallow = vec3<f32>(0.10, 0.45 + liquid_tint * 0.5, 0.56);
-    let factor = clamp(0.45 + wave * 0.18 + input.depth * 0.25, 0.0, 1.0);
-    let glint = smoothstep(0.72, 1.0, abs(wave)) * 0.10;
-    let color = deep * (1.0 - factor) + shallow * factor + vec3<f32>(glint, glint, glint);
-    let alpha = clamp(0.38 + input.depth * 0.28, 0.32, 0.72);
+    let wave_a = sin((input.tex_coord.x + time * 0.018) * 10.0);
+    let wave_b = cos((input.tex_coord.y - time * 0.014) * 12.0);
+    let wave = clamp((wave_a + wave_b) * 0.08 + input.wave * 2.0, -0.25, 0.25);
+    let liquid_tint = clamp(input.liquid_id * 0.0008, 0.0, 0.07);
+    let shallow = vec3<f32>(0.16, 0.42 + liquid_tint, 0.48 + liquid_tint);
+    let deep = vec3<f32>(0.04, 0.20 + liquid_tint, 0.28 + liquid_tint);
+    let factor = clamp(input.depth * 0.85 + 0.08 + wave, 0.0, 1.0);
+    let color = shallow * (1.0 - factor) + deep * factor;
+    let alpha = clamp(0.24 + input.depth * 0.24, 0.22, 0.50);
     return vec4<f32>(color, alpha);
 }
 "#;

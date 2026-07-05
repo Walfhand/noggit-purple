@@ -4,7 +4,10 @@ use std::io::ErrorKind;
 use std::path::Path;
 
 use noggit_formats::FormatResult;
-use noggit_formats::adt::{ALPHA_MAP_SIZE, AdtFile, MddfEntry, ModfEntry, filename_by_name_id};
+use noggit_formats::adt::{
+    ALPHA_MAP_SIZE, AdtFile, MddfEntry, Mh2oLayer as FormatLiquidLayer, ModfEntry,
+    filename_by_name_id,
+};
 use noggit_formats::wdt::{MPHD_FLAG_BIG_ALPHA, WdtFile};
 use noggit_vfs::{FileSource, LocalFolder, VfsPath};
 
@@ -60,6 +63,8 @@ pub struct TerrainChunk {
     pub layers: Vec<TerrainLayer>,
     /// Alpha maps aligned with texture layers. Layer 0 normally has no alpha.
     pub alpha_maps: Vec<Option<TerrainAlphaMap>>,
+    /// Liquid layers attached to this terrain chunk.
+    pub liquid_layers: Vec<LiquidLayer>,
 }
 
 /// Texture layer metadata for a terrain chunk.
@@ -80,6 +85,34 @@ pub struct TerrainLayer {
 pub struct TerrainAlphaMap {
     /// Alpha values in row-major 64x64 order.
     pub values: [u8; ALPHA_MAP_SIZE],
+}
+
+/// One liquid layer attached to a terrain chunk.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LiquidLayer {
+    /// Liquid type id from `LiquidType.dbc`.
+    pub liquid_id: u16,
+    /// Raw `MH2O` liquid vertex format.
+    pub vertex_format: u16,
+    /// Minimum layer height.
+    pub min_height: f32,
+    /// Maximum layer height.
+    pub max_height: f32,
+    /// Decoded visibility mask for all 8x8 liquid tiles.
+    pub tiles: Vec<bool>,
+    /// Decoded 9x9 liquid vertices.
+    pub vertices: Vec<LiquidVertex>,
+}
+
+/// One decoded liquid vertex.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LiquidVertex {
+    /// Liquid surface height.
+    pub height: f32,
+    /// Liquid depth normalized to 0..1.
+    pub depth: f32,
+    /// Liquid texture coordinate.
+    pub uv: [f32; 2],
 }
 
 /// Height range for a terrain chunk.
@@ -210,6 +243,15 @@ impl WorldMap {
             .map(|tile| tile.terrain_chunks.len())
             .sum()
     }
+
+    /// Return total liquid layer count across all terrain chunks.
+    pub fn total_liquid_layers(&self) -> usize {
+        self.tiles
+            .iter()
+            .flat_map(|tile| tile.terrain_chunks.iter())
+            .map(|chunk| chunk.liquid_layers.len())
+            .sum()
+    }
 }
 
 fn load_wdt_big_alpha_flag(name: &str, source: &impl FileSource) -> CoreResult<bool> {
@@ -258,6 +300,7 @@ impl WorldTile {
             .into_iter()
             .map(|placement| WmoPlacement::from_modf(&placement, &wmo_assets, &wmo_offsets))
             .collect();
+        let mh2o = parse_format(&source_path, adt.mh2o())?;
         let terrain_chunks = parse_format(&source_path, adt.mcnk_chunks())?
             .into_iter()
             .map(|chunk| {
@@ -289,6 +332,23 @@ impl WorldTile {
                     })
                 })
                 .collect();
+                let liquid_layers = mh2o
+                    .as_ref()
+                    .and_then(|mh2o| {
+                        let index = usize::try_from(chunk.header.iy)
+                            .ok()?
+                            .checked_mul(16)?
+                            .checked_add(usize::try_from(chunk.header.ix).ok()?)?;
+                        mh2o.chunks().get(index)
+                    })
+                    .map(|liquid_chunk| {
+                        liquid_chunk
+                            .layers()
+                            .iter()
+                            .map(LiquidLayer::from_mh2o)
+                            .collect()
+                    })
+                    .unwrap_or_default();
 
                 Ok(TerrainChunk {
                     x: chunk.header.ix,
@@ -300,6 +360,7 @@ impl WorldTile {
                     normals,
                     layers,
                     alpha_maps,
+                    liquid_layers,
                 })
             })
             .collect::<CoreResult<Vec<_>>>()?;
@@ -370,6 +431,27 @@ impl TerrainChunk {
         }
 
         Some(HeightRange { min, max })
+    }
+}
+
+impl LiquidLayer {
+    fn from_mh2o(layer: &FormatLiquidLayer) -> Self {
+        Self {
+            liquid_id: layer.liquid_id,
+            vertex_format: layer.liquid_vertex_format,
+            min_height: layer.min_height,
+            max_height: layer.max_height,
+            tiles: layer.tiles.to_vec(),
+            vertices: layer
+                .vertices
+                .iter()
+                .map(|vertex| LiquidVertex {
+                    height: vertex.height,
+                    depth: vertex.depth,
+                    uv: vertex.uv,
+                })
+                .collect(),
+        }
     }
 }
 
@@ -522,6 +604,27 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn loads_mh2o_liquid_layers_into_terrain_chunks() -> Result<(), Box<dyn Error>> {
+        let root = test_root("noggit-core-mh2o")?;
+        fs::create_dir_all(&root)?;
+        fs::write(root.join("guerilla_27_25.adt"), fixture_adt_with_liquid())?;
+        let source = LocalFolder::new(&root);
+
+        let map = WorldMap::load_from_source("guerilla", &source)?;
+
+        fs::remove_dir_all(&root)?;
+
+        assert_eq!(map.total_liquid_layers(), 1);
+        let layer = &map.tiles()[0].terrain_chunks()[0].liquid_layers[0];
+        assert_eq!(layer.liquid_id, 7);
+        assert_eq!(layer.tiles.iter().filter(|tile| **tile).count(), 1);
+        assert_eq!(layer.vertices[2 * 9 + 1].height, 10.0);
+        assert_eq!(layer.vertices[3 * 9 + 3].height, 15.0);
+        assert_eq!(layer.vertices[3 * 9 + 3].depth, 32.0 / 255.0);
+        Ok(())
+    }
+
     fn fixture_adt(area_id: u32) -> Vec<u8> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&stored_chunk(b"MVER", &18_u32.to_le_bytes()));
@@ -556,6 +659,14 @@ mod tests {
             &string_block(&["tiles/base.blp", "tiles/detail.blp"]),
         ));
         bytes.extend_from_slice(&stored_chunk(b"MCNK", &mcnk_with_alpha()));
+        bytes
+    }
+
+    fn fixture_adt_with_liquid() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&stored_chunk(b"MVER", &18_u32.to_le_bytes()));
+        bytes.extend_from_slice(&stored_chunk(b"MCNK", &mcnk(25)));
+        bytes.extend_from_slice(&stored_chunk(b"MH2O", &fixture_mh2o()));
         bytes
     }
 
@@ -615,6 +726,40 @@ mod tests {
         (0..ALPHA_MAP_SIZE)
             .map(|index| (index % 256) as u8)
             .collect()
+    }
+
+    fn fixture_mh2o() -> Vec<u8> {
+        let headers_size = 256 * 12;
+        let chunk_index = 9 * 16 + 4;
+        let header_offset = chunk_index * 12;
+        let info_offset = headers_size;
+        let mask_offset = info_offset + 24;
+        let height_map_offset = mask_offset + 1;
+        let mut bytes = vec![0; headers_size];
+
+        write_u32(&mut bytes, header_offset, info_offset as u32);
+        write_u32(&mut bytes, header_offset + 4, 1);
+
+        bytes.extend_from_slice(&7_u16.to_le_bytes());
+        bytes.extend_from_slice(&0_u16.to_le_bytes());
+        bytes.extend_from_slice(&10.0_f32.to_le_bytes());
+        bytes.extend_from_slice(&20.0_f32.to_le_bytes());
+        bytes.push(1);
+        bytes.push(2);
+        bytes.push(2);
+        bytes.push(1);
+        bytes.extend_from_slice(&(mask_offset as u32).to_le_bytes());
+        bytes.extend_from_slice(&(height_map_offset as u32).to_le_bytes());
+        bytes.push(0b0000_0010);
+
+        for height in [9.0_f32, 12.0, 22.0, 13.0, 14.0, 15.0] {
+            bytes.extend_from_slice(&height.to_le_bytes());
+        }
+        for depth in [0_u8, 64, 128, 192, 255, 32] {
+            bytes.push(depth);
+        }
+
+        bytes
     }
 
     fn mddf_entry() -> Vec<u8> {

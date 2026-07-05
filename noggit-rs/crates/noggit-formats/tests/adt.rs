@@ -213,6 +213,50 @@ fn fixture_asset_adt() -> Vec<u8> {
     bytes
 }
 
+fn fixture_mh2o_adt() -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&chunk(b"MH2O", &fixture_mh2o()));
+    bytes
+}
+
+fn fixture_mh2o() -> Vec<u8> {
+    let headers_size = 256 * 12;
+    let attributes_offset = headers_size;
+    let info_offset = attributes_offset + 16;
+    let mask_offset = info_offset + 24;
+    let height_map_offset = mask_offset + 1;
+    let mut bytes = vec![0; headers_size];
+
+    write_u32(&mut bytes, 0, info_offset as u32);
+    write_u32(&mut bytes, 4, 1);
+    write_u32(&mut bytes, 8, attributes_offset as u32);
+
+    bytes.extend_from_slice(&0x0123_4567_89AB_CDEF_u64.to_le_bytes());
+    bytes.extend_from_slice(&0x0FED_CBA9_8765_4321_u64.to_le_bytes());
+
+    bytes.extend_from_slice(&7_u16.to_le_bytes());
+    bytes.extend_from_slice(&0_u16.to_le_bytes());
+    bytes.extend_from_slice(&10.0_f32.to_le_bytes());
+    bytes.extend_from_slice(&20.0_f32.to_le_bytes());
+    bytes.push(1);
+    bytes.push(2);
+    bytes.push(2);
+    bytes.push(1);
+    bytes.extend_from_slice(&(mask_offset as u32).to_le_bytes());
+    bytes.extend_from_slice(&(height_map_offset as u32).to_le_bytes());
+
+    bytes.push(0b0000_0010);
+
+    for height in [9.0_f32, 12.0, 22.0, 13.0, 14.0, 15.0] {
+        bytes.extend_from_slice(&height.to_le_bytes());
+    }
+    for depth in [0_u8, 64, 128, 192, 255, 32] {
+        bytes.push(depth);
+    }
+
+    bytes
+}
+
 fn string_block(strings: &[&str]) -> Vec<u8> {
     let mut bytes = Vec::new();
     for value in strings {
@@ -644,6 +688,72 @@ fn parses_adt_model_and_wmo_placements() -> FormatResult<()> {
     assert_eq!(wmos[0].doodad_set, 5);
     assert_eq!(wmos[0].name_set, 6);
     assert_eq!(wmos[0].scale, 2048);
+    Ok(())
+}
+
+#[test]
+fn parses_mh2o_liquid_layers() -> FormatResult<()> {
+    let adt = AdtFile::parse(&fixture_mh2o_adt())?;
+    let mh2o = adt.mh2o()?.ok_or(FormatError::InvalidRange {
+        field: "missing MH2O",
+    })?;
+    let chunk = &mh2o.chunks()[0];
+    let layer = &chunk.layers()[0];
+
+    assert_eq!(mh2o.chunks().len(), 256);
+    assert_eq!(chunk.attributes.fishable, 0x0123_4567_89AB_CDEF);
+    assert_eq!(chunk.attributes.fatigue, 0x0FED_CBA9_8765_4321);
+    assert_eq!(layer.liquid_id, 7);
+    assert_eq!(layer.liquid_vertex_format, 0);
+    assert_eq!(layer.x_offset, 1);
+    assert_eq!(layer.y_offset, 2);
+    assert_eq!(layer.width, 2);
+    assert_eq!(layer.height, 1);
+    assert!(!layer.has_tile(1, 2));
+    assert!(layer.has_tile(2, 2));
+    assert_close(
+        layer
+            .vertex(1, 2)
+            .ok_or(FormatError::InvalidRange {
+                field: "missing MH2O vertex",
+            })?
+            .height,
+        10.0,
+    );
+    assert_close(
+        layer
+            .vertex(2, 2)
+            .ok_or(FormatError::InvalidRange {
+                field: "missing MH2O vertex",
+            })?
+            .height,
+        12.0,
+    );
+    let diagonal = layer.vertex(3, 3).ok_or(FormatError::InvalidRange {
+        field: "missing MH2O vertex",
+    })?;
+    assert_close(diagonal.height, 15.0);
+    assert_close(diagonal.depth, 32.0 / 255.0);
+    assert_close(
+        layer
+            .vertex(0, 0)
+            .ok_or(FormatError::InvalidRange {
+                field: "missing MH2O vertex",
+            })?
+            .height,
+        10.0,
+    );
+    assert_eq!(mh2o.chunks()[1].layers().len(), 0);
+    Ok(())
+}
+
+#[test]
+fn rejects_truncated_mh2o_height_map() -> FormatResult<()> {
+    let mut mh2o = fixture_mh2o();
+    mh2o.pop();
+    let adt = AdtFile::parse(&chunk(b"MH2O", &mh2o))?;
+
+    assert!(matches!(adt.mh2o(), Err(FormatError::UnexpectedEof { .. })));
     Ok(())
 }
 

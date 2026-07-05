@@ -5,6 +5,6 @@ pub mod world;
 
 pub use error::{CoreError, CoreResult};
 pub use world::{
-    HeightRange, ModelPlacement, TerrainChunk, TerrainLayer, TileCoord, WmoPlacement, WorldMap,
-    WorldTile,
+    HeightRange, LiquidLayer, LiquidVertex, ModelPlacement, TerrainChunk, TerrainLayer, TileCoord,
+    WmoPlacement, WorldMap, WorldTile,
 };

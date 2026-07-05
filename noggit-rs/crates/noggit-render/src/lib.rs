@@ -18,6 +18,8 @@ const MCVT_ROWS: usize = 17;
 pub const TERRAIN_ALPHA_MAP_SIZE: usize = 64 * 64;
 const MODEL_MARKER_COLOR: [f32; 4] = [0.1, 0.85, 1.0, 1.0];
 const WMO_MARKER_COLOR: [f32; 4] = [1.0, 0.62, 0.16, 1.0];
+const LIQUID_TILE_GRID_SIDE: usize = 8;
+const LIQUID_VERTEX_GRID_SIDE: usize = 9;
 const MODEL_MARKER_HALF_SIZE: f32 = 3.0;
 const MODEL_MARKER_HEIGHT: f32 = 12.0;
 const MIN_MARKER_EXTENT: f32 = 2.0;
@@ -149,6 +151,28 @@ pub struct M2Mesh {
     loaded_asset_count: usize,
 }
 
+/// One liquid vertex in map-local render space.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WaterVertex {
+    /// Position in map-local render space.
+    pub position: [f32; 3],
+    /// Liquid texture coordinate.
+    pub tex_coord: [f32; 2],
+    /// Liquid depth normalized to 0..1.
+    pub depth: f32,
+    /// Liquid type id from `LiquidType.dbc`.
+    pub liquid_id: u16,
+}
+
+/// Renderer-facing liquid mesh generated from `MH2O` layers.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WaterMesh {
+    vertices: Vec<WaterVertex>,
+    indices: Vec<u32>,
+    bounds: Option<TerrainBounds>,
+    layer_count: usize,
+}
+
 /// One colored vertex for a debug placement overlay.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PlacementMarkerVertex {
@@ -255,6 +279,28 @@ impl M2Mesh {
     /// Return number of distinct M2 assets used by emitted placements.
     pub fn loaded_asset_count(&self) -> usize {
         self.loaded_asset_count
+    }
+}
+
+impl WaterMesh {
+    /// Return all water vertices.
+    pub fn vertices(&self) -> &[WaterVertex] {
+        &self.vertices
+    }
+
+    /// Return triangle indices.
+    pub fn indices(&self) -> &[u32] {
+        &self.indices
+    }
+
+    /// Return water bounds when at least one vertex exists.
+    pub fn bounds(&self) -> Option<TerrainBounds> {
+        self.bounds
+    }
+
+    /// Return source liquid layer count.
+    pub fn layer_count(&self) -> usize {
+        self.layer_count
     }
 }
 
@@ -368,6 +414,127 @@ pub fn build_terrain_mesh(map: &WorldMap) -> RenderResult<TerrainMesh> {
         alpha_maps,
         bounds,
     })
+}
+
+/// Build a render-space liquid mesh from loaded `MH2O` data.
+pub fn build_water_mesh(map: &WorldMap) -> RenderResult<WaterMesh> {
+    let min_tile_x = map.tiles().iter().map(|tile| tile.coord().x).min();
+    let min_tile_y = map.tiles().iter().map(|tile| tile.coord().y).min();
+    let Some(min_tile_x) = min_tile_x else {
+        return Ok(WaterMesh {
+            vertices: Vec::new(),
+            indices: Vec::new(),
+            bounds: None,
+            layer_count: 0,
+        });
+    };
+    let min_tile_y = min_tile_y.unwrap_or(0);
+
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+    let mut bounds = None;
+    let mut layer_count = 0usize;
+
+    for tile in map.tiles() {
+        let tile_origin_x = (tile.coord().x - min_tile_x) as f32 * TILE_SIZE;
+        let tile_origin_z = (tile.coord().y - min_tile_y) as f32 * TILE_SIZE;
+
+        for chunk in tile.terrain_chunks() {
+            let chunk_origin = [
+                tile_origin_x + chunk.x as f32 * CHUNK_SIZE,
+                tile_origin_z + chunk.y as f32 * CHUNK_SIZE,
+            ];
+            for layer in &chunk.liquid_layers {
+                layer_count += 1;
+                append_water_layer_mesh(
+                    layer,
+                    chunk_origin,
+                    &mut vertices,
+                    &mut indices,
+                    &mut bounds,
+                )?;
+            }
+        }
+    }
+
+    Ok(WaterMesh {
+        vertices,
+        indices,
+        bounds,
+        layer_count,
+    })
+}
+
+fn append_water_layer_mesh(
+    layer: &noggit_core::LiquidLayer,
+    chunk_origin: [f32; 2],
+    vertices: &mut Vec<WaterVertex>,
+    indices: &mut Vec<u32>,
+    bounds: &mut Option<TerrainBounds>,
+) -> RenderResult<()> {
+    for tile_y in 0..LIQUID_TILE_GRID_SIDE {
+        for tile_x in 0..LIQUID_TILE_GRID_SIDE {
+            if !layer.tiles[tile_y * LIQUID_TILE_GRID_SIDE + tile_x] {
+                continue;
+            }
+
+            append_water_tile(
+                layer,
+                chunk_origin,
+                tile_x,
+                tile_y,
+                vertices,
+                indices,
+                bounds,
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+fn append_water_tile(
+    layer: &noggit_core::LiquidLayer,
+    chunk_origin: [f32; 2],
+    tile_x: usize,
+    tile_y: usize,
+    vertices: &mut Vec<WaterVertex>,
+    indices: &mut Vec<u32>,
+    bounds: &mut Option<TerrainBounds>,
+) -> RenderResult<()> {
+    let corners = [
+        (tile_x, tile_y),
+        (tile_x + 1, tile_y),
+        (tile_x + 1, tile_y + 1),
+        (tile_x, tile_y + 1),
+    ];
+    let base_index = u32::try_from(vertices.len()).map_err(|_| RenderError::TooManyVertices)?;
+
+    for (vertex_x, vertex_y) in corners {
+        let vertex = layer.vertices[vertex_y * LIQUID_VERTEX_GRID_SIDE + vertex_x];
+        let position = [
+            chunk_origin[0] + vertex_x as f32 * (CHUNK_SIZE / LIQUID_TILE_GRID_SIDE as f32),
+            vertex.height,
+            chunk_origin[1] + vertex_y as f32 * (CHUNK_SIZE / LIQUID_TILE_GRID_SIDE as f32),
+        ];
+        extend_bounds(bounds, position);
+        vertices.push(WaterVertex {
+            position,
+            tex_coord: vertex.uv,
+            depth: vertex.depth,
+            liquid_id: layer.liquid_id,
+        });
+    }
+
+    indices.extend_from_slice(&[
+        base_index,
+        base_index + 1,
+        base_index + 2,
+        base_index,
+        base_index + 2,
+        base_index + 3,
+    ]);
+    Ok(())
 }
 
 /// Build transformed WMO triangle geometry for loaded map placements.
@@ -1265,6 +1432,37 @@ mod tests {
     }
 
     #[test]
+    fn builds_water_mesh_from_loaded_mh2o_layers() -> Result<(), Box<dyn Error>> {
+        let root = test_root("noggit-render-water")?;
+        let map_dir = root.join("testmap");
+        fs::create_dir_all(&map_dir)?;
+        fs::write(map_dir.join("testmap.wdt"), fixture_wdt())?;
+        fs::write(map_dir.join("testmap_27_25.adt"), fixture_adt())?;
+
+        let map = WorldMap::load_from_local_directory(&map_dir)?;
+        let mesh = build_water_mesh(&map)?;
+
+        fs::remove_dir_all(&root)?;
+
+        assert_eq!(mesh.layer_count(), 1);
+        assert_eq!(mesh.vertices().len(), 4);
+        assert_eq!(mesh.indices(), &[0, 1, 2, 0, 2, 3]);
+        assert_close(mesh.vertices()[0].position, [0.0, 3.0, 0.0]);
+        assert_close(
+            mesh.vertices()[2].position,
+            [
+                CHUNK_SIZE / LIQUID_TILE_GRID_SIDE as f32,
+                5.0,
+                CHUNK_SIZE / LIQUID_TILE_GRID_SIDE as f32,
+            ],
+        );
+        assert_eq!(mesh.vertices()[0].liquid_id, 7);
+        assert_eq!(mesh.vertices()[2].depth, 192.0 / 255.0);
+        assert!(mesh.bounds().is_some());
+        Ok(())
+    }
+
+    #[test]
     fn converts_world_positions_to_map_local_render_space() {
         let world_position = [27.0 * TILE_SIZE + 10.0, 7.0, 25.0 * TILE_SIZE + 20.0];
 
@@ -1375,6 +1573,7 @@ mod tests {
         bytes.extend_from_slice(&stored_chunk(b"MDDF", &mddf_entry()));
         bytes.extend_from_slice(&stored_chunk(b"MODF", &modf_entry()));
         bytes.extend_from_slice(&stored_chunk(b"MCNK", &mcnk()));
+        bytes.extend_from_slice(&stored_chunk(b"MH2O", &fixture_mh2o()));
         bytes
     }
 
@@ -1431,6 +1630,36 @@ mod tests {
         (0..TERRAIN_ALPHA_MAP_SIZE)
             .map(|index| (index % 251) as u8)
             .collect()
+    }
+
+    fn fixture_mh2o() -> Vec<u8> {
+        let headers_size = 256 * 12;
+        let info_offset = headers_size;
+        let height_map_offset = info_offset + 24;
+        let mut bytes = vec![0; headers_size];
+
+        write_u32(&mut bytes, 0, info_offset as u32);
+        write_u32(&mut bytes, 4, 1);
+
+        bytes.extend_from_slice(&7_u16.to_le_bytes());
+        bytes.extend_from_slice(&0_u16.to_le_bytes());
+        bytes.extend_from_slice(&3.0_f32.to_le_bytes());
+        bytes.extend_from_slice(&6.0_f32.to_le_bytes());
+        bytes.push(0);
+        bytes.push(0);
+        bytes.push(1);
+        bytes.push(1);
+        bytes.extend_from_slice(&0_u32.to_le_bytes());
+        bytes.extend_from_slice(&(height_map_offset as u32).to_le_bytes());
+
+        for height in [3.0_f32, 4.0, 6.0, 5.0] {
+            bytes.extend_from_slice(&height.to_le_bytes());
+        }
+        for depth in [0_u8, 64, 128, 192] {
+            bytes.push(depth);
+        }
+
+        bytes
     }
 
     fn string_block(strings: &[&str]) -> Vec<u8> {

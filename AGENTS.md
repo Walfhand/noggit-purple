@@ -71,6 +71,8 @@ Implemented:
 - ADT asset filename blocks: `MTEX`, `MMDX`, `MWMO`.
 - ADT asset filename offset tables: `MMID`, `MWID`.
 - ADT doodad and WMO placement tables: `MDDF`, `MODF`.
+- ADT `MH2O` liquid parsing, including chunk headers, optional attributes,
+  liquid layer metadata, masks, height maps, depths, and basic UV formats.
 - M2 root parsing for WotLK `MD20` headers, static vertices, direct texture
   definitions, and texture lookup tables.
 - M2 skin parsing for `SKIN` index lookup tables, triangle buffers, submeshes,
@@ -81,7 +83,8 @@ Implemented:
 - BLP header parsing and RGBA decoding for paletted textures plus DXT1, DXT3,
   and DXT5 mipmaps.
 - Core world-map model that loads local map directories into sorted ADT tiles,
-  terrain chunks, assets, placements, and WDT map-level alpha-map flags.
+  terrain chunks, liquid layers, assets, placements, and WDT map-level
+  alpha-map flags.
 - Renderer terrain mesh extraction from loaded ADT `MCVT` chunks, including
   up to four terrain texture material ids from `MCLY`, decoded `MCAL` alpha
   maps, and chunk detail-map UVs.
@@ -99,6 +102,9 @@ Implemented:
   diffuse texture filenames through the M2 texture lookup table, and leaves M2
   animation, particles, billboards, replacement textures, and advanced material
   behavior for later slices.
+- Renderer water mesh extraction from loaded ADT `MH2O` liquid layers. The
+  first water pass emits visible 8x8 liquid tile quads with decoded heights,
+  depths, UVs, and map-local placement.
 - Desktop terrain preview window through `noggit-ui`, using `winit`/`wgpu` for
   filled terrain triangles, depth buffering, camera controls, repeated BLP
   texture sampling, generated/decoded mipmaps, and GPU blending of terrain
@@ -110,6 +116,10 @@ Implemented:
   textures from the same WoW client/extra MPQ chain as terrain, then draws
   current `MDDF` doodad placements as static textured geometry. Press `N` to
   toggle real M2 meshes.
+- `noggit-ui` draws `MH2O` liquid surfaces through a separate transparent GPU
+  pass with simple procedural animation. Press `L` to toggle water. This does
+  not yet use `LiquidType.dbc` textures, reflection/fog parity, WMO liquids, or
+  legacy `MCLQ` water.
 - Camera movement in `noggit-ui` is a free-fly camera: hold left mouse to look,
   `WASD` moves relative to the camera, `Q` or control moves down, `E` or space
   moves up, shift accelerates, and mouse wheel adjusts movement speed.
@@ -120,8 +130,8 @@ Implemented:
 - `noggit-cli` commands: `inspect-dbc`, `inspect-adt`, `inspect-map`,
   `inspect-client`, `inspect-blp`, `check-map-assets`, `check-map-textures`.
 - `inspect-adt` summary for versions, asset tables, placements, terrain chunks,
-  placement asset usage, heights, normals, texture layers, and raw `MCAL`
-  payload sizes.
+  placement asset usage, `MH2O` liquid counts, heights, normals, texture
+  layers, and raw `MCAL` payload sizes.
 - `inspect-map` summary for full local map directories, validated against
   `/home/walfhand/Documents/wow-maps/guerilla`.
 - `inspect-client` and `check-map-assets` have been validated against
@@ -138,9 +148,10 @@ Implemented:
   `M2 mesh: placements=2246 ... triangles=314589` in the last smoke run) and
   the 6 WMO placements as static textured geometry (`WMO assets loaded: 2/2`,
   `WMO textures loaded: 16/16`). Press `N` to toggle M2 meshes, `M` to toggle
-  WMO meshes, and `O` to toggle debug placement boxes. The preview still does
-  not render M2 animation/particles/advanced material behavior, WMO liquids,
-  WMO internal doodads, sky, or edit tools.
+  WMO meshes, `L` to toggle water, and `O` to toggle debug placement boxes. The
+  preview still does not render M2 animation/particles/advanced material
+  behavior, LiquidType texture parity, WMO liquids, WMO internal doodads, sky,
+  or edit tools.
 - `cargo run -p noggit-cli -- check-map-textures /home/walfhand/Documents/wow-maps/guerilla /home/walfhand/Documents/Ultimate\ WotLK /home/walfhand/Documents/wow-maps/patch-guerilla.MPQ`
   currently decodes all 12 terrain textures referenced by Guerilla.
 
@@ -150,5 +161,7 @@ Next:
   parity, and selection.
 - WMO material parity, liquids, fog, doodad sets, internal doodads, and
   selection.
+- LiquidType.dbc texture parity, WMO liquids, legacy `MCLQ` liquid support, and
+  water editing/save paths.
 - Terrain editing mutations and byte-preserving save paths.
 - Real golden samples once stable fixtures are available.

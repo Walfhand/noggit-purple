@@ -1,6 +1,8 @@
 //! ADT terrain file container parsing.
 
-use crate::error::{FormatError, FormatResult, read_exact, read_f32_le, read_u16_le, read_u32_le};
+use crate::error::{
+    FormatError, FormatResult, read_exact, read_f32_le, read_u8, read_u16_le, read_u32_le,
+};
 
 const MHDR_SIZE: usize = 64;
 const MCIN_ENTRY_COUNT: usize = 256;
@@ -10,6 +12,14 @@ const MCNK_OUTER_HEADER_SIZE: usize = 8;
 const MCLY_ENTRY_SIZE: usize = 16;
 const MDDF_ENTRY_SIZE: usize = 0x24;
 const MODF_ENTRY_SIZE: usize = 0x40;
+const MH2O_CHUNK_COUNT: usize = 16 * 16;
+const MH2O_HEADER_SIZE: usize = 12;
+const MH2O_INFORMATION_SIZE: usize = 24;
+const MH2O_ATTRIBUTES_SIZE: usize = 16;
+const LIQUID_VERTEX_GRID_SIDE: usize = 9;
+const LIQUID_TILE_GRID_SIDE: usize = 8;
+const LIQUID_VERTEX_COUNT: usize = LIQUID_VERTEX_GRID_SIDE * LIQUID_VERTEX_GRID_SIDE;
+const LIQUID_TILE_COUNT: usize = LIQUID_TILE_GRID_SIDE * LIQUID_TILE_GRID_SIDE;
 const MCNR_NORMAL_BYTE_COUNT: usize = MCNK_VERTEX_HEIGHT_COUNT * 3;
 const LEGACY_ALPHA_MAP_SIZE: usize = ALPHA_MAP_SIZE / 2;
 const KNOWN_CHUNK_IDS: [[u8; 4]; 25] = [
@@ -191,6 +201,65 @@ pub struct MclyEntry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlphaMap {
     values: [u8; ALPHA_MAP_SIZE],
+}
+
+/// Parsed ADT `MH2O` liquid data, indexed like `MCNK` chunks: `chunk_y * 16 + chunk_x`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Mh2o {
+    chunks: Vec<Mh2oChunk>,
+}
+
+/// Liquid layers for one terrain chunk inside `MH2O`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Mh2oChunk {
+    /// Optional fishable/fatigue attributes for this chunk.
+    pub attributes: Mh2oAttributes,
+    layers: Vec<Mh2oLayer>,
+}
+
+/// One `MH2O_Information` layer plus decoded mask and vertex data.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Mh2oLayer {
+    /// Liquid type id from `LiquidType.dbc`.
+    pub liquid_id: u16,
+    /// Raw liquid vertex format.
+    pub liquid_vertex_format: u16,
+    /// Layer minimum height.
+    pub min_height: f32,
+    /// Layer maximum height.
+    pub max_height: f32,
+    /// X offset of the encoded liquid tile rectangle.
+    pub x_offset: u8,
+    /// Y offset of the encoded liquid tile rectangle.
+    pub y_offset: u8,
+    /// Width of the encoded liquid tile rectangle, in 8x8 liquid tiles.
+    pub width: u8,
+    /// Height of the encoded liquid tile rectangle, in 8x8 liquid tiles.
+    pub height: u8,
+    /// Decoded visibility mask for all 8x8 liquid tiles.
+    pub tiles: [bool; LIQUID_TILE_COUNT],
+    /// Decoded 9x9 liquid vertices.
+    pub vertices: [Mh2oVertex; LIQUID_VERTEX_COUNT],
+}
+
+/// One decoded `MH2O` liquid vertex.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Mh2oVertex {
+    /// Liquid surface height.
+    pub height: f32,
+    /// Liquid depth value normalized to 0..1.
+    pub depth: f32,
+    /// Liquid texture coordinate.
+    pub uv: [f32; 2],
+}
+
+/// `MH2O_Attributes` fishable/fatigue flags.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Mh2oAttributes {
+    /// Fishable liquid tile bitset.
+    pub fishable: u64,
+    /// Fatigue liquid tile bitset.
+    pub fatigue: u64,
 }
 
 /// One doodad placement entry from an `MDDF` chunk.
@@ -379,6 +448,13 @@ impl AdtFile {
     pub fn wmo_placements(&self) -> FormatResult<Option<Vec<ModfEntry>>> {
         self.first_chunk(*b"MODF")
             .map(|chunk| parse_modf_entries(&chunk.data))
+            .transpose()
+    }
+
+    /// Parse top-level `MH2O` liquid data when present.
+    pub fn mh2o(&self) -> FormatResult<Option<Mh2o>> {
+        self.first_chunk(*b"MH2O")
+            .map(|chunk| parse_mh2o(&chunk.data))
             .transpose()
     }
 
@@ -665,6 +741,57 @@ impl AlphaMap {
     }
 }
 
+impl Mh2o {
+    /// Return per-terrain-chunk liquid data in `chunk_y * 16 + chunk_x` order.
+    pub fn chunks(&self) -> &[Mh2oChunk] {
+        &self.chunks
+    }
+}
+
+impl Mh2oChunk {
+    /// Return liquid layers for this terrain chunk.
+    pub fn layers(&self) -> &[Mh2oLayer] {
+        &self.layers
+    }
+}
+
+impl Mh2oLayer {
+    /// Return whether the 8x8 liquid tile at `x`,`y` should render.
+    pub fn has_tile(&self, x: usize, y: usize) -> bool {
+        if x >= LIQUID_TILE_GRID_SIDE || y >= LIQUID_TILE_GRID_SIDE {
+            return false;
+        }
+        self.tiles[y * LIQUID_TILE_GRID_SIDE + x]
+    }
+
+    /// Return the liquid vertex at the 9x9 grid coordinate `x`,`y`.
+    pub fn vertex(&self, x: usize, y: usize) -> Option<Mh2oVertex> {
+        if x >= LIQUID_VERTEX_GRID_SIDE || y >= LIQUID_VERTEX_GRID_SIDE {
+            return None;
+        }
+        Some(self.vertices[y * LIQUID_VERTEX_GRID_SIDE + x])
+    }
+}
+
+impl Default for Mh2oAttributes {
+    fn default() -> Self {
+        Self {
+            fishable: u64::MAX,
+            fatigue: u64::MAX,
+        }
+    }
+}
+
+impl Default for Mh2oVertex {
+    fn default() -> Self {
+        Self {
+            height: 0.0,
+            depth: 1.0,
+            uv: [0.0, 0.0],
+        }
+    }
+}
+
 impl MddfEntry {
     fn parse(bytes: &[u8], offset: usize) -> FormatResult<Self> {
         Ok(Self {
@@ -790,12 +917,249 @@ fn parse_modf_entries(bytes: &[u8]) -> FormatResult<Vec<ModfEntry>> {
         .collect()
 }
 
+fn parse_mh2o(bytes: &[u8]) -> FormatResult<Mh2o> {
+    ensure_len(bytes, MH2O_CHUNK_COUNT * MH2O_HEADER_SIZE)?;
+
+    let chunks = (0..MH2O_CHUNK_COUNT)
+        .map(|chunk_index| parse_mh2o_chunk(bytes, chunk_index))
+        .collect::<FormatResult<Vec<_>>>()?;
+
+    Ok(Mh2o { chunks })
+}
+
+fn parse_mh2o_chunk(bytes: &[u8], chunk_index: usize) -> FormatResult<Mh2oChunk> {
+    let header_offset =
+        chunk_index
+            .checked_mul(MH2O_HEADER_SIZE)
+            .ok_or(FormatError::InvalidRange {
+                field: "MH2O chunk header offset",
+            })?;
+    let information_offset = read_u32_le(bytes, header_offset)?;
+    let layer_count = read_u32_le(bytes, header_offset + 4)?;
+    let attributes_offset = read_u32_le(bytes, header_offset + 8)?;
+    let attributes = if attributes_offset == 0 {
+        Mh2oAttributes::default()
+    } else {
+        parse_mh2o_attributes(bytes, attributes_offset)?
+    };
+    let layer_count = usize::try_from(layer_count).map_err(|_| FormatError::InvalidRange {
+        field: "MH2O layer count",
+    })?;
+
+    let layers = (0..layer_count)
+        .map(|layer_index| {
+            let offset = checked_relative_array_offset(
+                information_offset,
+                layer_index,
+                MH2O_INFORMATION_SIZE,
+                "MH2O information offset",
+            )?;
+            parse_mh2o_layer(bytes, offset)
+        })
+        .collect::<FormatResult<Vec<_>>>()?;
+
+    Ok(Mh2oChunk { attributes, layers })
+}
+
+fn parse_mh2o_attributes(bytes: &[u8], offset: u32) -> FormatResult<Mh2oAttributes> {
+    let offset = usize::try_from(offset).map_err(|_| FormatError::InvalidRange {
+        field: "MH2O attributes offset",
+    })?;
+    ensure_range(bytes, offset, MH2O_ATTRIBUTES_SIZE, "MH2O attributes")?;
+
+    Ok(Mh2oAttributes {
+        fishable: read_u64_le(bytes, offset)?,
+        fatigue: read_u64_le(bytes, offset + 8)?,
+    })
+}
+
+fn parse_mh2o_layer(bytes: &[u8], offset: usize) -> FormatResult<Mh2oLayer> {
+    ensure_range(bytes, offset, MH2O_INFORMATION_SIZE, "MH2O information")?;
+
+    let liquid_id = read_u16_le(bytes, offset)?;
+    let liquid_vertex_format = read_u16_le(bytes, offset + 2)?;
+    let min_height = read_f32_le(bytes, offset + 4)?;
+    let max_height = read_f32_le(bytes, offset + 8)?;
+    let x_offset = read_u8(bytes, offset + 12)?;
+    let y_offset = read_u8(bytes, offset + 13)?;
+    let width = read_u8(bytes, offset + 14)?;
+    let height = read_u8(bytes, offset + 15)?;
+    let info_mask_offset = read_u32_le(bytes, offset + 16)?;
+    let height_map_offset = read_u32_le(bytes, offset + 20)?;
+
+    validate_liquid_rect(x_offset, y_offset, width, height)?;
+
+    let info_mask = read_mh2o_info_mask(bytes, info_mask_offset, width, height)?;
+    let mut tiles = [false; LIQUID_TILE_COUNT];
+    let mut mask_index = 0usize;
+    for y in usize::from(y_offset)..usize::from(y_offset + height) {
+        for x in usize::from(x_offset)..usize::from(x_offset + width) {
+            tiles[y * LIQUID_TILE_GRID_SIDE + x] = info_mask & (1 << mask_index) != 0;
+            mask_index += 1;
+        }
+    }
+
+    let mut vertices = default_mh2o_vertices(min_height);
+    if height_map_offset != 0 {
+        read_mh2o_height_map(
+            bytes,
+            height_map_offset,
+            liquid_vertex_format,
+            x_offset,
+            y_offset,
+            width,
+            height,
+            min_height,
+            max_height,
+            &mut vertices,
+        )?;
+    }
+
+    Ok(Mh2oLayer {
+        liquid_id,
+        liquid_vertex_format,
+        min_height,
+        max_height,
+        x_offset,
+        y_offset,
+        width,
+        height,
+        tiles,
+        vertices,
+    })
+}
+
+fn validate_liquid_rect(x_offset: u8, y_offset: u8, width: u8, height: u8) -> FormatResult<()> {
+    let x_end = usize::from(x_offset) + usize::from(width);
+    let y_end = usize::from(y_offset) + usize::from(height);
+    if x_end > LIQUID_TILE_GRID_SIDE || y_end > LIQUID_TILE_GRID_SIDE {
+        return Err(FormatError::InvalidRange {
+            field: "MH2O liquid rectangle",
+        });
+    }
+    Ok(())
+}
+
+fn read_mh2o_info_mask(bytes: &[u8], offset: u32, width: u8, height: u8) -> FormatResult<u64> {
+    if offset == 0 || height == 0 {
+        return Ok(u64::MAX);
+    }
+
+    let offset = usize::try_from(offset).map_err(|_| FormatError::InvalidRange {
+        field: "MH2O info mask offset",
+    })?;
+    let bit_count = usize::from(width) * usize::from(height);
+    let byte_count = bit_count.div_ceil(8);
+    ensure_range(bytes, offset, byte_count, "MH2O info mask")?;
+
+    let mut mask = 0u64;
+    for byte_index in 0..byte_count {
+        mask |= u64::from(bytes[offset + byte_index]) << (byte_index * 8);
+    }
+    Ok(mask)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn read_mh2o_height_map(
+    bytes: &[u8],
+    offset: u32,
+    liquid_vertex_format: u16,
+    x_offset: u8,
+    y_offset: u8,
+    width: u8,
+    height: u8,
+    min_height: f32,
+    max_height: f32,
+    vertices: &mut [Mh2oVertex; LIQUID_VERTEX_COUNT],
+) -> FormatResult<()> {
+    let mut cursor = usize::try_from(offset).map_err(|_| FormatError::InvalidRange {
+        field: "MH2O height map offset",
+    })?;
+    let vertex_columns = usize::from(width) + 1;
+    let vertex_rows = usize::from(height) + 1;
+    let vertex_count =
+        vertex_columns
+            .checked_mul(vertex_rows)
+            .ok_or(FormatError::InvalidRange {
+                field: "MH2O vertex count",
+            })?;
+
+    if matches!(liquid_vertex_format, 0 | 1 | 3) {
+        ensure_range(bytes, cursor, vertex_count * 4, "MH2O height values")?;
+        for y in usize::from(y_offset)..=usize::from(y_offset + height) {
+            for x in usize::from(x_offset)..=usize::from(x_offset + width) {
+                let index = y * LIQUID_VERTEX_GRID_SIDE + x;
+                vertices[index].height = read_f32_le(bytes, cursor)?.clamp(min_height, max_height);
+                cursor += 4;
+            }
+        }
+    }
+
+    if matches!(liquid_vertex_format, 1 | 3) {
+        ensure_range(bytes, cursor, vertex_count * 4, "MH2O UV values")?;
+        for y in usize::from(y_offset)..=usize::from(y_offset + height) {
+            for x in usize::from(x_offset)..=usize::from(x_offset + width) {
+                let index = y * LIQUID_VERTEX_GRID_SIDE + x;
+                let u = read_u16_le(bytes, cursor)?;
+                let v = read_u16_le(bytes, cursor + 2)?;
+                vertices[index].uv = [f32::from(u) / 255.0, f32::from(v) / 255.0];
+                cursor += 4;
+            }
+        }
+    }
+
+    if matches!(liquid_vertex_format, 0 | 2 | 3) {
+        ensure_range(bytes, cursor, vertex_count, "MH2O depth values")?;
+        for y in usize::from(y_offset)..=usize::from(y_offset + height) {
+            for x in usize::from(x_offset)..=usize::from(x_offset + width) {
+                let index = y * LIQUID_VERTEX_GRID_SIDE + x;
+                vertices[index].depth = f32::from(read_u8(bytes, cursor)?) / 255.0;
+                cursor += 1;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn default_mh2o_vertices(height: f32) -> [Mh2oVertex; LIQUID_VERTEX_COUNT] {
+    let mut vertices = [Mh2oVertex::default(); LIQUID_VERTEX_COUNT];
+    for y in 0..LIQUID_VERTEX_GRID_SIDE {
+        for x in 0..LIQUID_VERTEX_GRID_SIDE {
+            vertices[y * LIQUID_VERTEX_GRID_SIDE + x] = Mh2oVertex {
+                height,
+                depth: 1.0,
+                uv: [x as f32 / 4.0, y as f32 / 4.0],
+            };
+        }
+    }
+    vertices
+}
+
+fn checked_relative_array_offset(
+    base: u32,
+    index: usize,
+    element_size: usize,
+    field: &'static str,
+) -> FormatResult<usize> {
+    let base = usize::try_from(base).map_err(|_| FormatError::InvalidRange { field })?;
+    let relative = index
+        .checked_mul(element_size)
+        .ok_or(FormatError::InvalidRange { field })?;
+    base.checked_add(relative)
+        .ok_or(FormatError::InvalidRange { field })
+}
+
 fn read_vec3(bytes: &[u8], offset: usize) -> FormatResult<[f32; 3]> {
     Ok([
         read_f32_le(bytes, offset)?,
         read_f32_le(bytes, offset + 4)?,
         read_f32_le(bytes, offset + 8)?,
     ])
+}
+
+fn read_u64_le(bytes: &[u8], offset: usize) -> FormatResult<u64> {
+    Ok(u64::from_le_bytes(read_exact(bytes, offset)?))
 }
 
 fn checked_string_offset(offset: usize) -> FormatResult<u32> {
@@ -943,6 +1307,26 @@ fn ensure_len(bytes: &[u8], needed: usize) -> FormatResult<()> {
     if bytes.len() < needed {
         return Err(FormatError::UnexpectedEof {
             offset: 0,
+            needed,
+            len: bytes.len(),
+        });
+    }
+
+    Ok(())
+}
+
+fn ensure_range(
+    bytes: &[u8],
+    offset: usize,
+    needed: usize,
+    field: &'static str,
+) -> FormatResult<()> {
+    let end = offset
+        .checked_add(needed)
+        .ok_or(FormatError::InvalidRange { field })?;
+    if end > bytes.len() {
+        return Err(FormatError::UnexpectedEof {
+            offset,
             needed,
             len: bytes.len(),
         });

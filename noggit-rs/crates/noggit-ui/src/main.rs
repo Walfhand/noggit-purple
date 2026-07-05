@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Instant;
 
 use bytemuck::{Pod, Zeroable};
 use noggit_core::WorldMap;
@@ -13,8 +14,9 @@ use noggit_formats::m2::{M2File, M2SkinFile};
 use noggit_formats::wmo::{WmoFile, WmoGroupFile};
 use noggit_render::{
     M2Mesh, M2RenderAsset, M2RenderVertex, PlacementMarkerMesh, PlacementMarkerVertex,
-    TerrainBounds, TerrainMesh, TerrainVertex, WmoMesh, WmoRenderAsset, WmoVertex, build_m2_mesh,
-    build_placement_marker_mesh, build_terrain_mesh, build_wmo_mesh,
+    TerrainBounds, TerrainMesh, TerrainVertex, WaterMesh, WaterVertex, WmoMesh, WmoRenderAsset,
+    WmoVertex, build_m2_mesh, build_placement_marker_mesh, build_terrain_mesh, build_water_mesh,
+    build_wmo_mesh,
 };
 use noggit_vfs::{ArchiveLoadState, FileSource, VfsPath, WowClient, WowClientConfig};
 use wgpu::util::DeviceExt;
@@ -52,6 +54,7 @@ fn run() -> Result<(), String> {
     let world =
         WorldMap::load_from_local_directory(&options.map_path).map_err(|err| err.to_string())?;
     let mesh = build_terrain_mesh(&world).map_err(|err| err.to_string())?;
+    let water_mesh = build_water_mesh(&world).map_err(|err| err.to_string())?;
     let marker_mesh = build_placement_marker_mesh(&world).map_err(|err| err.to_string())?;
     let client = open_preview_client(&options)?;
     let mut material_images = load_material_images("terrain", mesh.materials(), client.as_ref())?;
@@ -61,6 +64,9 @@ fn run() -> Result<(), String> {
     let fallback_alpha_id = alpha_images.len();
     alpha_images.push(empty_alpha_image());
     let gpu_mesh = GpuMesh::from_terrain_mesh(mesh, fallback_material_id, fallback_alpha_id)?;
+    log_water_mesh_summary(&water_mesh);
+    let water_bounds = water_mesh.bounds();
+    let gpu_water_mesh = GpuWaterMesh::from_water_mesh(water_mesh)?;
     let m2_assets = load_m2_assets(&world, client.as_ref())?;
     let m2_mesh = build_m2_mesh(&world, &m2_assets).map_err(|err| err.to_string())?;
     log_m2_mesh_summary(&m2_mesh);
@@ -80,7 +86,13 @@ fn run() -> Result<(), String> {
     let gpu_wmo_mesh = GpuWmoMesh::from_wmo_mesh(wmo_mesh, fallback_wmo_material_id)?;
     let gpu_marker_mesh = GpuMarkerMesh::from_marker_mesh(&marker_mesh)?;
     let mut camera = Camera::new(gpu_mesh.bounds);
-    log_render_bounds(gpu_mesh.bounds, marker_mesh.bounds(), m2_bounds, wmo_bounds);
+    log_render_bounds(
+        gpu_mesh.bounds,
+        marker_mesh.bounds(),
+        m2_bounds,
+        wmo_bounds,
+        water_bounds,
+    );
     eprintln!(
         "object placement markers: {} placements, {} lines",
         marker_mesh.marker_count(),
@@ -101,6 +113,7 @@ fn run() -> Result<(), String> {
     let mut gpu = pollster::block_on(GpuState::new(
         window,
         &gpu_mesh,
+        &gpu_water_mesh,
         &gpu_m2_mesh,
         &gpu_wmo_mesh,
         &gpu_marker_mesh,
@@ -625,11 +638,21 @@ fn log_m2_mesh_summary(mesh: &M2Mesh) {
     );
 }
 
+fn log_water_mesh_summary(mesh: &WaterMesh) {
+    eprintln!(
+        "water mesh: layers={} vertices={} triangles={}",
+        mesh.layer_count(),
+        mesh.vertices().len(),
+        mesh.indices().len() / 3
+    );
+}
+
 fn log_render_bounds(
     terrain: TerrainBounds,
     markers: Option<TerrainBounds>,
     m2: Option<TerrainBounds>,
     wmo: Option<TerrainBounds>,
+    water: Option<TerrainBounds>,
 ) {
     eprintln!(
         "terrain bounds: min=({:.1},{:.1},{:.1}) max=({:.1},{:.1},{:.1})",
@@ -668,6 +691,14 @@ fn log_render_bounds(
         );
     } else {
         eprintln!("WMO bounds: none");
+    }
+    if let Some(water) = water {
+        eprintln!(
+            "water bounds: min=({:.1},{:.1},{:.1}) max=({:.1},{:.1},{:.1})",
+            water.min[0], water.min[1], water.min[2], water.max[0], water.max[1], water.max[2]
+        );
+    } else {
+        eprintln!("water bounds: none");
     }
 }
 
@@ -774,6 +805,50 @@ impl GpuWmoVertex {
     }
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct GpuWaterVertex {
+    position: [f32; 3],
+    tex_coord: [f32; 2],
+    depth: f32,
+    liquid_id: f32,
+}
+
+impl GpuWaterVertex {
+    fn layout() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<GpuWaterVertex>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &[
+                wgpu::VertexAttribute {
+                    offset: 0,
+                    shader_location: 0,
+                    format: wgpu::VertexFormat::Float32x3,
+                },
+                wgpu::VertexAttribute {
+                    offset: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
+                    shader_location: 1,
+                    format: wgpu::VertexFormat::Float32x2,
+                },
+                wgpu::VertexAttribute {
+                    offset: (std::mem::size_of::<[f32; 3]>() + std::mem::size_of::<[f32; 2]>())
+                        as wgpu::BufferAddress,
+                    shader_location: 2,
+                    format: wgpu::VertexFormat::Float32,
+                },
+                wgpu::VertexAttribute {
+                    offset: (std::mem::size_of::<[f32; 3]>()
+                        + std::mem::size_of::<[f32; 2]>()
+                        + std::mem::size_of::<f32>())
+                        as wgpu::BufferAddress,
+                    shader_location: 3,
+                    format: wgpu::VertexFormat::Float32,
+                },
+            ],
+        }
+    }
+}
+
 struct GpuMesh {
     groups: Vec<GpuMeshGroup>,
     bounds: TerrainBounds,
@@ -788,6 +863,11 @@ struct GpuMeshGroup {
 
 struct GpuMarkerMesh {
     vertices: Vec<GpuMarkerVertex>,
+    indices: Vec<u32>,
+}
+
+struct GpuWaterMesh {
+    vertices: Vec<GpuWaterVertex>,
     indices: Vec<u32>,
 }
 
@@ -871,6 +951,18 @@ impl GpuMesh {
         groups.retain(|group| !group.indices.is_empty());
 
         Ok(Self { groups, bounds })
+    }
+}
+
+impl GpuWaterMesh {
+    fn from_water_mesh(mesh: WaterMesh) -> Result<Self, String> {
+        let _ = u32::try_from(mesh.indices().len())
+            .map_err(|_| "water index buffer exceeds u32 draw range".to_string())?;
+
+        Ok(Self {
+            vertices: mesh.vertices().iter().map(gpu_water_vertex).collect(),
+            indices: mesh.indices().to_vec(),
+        })
     }
 }
 
@@ -1029,6 +1121,15 @@ fn gpu_wmo_vertex(vertex: &WmoVertex) -> GpuWmoVertex {
     }
 }
 
+fn gpu_water_vertex(vertex: &WaterVertex) -> GpuWaterVertex {
+    GpuWaterVertex {
+        position: vertex.position,
+        tex_coord: vertex.tex_coord,
+        depth: vertex.depth,
+        liquid_id: f32::from(vertex.liquid_id),
+    }
+}
+
 fn gpu_m2_vertex(vertex: &M2RenderVertex) -> GpuWmoVertex {
     GpuWmoVertex {
         position: vertex.position,
@@ -1044,10 +1145,14 @@ struct GpuState<'window> {
     config: wgpu::SurfaceConfiguration,
     depth: DepthTarget,
     pipeline: wgpu::RenderPipeline,
+    water_pipeline: wgpu::RenderPipeline,
     wmo_pipeline: wgpu::RenderPipeline,
     marker_pipeline: wgpu::RenderPipeline,
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
+    water_buffer: wgpu::Buffer,
+    water_bind_group: wgpu::BindGroup,
+    started_at: Instant,
     _material_textures: Vec<GpuTextureResource>,
     _alpha_textures: Vec<GpuTextureResource>,
     _m2_textures: Vec<GpuTextureResource>,
@@ -1055,6 +1160,7 @@ struct GpuState<'window> {
     draw_groups: Vec<GpuDrawGroup>,
     m2_draw_groups: Vec<GpuM2DrawGroup>,
     wmo_draw_groups: Vec<GpuWmoDrawGroup>,
+    water_draw: Option<GpuWaterDraw>,
     marker_draw: Option<GpuMarkerDraw>,
 }
 
@@ -1098,6 +1204,12 @@ struct GpuM2DrawGroup {
     index_count: u32,
 }
 
+struct GpuWaterDraw {
+    vertex_buffer: wgpu::Buffer,
+    index_buffer: wgpu::Buffer,
+    index_count: u32,
+}
+
 struct GpuMarkerDraw {
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
@@ -1115,6 +1227,7 @@ impl<'window> GpuState<'window> {
     async fn new(
         window: &'window Window,
         mesh: &GpuMesh,
+        water_mesh: &GpuWaterMesh,
         m2_mesh: &GpuM2Mesh,
         wmo_mesh: &GpuWmoMesh,
         marker_mesh: &GpuMarkerMesh,
@@ -1211,6 +1324,34 @@ impl<'window> GpuState<'window> {
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
                 resource: camera_buffer.as_entire_binding(),
+            }],
+        });
+        let water_uniform = WaterUniform { params: [0.0; 4] };
+        let water_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("water-uniform-buffer"),
+            contents: bytemuck::bytes_of(&water_uniform),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let water_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("water-bind-group-layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+        let water_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("water-bind-group"),
+            layout: &water_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: water_buffer.as_entire_binding(),
             }],
         });
         let layer_bind_group_layout =
@@ -1325,6 +1466,54 @@ impl<'window> GpuState<'window> {
                 format: DEPTH_FORMAT,
                 depth_write_enabled: true,
                 depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+        });
+        let water_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("water-shader"),
+            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(WATER_SHADER)),
+        });
+        let water_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("water-pipeline-layout"),
+                bind_group_layouts: &[&camera_bind_group_layout, &water_bind_group_layout],
+                push_constant_ranges: &[],
+            });
+        let water_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("water-pipeline"),
+            layout: Some(&water_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &water_shader,
+                entry_point: "vs_water",
+                buffers: &[GpuWaterVertex::layout()],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &water_shader,
+                entry_point: "fs_water",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::LessEqual,
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
@@ -1463,6 +1652,7 @@ impl<'window> GpuState<'window> {
             .enumerate()
             .map(|(index, group)| create_m2_draw_group(&device, index, group, &m2_resources))
             .collect::<Result<Vec<_>, _>>()?;
+        let water_draw = create_water_draw(&device, water_mesh)?;
         let marker_draw = create_marker_draw(&device, marker_mesh)?;
         let depth = DepthTarget::new(&device, &config);
 
@@ -1473,10 +1663,14 @@ impl<'window> GpuState<'window> {
             config,
             depth,
             pipeline,
+            water_pipeline,
             wmo_pipeline,
             marker_pipeline,
             camera_buffer,
             camera_bind_group,
+            water_buffer,
+            water_bind_group,
+            started_at: Instant::now(),
             _material_textures: material_textures,
             _alpha_textures: alpha_textures,
             _m2_textures: m2_textures,
@@ -1484,6 +1678,7 @@ impl<'window> GpuState<'window> {
             draw_groups,
             m2_draw_groups,
             wmo_draw_groups,
+            water_draw,
             marker_draw,
         })
     }
@@ -1504,7 +1699,16 @@ impl<'window> GpuState<'window> {
             .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&uniform));
     }
 
+    fn update_water(&self) {
+        let uniform = WaterUniform {
+            params: [self.started_at.elapsed().as_secs_f32(), 0.0, 0.0, 0.0],
+        };
+        self.queue
+            .write_buffer(&self.water_buffer, 0, bytemuck::bytes_of(&uniform));
+    }
+
     fn render(&mut self, view_options: &ViewOptions) -> Result<(), wgpu::SurfaceError> {
+        self.update_water();
         let frame = self.surface.get_current_texture()?;
         let view = frame
             .texture
@@ -1564,6 +1768,16 @@ impl<'window> GpuState<'window> {
                     pass.set_index_buffer(group.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                     pass.draw_indexed(0..group.index_count, 0, 0..1);
                 }
+            }
+            if view_options.show_water
+                && let Some(water_draw) = &self.water_draw
+            {
+                pass.set_pipeline(&self.water_pipeline);
+                pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                pass.set_bind_group(1, &self.water_bind_group, &[]);
+                pass.set_vertex_buffer(0, water_draw.vertex_buffer.slice(..));
+                pass.set_index_buffer(water_draw.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..water_draw.index_count, 0, 0..1);
             }
             if view_options.show_object_markers
                 && let Some(marker_draw) = &self.marker_draw
@@ -1926,6 +2140,34 @@ fn create_m2_draw_group(
     })
 }
 
+fn create_water_draw(
+    device: &wgpu::Device,
+    mesh: &GpuWaterMesh,
+) -> Result<Option<GpuWaterDraw>, String> {
+    if mesh.indices.is_empty() {
+        return Ok(None);
+    }
+
+    let index_count = u32::try_from(mesh.indices.len())
+        .map_err(|_| "water index buffer exceeds u32 draw range".to_string())?;
+    let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("water-vertex-buffer"),
+        contents: bytemuck::cast_slice(&mesh.vertices),
+        usage: wgpu::BufferUsages::VERTEX,
+    });
+    let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("water-index-buffer"),
+        contents: bytemuck::cast_slice(&mesh.indices),
+        usage: wgpu::BufferUsages::INDEX,
+    });
+
+    Ok(Some(GpuWaterDraw {
+        vertex_buffer,
+        index_buffer,
+        index_count,
+    }))
+}
+
 fn create_marker_draw(
     device: &wgpu::Device,
     mesh: &GpuMarkerMesh,
@@ -1984,6 +2226,12 @@ impl DepthTarget {
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct CameraUniform {
     view_projection: [[f32; 4]; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct WaterUniform {
+    params: [f32; 4],
 }
 
 const CAMERA_MOUSE_SENSITIVITY: f32 = 0.006;
@@ -2137,6 +2385,7 @@ struct ViewOptions {
     show_object_markers: bool,
     show_m2_meshes: bool,
     show_wmo_meshes: bool,
+    show_water: bool,
 }
 
 impl Default for ViewOptions {
@@ -2145,6 +2394,7 @@ impl Default for ViewOptions {
             show_object_markers: true,
             show_m2_meshes: true,
             show_wmo_meshes: true,
+            show_water: true,
         }
     }
 }
@@ -2162,6 +2412,10 @@ impl ViewOptions {
             }
             KeyCode::KeyN => {
                 self.show_m2_meshes = !self.show_m2_meshes;
+                true
+            }
+            KeyCode::KeyL => {
+                self.show_water = !self.show_water;
                 true
             }
             _ => false,
@@ -2385,6 +2639,70 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
 }
 "#;
 
+const WATER_SHADER: &str = r#"
+struct Camera {
+    view_projection: mat4x4<f32>,
+};
+
+struct WaterState {
+    params: vec4<f32>,
+};
+
+@group(0) @binding(0)
+var<uniform> camera: Camera;
+
+@group(1) @binding(0)
+var<uniform> water: WaterState;
+
+struct VertexInput {
+    @location(0) position: vec3<f32>,
+    @location(1) tex_coord: vec2<f32>,
+    @location(2) depth: f32,
+    @location(3) liquid_id: f32,
+};
+
+struct VertexOutput {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) tex_coord: vec2<f32>,
+    @location(1) depth: f32,
+    @location(2) wave: f32,
+    @location(3) liquid_id: f32,
+};
+
+@vertex
+fn vs_water(input: VertexInput) -> VertexOutput {
+    var output: VertexOutput;
+    let time = water.params.x;
+    let scroll = vec2<f32>(time * 0.035, -time * 0.022);
+    let wave =
+        sin((input.tex_coord.x + scroll.x) * 18.0) * 0.08
+        + cos((input.tex_coord.y + scroll.y) * 21.0) * 0.06;
+    let position = input.position + vec3<f32>(0.0, wave + 0.025, 0.0);
+    output.clip_position = camera.view_projection * vec4<f32>(position, 1.0);
+    output.tex_coord = input.tex_coord;
+    output.depth = input.depth;
+    output.wave = wave;
+    output.liquid_id = input.liquid_id;
+    return output;
+}
+
+@fragment
+fn fs_water(input: VertexOutput) -> @location(0) vec4<f32> {
+    let time = water.params.x;
+    let wave_a = sin((input.tex_coord.x + time * 0.045) * 28.0);
+    let wave_b = cos((input.tex_coord.y - time * 0.035) * 23.0);
+    let wave = clamp((wave_a + wave_b) * 0.5 + input.wave, -1.0, 1.0);
+    let liquid_tint = clamp(input.liquid_id * 0.002, 0.0, 0.18);
+    let deep = vec3<f32>(0.02, 0.17 + liquid_tint, 0.24 + liquid_tint);
+    let shallow = vec3<f32>(0.10, 0.45 + liquid_tint * 0.5, 0.56);
+    let factor = clamp(0.45 + wave * 0.18 + input.depth * 0.25, 0.0, 1.0);
+    let glint = smoothstep(0.72, 1.0, abs(wave)) * 0.10;
+    let color = deep * (1.0 - factor) + shallow * factor + vec3<f32>(glint, glint, glint);
+    let alpha = clamp(0.38 + input.depth * 0.28, 0.32, 0.72);
+    return vec4<f32>(color, alpha);
+}
+"#;
+
 const WMO_SHADER: &str = r#"
 struct Camera {
     view_projection: mat4x4<f32>,
@@ -2475,10 +2793,12 @@ mod tests {
         assert!(options.show_object_markers);
         assert!(options.show_m2_meshes);
         assert!(options.show_wmo_meshes);
+        assert!(options.show_water);
         assert!(options.handle_key_press(KeyCode::KeyO));
         assert!(!options.show_object_markers);
         assert!(options.show_m2_meshes);
         assert!(options.show_wmo_meshes);
+        assert!(options.show_water);
         assert!(options.handle_key_press(KeyCode::KeyO));
         assert!(options.show_object_markers);
         assert!(options.handle_key_press(KeyCode::KeyM));
@@ -2489,10 +2809,15 @@ mod tests {
         assert!(!options.show_m2_meshes);
         assert!(options.handle_key_press(KeyCode::KeyN));
         assert!(options.show_m2_meshes);
+        assert!(options.handle_key_press(KeyCode::KeyL));
+        assert!(!options.show_water);
+        assert!(options.handle_key_press(KeyCode::KeyL));
+        assert!(options.show_water);
         assert!(!options.handle_key_press(KeyCode::KeyP));
         assert!(options.show_object_markers);
         assert!(options.show_m2_meshes);
         assert!(options.show_wmo_meshes);
+        assert!(options.show_water);
     }
 
     #[test]

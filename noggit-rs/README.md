@@ -22,9 +22,10 @@ renderer, or UI.
 1. Parse DBC files and roundtrip them byte-for-byte.
 2. Parse WDT map flags plus ADT chunk containers, typed headers, terrain
    heights, normals, texture layers, alpha maps, asset filename blocks,
-   filename offset tables, and placement tables.
+   filename offset tables, placement tables, and `MH2O` liquid layers.
 3. Load a local map directory through `noggit-vfs` into a `noggit-core`
-   `WorldMap` with sorted tiles, terrain chunks, assets, and placements.
+   `WorldMap` with sorted tiles, terrain chunks, liquid layers, assets, and
+   placements.
 4. Discover and read WoW client MPQ archives for referenced map assets using
    the same StormLib backend as Noggit C++.
 5. Add golden fixtures from known-good map files as they become available.
@@ -47,13 +48,13 @@ cargo run -p noggit-ui -- /path/to/guerilla --client /path/to/WoWClient [--extra
 ```
 
 `inspect-adt` prints chunk counts, version, asset tables, placement asset usage,
-terrain chunk summaries, height ranges, normal counts, texture layer counts,
-and raw `MCAL` payload sizes.
+`MH2O` liquid counts, terrain chunk summaries, height ranges, normal counts,
+texture layer counts, and raw `MCAL` payload sizes.
 
 `inspect-map` loads every matching ADT in a local map directory and prints the
-map-level tile, placement, and terrain chunk totals. The core also reads the
-local `<map>.wdt` when present so terrain alpha-map decoding follows the same
-map-level big-alpha flag as Noggit C++.
+map-level tile, placement, terrain chunk, and liquid layer totals. The core
+also reads the local `<map>.wdt` when present so terrain alpha-map decoding
+follows the same map-level big-alpha flag as Noggit C++.
 
 `inspect-client` discovers WotLK client MPQs in Noggit load order and reports
 loaded/skipped/failed archives. By default no archive is skipped by size;
@@ -73,13 +74,15 @@ mipmaps, and blends up to four `MCLY` terrain texture layers through decoded
 from the client, uploads their primary BLP textures, and draws placed WMOs as
 static textured geometry. It loads M2 doodad root files plus their `00.skin`
 files, resolves direct diffuse textures, and draws placed M2s as static
-textured geometry.
+textured geometry. It also draws `MH2O` liquid surfaces with a transparent
+procedural animated water pass.
 
 The UI also draws a debug placement overlay for loaded objects: M2 doodads are
 cyan wire boxes and WMO placements are orange wire boxes. Press `O` to toggle
 that overlay. Press `M` to toggle the real WMO meshes and `N` to toggle the
-real M2 meshes. Camera movement is a free-fly camera: hold left mouse to look,
-`WASD` to move relative to the camera, `Q`/control to move down, `E`/space to
-move up, shift to accelerate, and mouse wheel to adjust movement speed. M2
-animation, particles, advanced geoset/material behavior, WMO liquids/internal
-doodads, water, sky, and edit tools are still next.
+real M2 meshes. Press `L` to toggle water. Camera movement is a free-fly
+camera: hold left mouse to look, `WASD` to move relative to the camera,
+`Q`/control to move down, `E`/space to move up, shift to accelerate, and mouse
+wheel to adjust movement speed. M2 animation, particles, advanced
+geoset/material behavior, LiquidType texture parity, WMO liquids/internal
+doodads, sky, and edit tools are still next.

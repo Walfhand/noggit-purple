@@ -132,6 +132,7 @@ fn inspect_adt_bytes(bytes: &[u8]) -> Result<String, String> {
     let wmo_offsets = adt.wmo_filename_offsets().map_err(|err| err.to_string())?;
     let doodads = adt.model_placements().map_err(|err| err.to_string())?;
     let wmo_placements = adt.wmo_placements().map_err(|err| err.to_string())?;
+    let mh2o = adt.mh2o().map_err(|err| err.to_string())?;
 
     write_string_list(&mut output, "MTEX", "textures", textures.as_deref())?;
     write_string_list(&mut output, "MMDX", "models", models.as_deref())?;
@@ -188,6 +189,20 @@ fn inspect_adt_bytes(bytes: &[u8]) -> Result<String, String> {
         wmo_offsets.as_deref(),
         wmos.as_deref(),
     )?;
+    if let Some(mh2o) = mh2o {
+        let layer_count = mh2o
+            .chunks()
+            .iter()
+            .map(|chunk| chunk.layers().len())
+            .sum::<usize>();
+        writeln!(
+            output,
+            "MH2O chunks={} layers={}",
+            mh2o.chunks().len(),
+            layer_count
+        )
+        .map_err(|err| err.to_string())?;
+    }
 
     let mcnks = adt.mcnk_chunks().map_err(|err| err.to_string())?;
     writeln!(output, "MCNK chunks={}", mcnks.len()).map_err(|err| err.to_string())?;
@@ -238,20 +253,26 @@ fn inspect_map_path(path: &Path) -> Result<String, String> {
 
     writeln!(
         output,
-        "MAP name={} tiles={} doodads={} wmo_placements={} terrain_chunks={}",
+        "MAP name={} tiles={} doodads={} wmo_placements={} terrain_chunks={} liquid_layers={}",
         map.name(),
         map.tiles().len(),
         map.total_model_placements(),
         map.total_wmo_placements(),
-        map.total_terrain_chunks()
+        map.total_terrain_chunks(),
+        map.total_liquid_layers()
     )
     .map_err(|err| err.to_string())?;
 
     for tile in map.tiles() {
         let coord = tile.coord();
+        let liquid_layers = tile
+            .terrain_chunks()
+            .iter()
+            .map(|chunk| chunk.liquid_layers.len())
+            .sum::<usize>();
         writeln!(
             output,
-            "TILE path={} coord=({},{}) textures={} models={} wmos={} doodads={} wmo_placements={} chunks={}",
+            "TILE path={} coord=({},{}) textures={} models={} wmos={} doodads={} wmo_placements={} chunks={} liquid_layers={}",
             tile.source_path(),
             coord.x,
             coord.y,
@@ -260,7 +281,8 @@ fn inspect_map_path(path: &Path) -> Result<String, String> {
             tile.wmo_assets().len(),
             tile.model_placements().len(),
             tile.wmo_placements().len(),
-            tile.terrain_chunks().len()
+            tile.terrain_chunks().len(),
+            liquid_layers
         )
         .map_err(|err| err.to_string())?;
     }
@@ -594,6 +616,7 @@ mod tests {
         bytes.extend_from_slice(&stored_chunk(b"MWID", &0_u32.to_le_bytes()));
         bytes.extend_from_slice(&stored_chunk(b"MDDF", &mddf_entry()));
         bytes.extend_from_slice(&stored_chunk(b"MODF", &modf_entry()));
+        bytes.extend_from_slice(&stored_chunk(b"MH2O", &fixture_mh2o()));
         bytes.extend_from_slice(&stored_chunk(b"MCNK", &mcnk()));
         bytes
     }
@@ -658,6 +681,36 @@ mod tests {
         bytes
     }
 
+    fn fixture_mh2o() -> Vec<u8> {
+        let headers_size = 256 * 12;
+        let info_offset = headers_size;
+        let height_map_offset = info_offset + 24;
+        let mut bytes = vec![0; headers_size];
+
+        write_u32(&mut bytes, 0, info_offset as u32);
+        write_u32(&mut bytes, 4, 1);
+
+        bytes.extend_from_slice(&7_u16.to_le_bytes());
+        bytes.extend_from_slice(&0_u16.to_le_bytes());
+        bytes.extend_from_slice(&3.0_f32.to_le_bytes());
+        bytes.extend_from_slice(&6.0_f32.to_le_bytes());
+        bytes.push(0);
+        bytes.push(0);
+        bytes.push(1);
+        bytes.push(1);
+        bytes.extend_from_slice(&0_u32.to_le_bytes());
+        bytes.extend_from_slice(&(height_map_offset as u32).to_le_bytes());
+
+        for height in [3.0_f32, 4.0, 6.0, 5.0] {
+            bytes.extend_from_slice(&height.to_le_bytes());
+        }
+        for depth in [0_u8, 64, 128, 192] {
+            bytes.push(depth);
+        }
+
+        bytes
+    }
+
     fn string_block(strings: &[&str]) -> Vec<u8> {
         let mut bytes = Vec::new();
         for value in strings {
@@ -696,7 +749,7 @@ mod tests {
         assert_eq!(
             output,
             "\
-ADT chunks=9
+ADT chunks=10
 MVER version=18
 MTEX textures=2
 MTEX[0]=tiles/foo.blp
@@ -713,6 +766,7 @@ MDDF[0] model=models/tree.m2 placements=1
 MODF wmo_placements=1
 MODF wmo_refs=1
 MODF[0] wmo=world/home.wmo placements=1
+MH2O chunks=256 layers=1
 MCNK chunks=1
 MCNK[0] grid=(4,9) area=617 layers=2 holes=0xaa55
 MCNK[0] MCVT heights=145 min=0 max=36

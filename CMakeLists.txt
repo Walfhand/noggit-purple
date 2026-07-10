@@ -364,6 +364,19 @@ TARGET_LINK_LIBRARIES (noggit
   rapidfuzz::rapidfuzz
 )
 
+include(CTest)
+option(NOGGIT_BUILD_TESTS "Build Noggit tests" ON)
+if(NOGGIT_BUILD_TESTS)
+  enable_testing()
+  add_executable(noggit-ai-protocol-test
+    tests/AiProtocolTest.cpp
+    src/noggit/ai/AiProtocol.cpp
+  )
+  target_include_directories(noggit-ai-protocol-test PRIVATE "${CMAKE_SOURCE_DIR}/src")
+  target_link_libraries(noggit-ai-protocol-test nlohmann_json::nlohmann_json)
+  add_test(NAME noggit-ai-protocol COMMAND noggit-ai-protocol-test)
+endif()
+
 #add distribution themes
 add_custom_command(TARGET noggit POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_directory
@@ -415,9 +428,10 @@ SET(_noggit_revision_state_file "${CMAKE_BINARY_DIR}/revision.state")
 SET(_noggit_revision_script_file "${CMAKE_SOURCE_DIR}/cmake/GenerateRevision.cmake")
 
 INCLUDE_DIRECTORIES("${_noggit_revision_output_dir}")
+FILE(MAKE_DIRECTORY "${_noggit_revision_output_dir}")
 
 FIND_PACKAGE(Git)
-IF(GIT_FOUND) # GIT_FOUND
+IF(GIT_FOUND AND EXISTS "${CMAKE_SOURCE_DIR}/.git")
   ADD_CUSTOM_TARGET(update_git_revision
     ALL
     DEPENDS "${_noggit_revision_template_file}"

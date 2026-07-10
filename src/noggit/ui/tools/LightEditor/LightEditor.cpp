@@ -11,6 +11,7 @@
 #include <noggit/World.h>
 
 #include <format>
+#include <filesystem>
 #include <map>
 #include <string>
 
@@ -182,8 +183,9 @@ LightEditor::LightEditor(MapView* map_view, QWidget* parent)
 
 
 	// load name definitions from csv file
-	std::string definitions_path = Noggit::Application::NoggitApplication::instance()->getConfiguration()->ApplicationNoggitDefinitionsPath
-															 + "\\light_dbc_names.csv";
+	auto const definitions_path = (std::filesystem::path{
+		Noggit::Application::NoggitApplication::instance()->getConfiguration()->ApplicationNoggitDefinitionsPath
+	} / "light_dbc_names.csv").generic_string();
 	QString qPath = QString::fromStdString(definitions_path);
 	QFile file(qPath);
 
@@ -323,7 +325,7 @@ LightEditor::LightEditor(MapView* map_view, QWidget* parent)
 	QPushButton* save_name_button = new QPushButton(this);  // You can set any text or icon for the button
 	save_name_button->setIcon(Noggit::Ui::FontAwesomeIcon(Noggit::Ui::FontAwesome::save));
 	// small_button->setFixedSize(20, 20);  // Set a small size for the button
-	save_name_button->setToolTip("Save Name to \"noggit-definitions\\light_dbc_names.csv\""
+	save_name_button->setToolTip("Save Name to \"noggit-definitions/light_dbc_names.csv\""
 															 "\nBlizzard names are datamined up to AQ40."
 															"NOT YET IMPLEMENTED");
 	save_name_button->setEnabled(false);

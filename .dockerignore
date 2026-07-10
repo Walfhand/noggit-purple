@@ -1,0 +1,15 @@
+.git
+.env
+.env.*
+build
+build-*
+cmake-build-*
+noggit-rs
+target
+Client
+client
+Data
+WTF
+Cache
+wow
+WoW

@@ -27,6 +27,7 @@
 #include <QVBoxLayout>
 
 #include <format>
+#include <filesystem>
 #include <fstream>
 #include <stdexcept>
 #include <vector>
@@ -171,13 +172,14 @@ namespace Noggit::Ui::Tools
 
   void AreaTriggerEditor::save()
   {
-    auto const file_path = Noggit::Application::NoggitApplication::instance()->getConfiguration()->ApplicationNoggitDefinitionsPath
-      + "\\AreatriggerDescriptions.csv";
+    auto const file_path = std::filesystem::path{
+      Noggit::Application::NoggitApplication::instance()->getConfiguration()->ApplicationNoggitDefinitionsPath
+    } / "AreatriggerDescriptions.csv";
 
     std::ofstream file{ file_path, std::ios_base::out };
     if (!file)
     {
-      throw std::runtime_error(std::format("Could not open file {}!", file_path));
+      throw std::runtime_error(std::format("Could not open file {}!", file_path.generic_string()));
     }
 
     file << "ID,Zone Name,Sub Category,Trigger Name,IsBuiltIn,\n";
@@ -193,20 +195,21 @@ namespace Noggit::Ui::Tools
     constexpr int expected_num_tokens = 6;
     char const* expeceted_header = "ID,Zone Name,Sub Category,Trigger Name,IsBuiltIn,";
 
-    auto const file_path = Noggit::Application::NoggitApplication::instance()->getConfiguration()->ApplicationNoggitDefinitionsPath
-      + "\\AreatriggerDescriptions.csv";
+    auto const file_path = std::filesystem::path{
+      Noggit::Application::NoggitApplication::instance()->getConfiguration()->ApplicationNoggitDefinitionsPath
+    } / "AreatriggerDescriptions.csv";
 
-    QFile file{ QString::fromStdString(file_path) };
+    QFile file{ QString::fromStdString(file_path.generic_string()) };
     if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
     {
-      throw std::runtime_error(std::format("Could not open file {}!", file_path));
+      throw std::runtime_error(std::format("Could not open file {}!", file_path.generic_string()));
     }
 
     QTextStream stream{ &file };
     if (auto header = stream.readLine(); header != expeceted_header)
     {
       auto foo = header.toStdString();
-      throw std::runtime_error(std::format("File {} uses invalid header `{}`!", file_path, header.toStdString()));
+      throw std::runtime_error(std::format("File {} uses invalid header `{}`!", file_path.generic_string(), header.toStdString()));
     }
 
     int line = 1;
@@ -217,7 +220,7 @@ namespace Noggit::Ui::Tools
       auto tokens = stream.readLine().split(',');
       if (tokens.size() != expected_num_tokens)
       {
-        LogError << std::format("Encountered wrong number of tokens (expected: {}, encountered: {}) in file {}!", expected_num_tokens, tokens.size(), file_path);
+        LogError << std::format("Encountered wrong number of tokens (expected: {}, encountered: {}) in file {}!", expected_num_tokens, tokens.size(), file_path.generic_string());
         continue;
       }
 

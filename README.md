@@ -24,6 +24,28 @@ Further following libraries are required for MySQL GUID Storage builds:
 * MySQLCPPConn
 See below for detailed instructions
 
+## Docker (Linux) ##
+
+Build Noggit, run its tests in Docker, then export the executable and its
+missing runtime libraries into the ignored `out/` directory:
+
+```bash
+./scripts/build-cpp-docker.sh
+```
+
+Only Docker and the exported files are written on the host. To launch Noggit:
+
+```bash
+(cd out && LD_LIBRARY_PATH="$PWD/lib" ./noggit)
+```
+
+Open a map, then use **Assist > AI Assistant** and paste a fresh key into the
+masked API key field. The key stays in process memory and is not saved;
+`OPENAI_API_KEY` remains available as a fallback. A read-only smoke test is:
+`Recherche 10 textures contenant grass.` The API key is never copied into the
+image. Remove the generated files with `rm -rf out`, and Docker build artifacts
+with `docker image rm noggit-purple:local` and `docker builder prune` when needed.
+
 ## Windows ##
 Text in `<brackets>` below are up to your choice but shall be replaced
 with the same choice every time the same text is contained.

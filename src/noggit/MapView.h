@@ -40,6 +40,11 @@ namespace Noggit
   class Tool;
   class TabletManager;
 
+  namespace Ai
+  {
+    class AssistantDock;
+  }
+
   namespace Project
   {
     class NoggitProject;
@@ -108,6 +113,7 @@ private:
   float moving, strafing, updown, mousedir, turn, lookat;
   CursorType _cursorType;
   glm::vec3 _cursor_pos;
+  bool _cursor_position_valid = false;
   QPoint _drag_start_pos;
   QPoint _right_click_pos;
   float _cursorRotation;
@@ -278,6 +284,7 @@ public:
   Noggit::Ui::Tools::AssetBrowser::Ui::AssetBrowserWidget* getAssetBrowserWidget();;
 
   glm::vec3 cursorPosition() const;
+  bool hasValidCursorPosition() const;
   void cursorPosition(glm::vec3 position);
 
   void enableGizmoBar();
@@ -376,6 +383,7 @@ private:
   QDockWidget* _asset_browser_dock;
   QDockWidget* _node_editor_dock;
   QDockWidget* _detail_infos_dock;
+  Noggit::Ai::AssistantDock* _ai_assistant_dock = nullptr;
 
   Noggit::Ui::Tools::ToolPanel* _tool_panel_dock;
 

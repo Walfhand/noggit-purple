@@ -9,11 +9,7 @@ namespace
 {
   DWORD getStormLastError()
   {
-#ifdef _WIN32
     return GetLastError();
-#else
-    return SErrGetLastError();
-#endif
   }
 }
 

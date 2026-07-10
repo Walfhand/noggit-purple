@@ -15,6 +15,7 @@
 #include <math/bounding_box.hpp>
 
 #include <algorithm>
+#include <filesystem>
 #include <string>
 #include <array>
 #include <unordered_map>
@@ -471,8 +472,9 @@ void Skies::loadZoneLights(int map_id)
 {
     // read zone lights from csv file
   {
-    std::string zonelight_db_path = Noggit::Application::NoggitApplication::instance()->getConfiguration()->ApplicationNoggitDefinitionsPath
-      + "\\ZoneLight.3.4.3.56262.csv";
+    auto const zonelight_db_path = (std::filesystem::path{
+      Noggit::Application::NoggitApplication::instance()->getConfiguration()->ApplicationNoggitDefinitionsPath
+    } / "ZoneLight.3.4.3.56262.csv").generic_string();
     QString qPath = QString::fromStdString(zonelight_db_path);
     QFile file(qPath);
 
@@ -534,8 +536,9 @@ void Skies::loadZoneLights(int map_id)
   // load zone light points to temporary object
   std::unordered_map<int, std::vector<ZoneLightPoint>> zoneLightPoints;
   {
-    std::string zonelightpoints_db_path = Noggit::Application::NoggitApplication::instance()->getConfiguration()->ApplicationNoggitDefinitionsPath
-      + "\\ZoneLightPoint.3.4.3.56262.csv";
+    auto const zonelightpoints_db_path = (std::filesystem::path{
+      Noggit::Application::NoggitApplication::instance()->getConfiguration()->ApplicationNoggitDefinitionsPath
+    } / "ZoneLightPoint.3.4.3.56262.csv").generic_string();
     QString qPath = QString::fromStdString(zonelightpoints_db_path);
     QFile file(qPath);
 

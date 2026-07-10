@@ -8,6 +8,7 @@
 #include <noggit/WMOInstance.h> // WMOInstance
 #include <noggit/World.h>
 #include <noggit/MapTile.h>
+#include <noggit/ai/AssistantDock.hpp>
 #include <noggit/map_index.hpp>
 #include <noggit/TabletManager.hpp>
 #include <opengl/texture.hpp>
@@ -1018,6 +1019,8 @@ void MapView::setupAssistMenu()
   auto assist_menu (_main_window->_menuBar->addMenu ("Assist"));
   connect (this, &QObject::destroyed, assist_menu, &QObject::deleteLater);
 
+  assist_menu->addAction(_ai_assistant_dock->toggleViewAction());
+
   assist_menu->addSeparator();
   assist_menu->addAction(createTextSeparator("Current ADT"));
   assist_menu->addSeparator();
@@ -1944,7 +1947,8 @@ void MapView::setupViewMenu()
         _minimap_dock,
         _asset_browser_dock,
         _overlay_widget,
-        _tool_panel_dock
+        _tool_panel_dock,
+        _ai_assistant_dock
 
       };
 
@@ -1980,6 +1984,7 @@ void MapView::setupViewMenu()
   ADD_ACTION(view_menu, "Toggle UI", Qt::Key_Tab, hide_widgets);
 
   ADD_TOGGLE (view_menu, "Detail infos", Qt::Key_F8, _show_detail_info_window);
+  view_menu->addAction(_ai_assistant_dock->toggleViewAction());
 
   addHotkey( Qt::Key_H
     , MOD_none
@@ -2424,6 +2429,11 @@ void MapView::createGUI()
   connect(this, &QObject::destroyed, _tool_panel_dock, &QObject::deleteLater);
   _main_window->addDockWidget(Qt::RightDockWidgetArea, _tool_panel_dock);
 
+  _ai_assistant_dock = new Noggit::Ai::AssistantDock(this, this);
+  connect(this, &QObject::destroyed, _ai_assistant_dock, &QObject::deleteLater);
+  _main_window->addDockWidget(Qt::RightDockWidgetArea, _ai_assistant_dock);
+  _ai_assistant_dock->hide();
+
   setupAssetBrowser();
 
   _tools.emplace_back(std::make_unique<Noggit::RaiseLowerTool>(this))->setupUi(_tool_panel_dock);
@@ -2492,6 +2502,8 @@ void MapView::on_exit_prompt()
   _keybindings->hide();
   _minimap_dock->hide();
   _detail_infos_dock->hide();
+  _ai_assistant_dock->cancelPending();
+  _ai_assistant_dock->hide();
 }
 
 MapView::MapView( math::degrees camera_yaw0
@@ -2510,6 +2522,7 @@ MapView::MapView( math::degrees camera_yaw0
   , _settings (new QSettings (this))
   , cursor_color (1.f, 1.f, 1.f, 1.f)
   , _cursorType{CursorType::CIRCLE}
+  , _cursor_pos(camera_pos)
   , _main_window (NoggitWindow)
   , _debug_cam(camera_pos, camera_yaw0, camera_pitch0)
   , _world (std::move (world))
@@ -3432,6 +3445,7 @@ void MapView::doSelection (bool selectTerrainOnly, bool mouseMove)
       _cursor_pos = hit.index() == eEntry_Object ? std::get<selected_object_type>(hit)->pos
                                                  : hit.index() == eEntry_MapChunk ? std::get<selected_chunk_type>(hit).position
                                                                                   : throw std::logic_error("bad variant");
+      _cursor_position_valid = true;
     }
 
   }
@@ -3442,6 +3456,7 @@ void MapView::doSelection (bool selectTerrainOnly, bool mouseMove)
 void MapView::update_cursor_pos()
 {
   static bool buffer_switch = false;
+  _cursor_position_valid = false;
 
   if (false && terrainMode != editing_mode::holes) // figure out why this does not work on every hardware.
   {
@@ -3478,6 +3493,7 @@ void MapView::update_cursor_pos()
       }
 
       _cursor_pos = {objcoord.x, objcoord.y, objcoord.z};
+      _cursor_position_valid = true;
 
       gl.unmapBuffer(GL_PIXEL_PACK_BUFFER);
     }
@@ -3497,6 +3513,7 @@ void MapView::update_cursor_pos()
     // hit cannot be something else than a chunk
     auto const& chunkHit = std::get<selected_chunk_type>(hit);
     _cursor_pos = chunkHit.position;
+    _cursor_position_valid = true;
 
   }
 }
@@ -4317,9 +4334,15 @@ glm::vec3 MapView::cursorPosition() const
     return _cursor_pos;
 }
 
+bool MapView::hasValidCursorPosition() const
+{
+    return _cursor_position_valid;
+}
+
 void MapView::cursorPosition(glm::vec3 position)
 {
     _cursor_pos = position;
+    _cursor_position_valid = true;
 }
 
 void MapView::enableGizmoBar()

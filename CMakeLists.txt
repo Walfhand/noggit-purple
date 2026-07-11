@@ -375,6 +375,14 @@ if(NOGGIT_BUILD_TESTS)
   target_include_directories(noggit-ai-protocol-test PRIVATE "${CMAKE_SOURCE_DIR}/src")
   target_link_libraries(noggit-ai-protocol-test nlohmann_json::nlohmann_json)
   add_test(NAME noggit-ai-protocol COMMAND noggit-ai-protocol-test)
+
+  add_executable(noggit-procedural-layout-test
+    tests/ProceduralLayoutTest.cpp
+    src/noggit/ai/ProceduralLayout.cpp
+  )
+  target_include_directories(noggit-procedural-layout-test PRIVATE "${CMAKE_SOURCE_DIR}/src")
+  target_link_libraries(noggit-procedural-layout-test nlohmann_json::nlohmann_json)
+  add_test(NAME noggit-procedural-layout COMMAND noggit-procedural-layout-test)
 endif()
 
 #add distribution themes

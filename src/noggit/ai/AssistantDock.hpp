@@ -8,6 +8,7 @@
 #include <QtWidgets/QDockWidget>
 
 #include <cstddef>
+#include <memory>
 
 class QLabel;
 class QLineEdit;
@@ -20,22 +21,30 @@ class MapView;
 
 namespace Noggit::Ai
 {
+  struct MapBatchState;
+
   class AssistantDock final : public QDockWidget
   {
   public:
     explicit AssistantDock(MapView* map_view, QWidget* parent = nullptr);
+    ~AssistantDock() override;
     void cancelPending();
 
   private:
     void submitPrompt();
+    void approvePlan();
     void resetConversation();
     void sendRequest();
     void handleReply(QNetworkReply* reply);
+    void continueAfterTool(FunctionCall const& call, nlohmann::json const& result);
+    bool startMapBatch(FunctionCall const& call);
+    void processMapBatch();
+    void finishMapBatch(nlohmann::json result);
     void setBusy(bool busy);
     void finishTurn(QString const& answer);
     void failTurn(QString const& message);
     void appendTranscript(QString const& speaker, QString const& text);
-    nlohmann::json executeTool(FunctionCall const& call) const;
+    nlohmann::json executeTool(FunctionCall const& call);
 
     QPointer<MapView> _map_view;
     QPointer<QNetworkReply> _active_reply;
@@ -45,10 +54,15 @@ namespace Noggit::Ai
     QPlainTextEdit* _prompt;
     QPushButton* _send_button;
     QPushButton* _reset_button;
+    QPushButton* _approve_button;
     QLabel* _status;
     nlohmann::json _input;
+    nlohmann::json _pending_plan;
+    std::unique_ptr<MapBatchState> _map_batch;
     std::size_t _tool_rounds = 0;
     bool _busy = false;
     bool _cancel_requested = false;
+    bool _plan_approved = false;
+    bool _plan_checkpoint_saved = false;
   };
 }

@@ -846,6 +846,7 @@ bool TextureSet::stampTexture(float xbase, float zbase, float x, float z, Brush*
 bool TextureSet::paintTexture(float xbase, float zbase, float x, float z, Brush* brush, float strength, float pressure, scoped_blp_texture_reference texture)
 {
   bool changed = false;
+  auto const old_texture_count = nTextures;
 
   float zPos, xPos, dist, radius;
 
@@ -874,9 +875,13 @@ bool TextureSet::paintTexture(float xbase, float zbase, float x, float z, Brush*
 
   int tex_layer = get_texture_index_or_add (std::move (texture), strength);
 
-  if (tex_layer == -1 || nTextures == 1)
+  if (tex_layer == -1)
   {
-    return nTextures == 1;
+    return false;
+  }
+  if (nTextures == 1)
+  {
+    return old_texture_count == 0;
   }
 
   radius = brush->getRadius();
@@ -1706,15 +1711,10 @@ bool TextureSet::apply_alpha_changes()
 
     for (int i = 0; i < 64 * 64; ++i)
     {
-      values[i] = float_alpha_to_uint8(new_amaps[alpha_layer + 1][i]);
+      auto const requested = float_alpha_to_uint8(new_amaps[alpha_layer + 1][i]);
+      values[i] = static_cast<std::uint8_t>(std::min<std::uint16_t>(
+        requested, static_cast<std::uint16_t>(255 - totals[i])));
       totals[i] += values[i];
-
-      // remove the possible overflow with rounding
-      // max 2 if all 4 values round up so it won't change the layer's alpha much
-      if (totals[i] > 255)
-      {
-        values[i] -= static_cast<std::uint8_t>(totals[i] - 255);
-      }
     }
 
     alphamaps[alpha_layer]->setAlpha(values.data());

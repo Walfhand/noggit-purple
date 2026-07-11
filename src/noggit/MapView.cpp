@@ -3030,7 +3030,7 @@ void MapView::tick (float dt)
 
   // start unloading tiles
   _world->mapIndex.enterTile (TileIndex (_camera.position));
-  if (_unload_tiles)
+  if (_unload_tiles && isEnabled())
     _world->mapIndex.unloadTiles (TileIndex (_camera.position));
 
   dt = std::min(dt, 1.0f);

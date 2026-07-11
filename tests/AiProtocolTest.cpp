@@ -2,6 +2,7 @@
 
 #include <noggit/ai/AiProtocol.hpp>
 
+#include <cmath>
 #include <stdexcept>
 #include <set>
 #include <string>
@@ -15,24 +16,55 @@ namespace
       throw std::runtime_error(message);
     }
   }
+
+  void requireStrictSchema(nlohmann::json const& schema)
+  {
+    if (schema.value("type", nlohmann::json{}) == "object")
+    {
+      require(schema.value("additionalProperties", true) == false,
+              "strict object must reject extra properties");
+      std::set<std::string> properties;
+      for (auto const& [name, value] : schema.at("properties").items())
+      {
+        properties.insert(name);
+        requireStrictSchema(value);
+      }
+      std::set<std::string> required;
+      for (auto const& name : schema.at("required"))
+      {
+        required.insert(name.get<std::string>());
+      }
+      require(properties == required, "strict object requires every property");
+    }
+    if (schema.contains("items"))
+    {
+      requireStrictSchema(schema.at("items"));
+    }
+  }
 }
 
 int main()
 {
   auto const tools = Noggit::Ai::toolDefinitions();
   require(tools.is_array(), "tools must be an array");
-  require(tools.size() == 5, "unexpected tool count");
+  require(tools.size() == 13, "unexpected tool count");
 
   std::set<std::string> tool_names;
+  nlohmann::json const* terrain_layout = nullptr;
 
   for (auto const& tool : tools)
   {
     tool_names.insert(tool.at("name").get<std::string>());
+    if (tool.at("name") == "apply_terrain_layout_on_map")
+    {
+      terrain_layout = &tool;
+    }
     require(tool.at("type") == "function", "tool type must be function");
     require(tool.at("strict") == true, "tool must use strict mode");
     auto const& parameters = tool.at("parameters");
     require(parameters.at("type") == "object", "parameters must be an object");
     require(parameters.at("additionalProperties") == false, "extra properties must be rejected");
+    requireStrictSchema(parameters);
 
     std::set<std::string> properties;
     for (auto const& [name, value] : parameters.at("properties").items())
@@ -50,7 +82,65 @@ int main()
   require(tool_names.count("paint_texture") == 1, "paint_texture tool is missing");
   require(tool_names.count("set_base_texture_on_loaded_tiles") == 1,
           "set_base_texture_on_loaded_tiles tool is missing");
+  require(tool_names.count("submit_map_plan") == 1, "submit_map_plan tool is missing");
+  require(tool_names.count("inspect_map") == 1, "inspect_map tool is missing");
+  require(tool_names.count("generate_terrain_on_map") == 1,
+          "generate_terrain_on_map tool is missing");
+  require(tool_names.count("apply_terrain_layout_on_map") == 1,
+          "apply_terrain_layout_on_map tool is missing");
+  require(tool_names.count("set_base_texture_on_map") == 1,
+          "set_base_texture_on_map tool is missing");
+  require(tool_names.count("blend_terrain_textures_on_map") == 1,
+          "blend_terrain_textures_on_map tool is missing");
+  require(tool_names.count("validate_map") == 1, "validate_map tool is missing");
   require(tool_names.count("search_textures") == 1, "search_textures tool is missing");
+  require(tool_names.count("search_assets") == 1, "search_assets tool is missing");
+
+  require(terrain_layout != nullptr, "terrain layout schema is missing");
+  auto const& layout_properties = terrain_layout->at("parameters").at("properties");
+  require(layout_properties.at("texture_paths").at("minItems") == 2
+            && layout_properties.at("texture_paths").at("maxItems") == 4,
+          "terrain layout texture count changed");
+  require(layout_properties.at("features").at("minItems") == 1
+            && layout_properties.at("features").at("maxItems") == 32,
+          "terrain layout feature count changed");
+  require(layout_properties.at("steep_texture_layer").at("type")
+            == nlohmann::json::array({"integer", "null"})
+            && layout_properties.at("slope_start_degrees").at("type")
+            == nlohmann::json::array({"number", "null"})
+            && layout_properties.at("slope_full_degrees").at("type")
+            == nlohmann::json::array({"number", "null"}),
+          "terrain layout steep parameters must stay nullable");
+
+  require(std::abs(Noggit::Ai::terrainRatio("plains", -1.0f, 1.0f) - 0.4f) < 0.0001f,
+          "plains terrain ratio changed");
+  require(std::abs(Noggit::Ai::terrainRatio("island", -1.0f, 0.0f) - 0.05f) < 0.0001f
+            && std::abs(Noggit::Ai::terrainRatio("island", 1.0f, 0.0f) - 0.05f) < 0.0001f,
+          "island coast must stay flat");
+  require(std::abs(Noggit::Ai::terrainRatio("island", -1.0f, 1.0f) - 0.62f) < 0.0001f
+            && std::abs(Noggit::Ai::terrainRatio("island", 0.0f, 1.0f) - 0.70f) < 0.0001f
+            && std::abs(Noggit::Ai::terrainRatio("island", 1.0f, 1.0f) - 0.78f) < 0.0001f,
+          "island hills must stay moderate");
+
+  auto const low = Noggit::Ai::textureBlendAlphas(
+    -20.0f, 0.0f, 0.0f, 0.0f, 80.0f, true, 10.0f, 25.0f, 50.0f, 0.5f);
+  auto const steep = Noggit::Ai::textureBlendAlphas(
+    40.0f, 60.0f, 0.0f, 0.0f, 80.0f, true, 10.0f, 25.0f, 50.0f, 0.5f);
+  auto const high = Noggit::Ai::textureBlendAlphas(
+    100.0f, 0.0f, 0.0f, 0.0f, 80.0f, true, 10.0f, 25.0f, 50.0f, 0.5f);
+  auto const mixed = Noggit::Ai::textureBlendAlphas(
+    4.0f, 37.0f, 0.35f, 0.0f, 80.0f, true, 10.0f, 25.0f, 50.0f, 0.8f);
+  auto sum = [](auto const& weights)
+  {
+    return weights[0] + weights[1] + weights[2] + weights[3];
+  };
+  require(low[1] == 255 && steep[2] == 255 && high[3] == 255,
+          "procedural texture roles changed");
+  require(sum(low) == 255 && sum(steep) == 255
+            && sum(high) == 255 && sum(mixed) == 255,
+          "procedural texture alpha must sum to 255");
+  require(mixed[0] > 0 && mixed[1] > 0 && mixed[2] > 0,
+          "procedural transition must really mix visible layers");
 
   auto const response = nlohmann::json{
     {"output", {

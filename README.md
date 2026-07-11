@@ -46,6 +46,35 @@ masked API key field. The key stays in process memory and is not saved;
 image. Remove the generated files with `rm -rf out`, and Docker build artifacts
 with `docker image rm noggit-purple:local` and `docker builder prune` when needed.
 
+For a global generation request, the assistant inspects the open map and shows
+a structured plan. Review it, then click **Approuver et exécuter**. The current global
+executor can generate continuous deterministic terrain, choose and apply a base
+texture, or procedurally blend three or four textures across every existing tile.
+For structured maps, `apply_terrain_layout_on_map` builds continuous corridors
+(roads, rivers or lanes) and circular platforms from normalized map coordinates,
+then applies their semantic textures in the same pass. This avoids approximating
+large shapes with dozens of local brush strokes.
+The procedural blend follows the terrain height and slope, with continuous noise
+to avoid chunk-shaped borders, and reports how many pixels were actually mixed.
+The assistant validates every chunk afterward. It processes and saves one tile at
+a time; **Annuler** stops between tiles. Global operations are not available through
+`Ctrl+Z`, so the approval step explicitly warns before the first save. Local brush
+operations remain undoable.
+
+Example:
+
+```text
+Transforme cette carte en île naturelle avec des collines et une belle texture
+d'herbe. Choisis toi-même les paramètres et propose-moi le plan avant d'agir.
+```
+
+```text
+Crée une arène verdoyante avec trois voies continues, deux bases, une rivière
+centrale et de la roche sur les pentes. Propose le plan avant d'agir.
+```
+
+The default model is `gpt-5.6`; set `OPENAI_MODEL` to override it.
+
 ## Windows ##
 Text in `<brackets>` below are up to your choice but shall be replaced
 with the same choice every time the same text is contained.

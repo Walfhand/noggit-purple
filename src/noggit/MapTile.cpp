@@ -1403,9 +1403,6 @@ void MapTile::setHeightmapImage(QImage const& baseimage, float min_height, float
 
       registerChunkUpdate(ChunkUpdateFlags::VERTEX);
 
-      // else we recalculate after tiled edges updates
-      if (!tiledEdges)
-        chunk->recalcNorms();
     }
   }
 
@@ -1471,14 +1468,14 @@ void MapTile::setHeightmapImage(QImage const& baseimage, float min_height, float
       );
     }
   
+  }
+
+  if (!tiledEdges)
+  {
+    // Every neighbor must already contain its new height before normals read it.
     for (int k = 0; k < 16; ++k)
-    {
-        for (int l = 0; l < 16; ++l)
-        {
-            MapChunk* chunk = getChunk(k, l);
-            // chunk->recalcNorms();
-        }
-    }
+      for (int l = 0; l < 16; ++l)
+        getChunk(k, l)->recalcNorms();
   }
 }
 

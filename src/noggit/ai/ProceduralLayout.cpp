@@ -17,7 +17,6 @@ namespace Noggit::Ai
 {
   namespace
   {
-    constexpr std::size_t max_texture_paths = 4;
     constexpr std::size_t max_points_per_feature = 16;
     constexpr std::size_t max_total_segments = 128;
     constexpr float minimum_layout_height = -500.0f;
@@ -242,6 +241,13 @@ namespace Noggit::Ai
         + 0.35f * valueNoise(x * 15.0f, z * 15.0f, seed ^ 0xa511e9b3U);
     }
 
+    float terrainRoughness(float x, float z, std::string const& name)
+    {
+      auto const seed = stableHash(name);
+      return 0.72f * valueNoise(x * 8.0f, z * 8.0f, seed ^ 0x51ed270bU)
+        + 0.28f * valueNoise(x * 27.0f, z * 27.0f, seed ^ 0x9e3779b9U);
+    }
+
     ProceduralShapeDistance distanceToShapeImpl(
       std::vector<ProceduralLayoutPoint> const& points,
       ProceduralLayoutShape shape,
@@ -338,12 +344,12 @@ namespace Noggit::Ai
         distance);
     }
 
-    std::array<std::uint8_t, 4> quantizeWeights(
-      std::array<float, 4> weights,
+    std::array<std::uint8_t, procedural_layout_max_texture_paths> quantizeWeights(
+      std::array<float, procedural_layout_max_texture_paths> weights,
       std::size_t layer_count)
     {
-      std::array<std::uint8_t, 4> result{};
-      std::array<float, 4> remainders{};
+      std::array<std::uint8_t, procedural_layout_max_texture_paths> result{};
+      std::array<float, procedural_layout_max_texture_paths> remainders{};
       auto total = 0.0f;
       for (std::size_t layer = 0; layer < layer_count; ++layer)
       {
@@ -425,7 +431,8 @@ namespace Noggit::Ai
     };
     static auto const feature_fields = std::set<std::string>{
       "name", "points", "half_width_ratio", "transition_width_ratio",
-      "texture_layer", "priority", "shape", "height_mode"
+      "texture_layer", "priority", "shape", "height_mode",
+      "roughness_amplitude", "texture_strength", "width_variation_ratio"
     };
     static auto const point_fields = std::set<std::string>{"u", "v", "height"};
 
@@ -443,9 +450,10 @@ namespace Noggit::Ai
 
     auto const& texture_paths = arguments.at("texture_paths");
     if (!texture_paths.is_array()
-        || texture_paths.size() < 2 || texture_paths.size() > max_texture_paths)
+        || texture_paths.size() < 2
+        || texture_paths.size() > procedural_layout_max_texture_paths)
     {
-      return fail("texture_paths doit contenir entre deux et quatre chemins.");
+      return fail("texture_paths doit contenir entre deux et 16 chemins.");
     }
 
     ProceduralLayout layout;
@@ -522,7 +530,7 @@ namespace Noggit::Ai
 
     std::set<std::string> unique_names;
     std::size_t total_segments = 0;
-    std::array<bool, max_texture_paths> used_layers{};
+    std::array<bool, procedural_layout_max_texture_paths> used_layers{};
     used_layers[0] = true;
     if (layout.steep)
     {
@@ -533,7 +541,8 @@ namespace Noggit::Ai
       if (!hasExactFields(feature_value, feature_fields))
       {
         return fail("Chaque feature exige exactement name, points, half_width_ratio, "
-                    "transition_width_ratio, texture_layer, priority, shape et height_mode.");
+                    "transition_width_ratio, texture_layer, priority, shape, height_mode "
+                    "roughness_amplitude, texture_strength et width_variation_ratio.");
       }
 
       auto const& name_value = feature_value.at("name");
@@ -655,6 +664,26 @@ namespace Noggit::Ai
       }
       feature.texture_layer = static_cast<std::size_t>(layer);
       feature.priority = static_cast<int>(parsed_priority);
+      if (!readFiniteFloat(
+            feature_value.at("roughness_amplitude"), feature.roughness_amplitude)
+          || feature.roughness_amplitude < 0.0f
+          || feature.roughness_amplitude > 100.0f)
+      {
+        return fail("roughness_amplitude doit être dans [0,100].");
+      }
+      if (!readFiniteFloat(
+            feature_value.at("texture_strength"), feature.texture_strength)
+          || feature.texture_strength < 0.05f || feature.texture_strength > 1.0f)
+      {
+        return fail("texture_strength doit être dans [0.05,1].");
+      }
+      if (!readFiniteFloat(
+            feature_value.at("width_variation_ratio"), feature.width_variation_ratio)
+          || feature.width_variation_ratio < 0.0f
+          || feature.width_variation_ratio > 0.75f)
+      {
+        return fail("width_variation_ratio doit être dans [0,0.75].");
+      }
       used_layers[feature.texture_layer] = true;
       layout.features.emplace_back(std::move(feature));
     }
@@ -696,7 +725,8 @@ namespace Noggit::Ai
       return sample;
     }
 
-    auto const layer_count = std::min(layout.texture_paths.size(), max_texture_paths);
+    auto const layer_count = std::min(
+      layout.texture_paths.size(), procedural_layout_max_texture_paths);
     auto const valid_dimensions = std::isfinite(map_width) && std::isfinite(map_height)
       && map_width > 0.0f && map_height > 0.0f;
     auto const minimum_dimension = valid_dimensions
@@ -722,10 +752,20 @@ namespace Noggit::Ai
       auto const nearest = distanceToProceduralShape(
         feature.points, feature.shape, sample_x, sample_z, scale_x, scale_z);
       auto distance = nearest.distance;
+      auto half_width = feature.half_width_ratio;
+      if (feature.shape == ProceduralLayoutShape::Corridor
+          && feature.width_variation_ratio > 0.0f)
+      {
+        half_width *= 1.0f + feature.width_variation_ratio
+          * proceduralEdgeNoise(sample_x, sample_z, feature.name + ":width");
+      }
+      auto const roughness = feature.roughness_amplitude
+        * terrainRoughness(sample_x, sample_z, feature.name);
       auto const target_height = feature.height_mode == ProceduralLayoutHeightMode::Offset
-        ? std::clamp(sample.height + nearest.height,
+        ? std::clamp(sample.height + nearest.height + roughness,
                      minimum_layout_height, maximum_layout_height)
-        : nearest.height;
+        : std::clamp(nearest.height + roughness,
+                     minimum_layout_height, maximum_layout_height);
       auto transition_width = feature.transition_width_ratio;
       // ponytail: analytic widening bounds the generated transition on a flat
       // source; use a global vertex graph only if arbitrary source slopes need
@@ -746,15 +786,15 @@ namespace Noggit::Ai
       if (layout.edge_noise_ratio > 0.0f)
       {
         auto const amplitude = std::min(
-          layout.edge_noise_ratio, feature.half_width_ratio * 0.75f);
-        if (distance <= feature.half_width_ratio + transition_width + amplitude)
+          layout.edge_noise_ratio, half_width * 0.75f);
+        if (distance <= half_width + transition_width + amplitude)
         {
           distance += amplitude
             * proceduralEdgeNoise(sample_x, sample_z, feature.name);
         }
       }
       auto const mask = proceduralShapeMask(
-        feature.half_width_ratio, transition_width, distance);
+        half_width, transition_width, distance);
       sample.feature_masks[index] = mask;
       if (mask <= 0.0f)
       {
@@ -764,17 +804,24 @@ namespace Noggit::Ai
       // ponytail: transitions are one-shot; preserve source heights only if
       // repeatable layout reapplication becomes a real editing workflow.
       sample.height += (target_height - sample.height) * mask;
+      auto texture_mask = mask;
+      if (feature.texture_strength < 1.0f)
+      {
+        auto const variation = 0.85f + 0.15f
+          * terrainRoughness(sample_x, sample_z, feature.name + ":texture");
+        texture_mask *= feature.texture_strength * variation;
+      }
       for (std::size_t layer = 0; layer < layer_count; ++layer)
       {
-        sample.semantic_weights[layer] *= 1.0f - mask;
+        sample.semantic_weights[layer] *= 1.0f - texture_mask;
       }
       if (feature.texture_layer < layer_count)
       {
-        sample.semantic_weights[feature.texture_layer] += mask;
+        sample.semantic_weights[feature.texture_layer] += texture_mask;
       }
       else
       {
-        sample.semantic_weights[0] += mask;
+        sample.semantic_weights[0] += texture_mask;
       }
     }
 

@@ -132,11 +132,32 @@ namespace Noggit::Ai
       {"minimum", 1},
       {"maximum", 100}
     };
+    search_properties["offset"] = {
+      {"type", "integer"},
+      {"description", "Index du premier résultat ; utiliser next_offset pour explorer d'autres familles."},
+      {"minimum", 0},
+      {"maximum", 1000000}
+    };
 
     auto search_parameters = nlohmann::json{
       {"type", "object"},
       {"properties", std::move(search_properties)},
-      {"required", {"query", "limit"}},
+      {"required", {"query", "limit", "offset"}},
+      {"additionalProperties", false}
+    };
+
+    auto texture_preview_parameters = nlohmann::json{
+      {"type", "object"},
+      {"properties", {
+        {"texture_paths", {
+          {"type", "array"},
+          {"description", "Textures candidates retournées par search_textures à comparer visuellement."},
+          {"items", {{"type", "string"}, {"minLength", 1}, {"maxLength", 260}}},
+          {"minItems", 1},
+          {"maxItems", 12}
+        }}
+      }},
+      {"required", {"texture_paths"}},
       {"additionalProperties", false}
     };
 
@@ -307,8 +328,20 @@ namespace Noggit::Ai
           {"description", "Largeur de la transition douce jusqu'au terrain existant, selon le plus petit côté."}
         }},
         {"texture_layer", {
-          {"type", "integer"}, {"minimum", 0}, {"maximum", 3},
+          {"type", "integer"}, {"minimum", 0}, {"maximum", 15},
           {"description", "Index dans texture_paths appliqué par cette forme."}
+        }},
+        {"roughness_amplitude", {
+          {"type", "number"}, {"minimum", 0.0}, {"maximum", 100.0},
+          {"description", "Amplitude déterministe du macro/micro-relief intérieur. Utiliser 0 pour les voies et plateformes, environ 3 à 8 pour une jungle légèrement accidentée."}
+        }},
+        {"texture_strength", {
+          {"type", "number"}, {"minimum", 0.05}, {"maximum", 1.0},
+          {"description", "Force de la texture sémantique. Utiliser 1 pour une voie nette et environ 0.35 à 0.75 pour fondre naturellement un biome avec la base."}
+        }},
+        {"width_variation_ratio", {
+          {"type", "number"}, {"minimum", 0.0}, {"maximum", 0.75},
+          {"description", "Variation continue de largeur d'un corridor. 0 garde une largeur fixe ; 0.1 à 0.3 évite les rubans uniformes. Ignoré pour area."}
         }},
         {"priority", {
           {"type", "integer"}, {"minimum", 0}, {"maximum", 100},
@@ -317,7 +350,8 @@ namespace Noggit::Ai
       }},
       {"required", {
         "name", "shape", "height_mode", "points", "half_width_ratio",
-        "transition_width_ratio", "texture_layer", "priority"
+        "transition_width_ratio", "texture_layer", "roughness_amplitude",
+        "texture_strength", "width_variation_ratio", "priority"
       }},
       {"additionalProperties", false}
     };
@@ -327,13 +361,13 @@ namespace Noggit::Ai
       {"properties", {
         {"texture_paths", {
           {"type", "array"},
-          {"description", "Palette de deux à quatre textures tileset/*.blp uniques ; la couche 0 est la base hors des formes."},
+          {"description", "Palette de carte de deux à 16 textures tileset/*.blp uniques ; la couche 0 est la base hors des formes. Chaque chunk ne peut employer que quatre couches réellement actives."},
           {"items", {{"type", "string"}, {"minLength", 1}, {"maxLength", 260}}},
           {"minItems", 2},
-          {"maxItems", 4}
+          {"maxItems", 16}
         }},
         {"steep_texture_layer", {
-          {"type", {"integer", "null"}}, {"minimum", 0}, {"maximum", 3},
+          {"type", {"integer", "null"}}, {"minimum", 0}, {"maximum", 15},
           {"description", "Couche qui remplace progressivement les autres sur les pentes, ou null pour désactiver."}
         }},
         {"slope_start_degrees", {
@@ -458,6 +492,81 @@ namespace Noggit::Ai
       {"additionalProperties", false}
     };
 
+    auto scatter_point_parameters = nlohmann::json{
+      {"type", "object"},
+      {"properties", {
+        {"u", {{"type", "number"}, {"minimum", 0.0}, {"maximum", 1.0}}},
+        {"v", {{"type", "number"}, {"minimum", 0.0}, {"maximum", 1.0}}}
+      }},
+      {"required", {"u", "v"}},
+      {"additionalProperties", false}
+    };
+    auto scatter_asset_parameters = nlohmann::json{
+      {"type", "object"},
+      {"properties", {
+        {"path", {{"type", "string"}, {"minLength", 1}, {"maxLength", 260}}},
+        {"weight", {{"type", "number"}, {"exclusiveMinimum", 0.0}, {"maximum", 100.0}}},
+        {"min_scale", {{"type", "number"}, {"minimum", 0.05}, {"maximum", 10.0}}},
+        {"max_scale", {{"type", "number"}, {"minimum", 0.05}, {"maximum", 10.0}}}
+      }},
+      {"required", {"path", "weight", "min_scale", "max_scale"}},
+      {"additionalProperties", false}
+    };
+    auto scatter_region_parameters = nlohmann::json{
+      {"type", "object"},
+      {"properties", {
+        {"name", {{"type", "string"}, {"minLength", 1}, {"maxLength", 64}}},
+        {"points", {
+          {"type", "array"}, {"items", scatter_point_parameters},
+          {"minItems", 3}, {"maxItems", 16}
+        }},
+        {"density_per_tile", {{"type", "integer"}, {"minimum", 1}, {"maximum", 512}}},
+        {"min_spacing_ratio", {{"type", "number"}, {"minimum", 0.001}, {"maximum", 0.25}}},
+        {"min_height", {{"type", "number"}, {"minimum", -500.0}, {"maximum", 5000.0}}},
+        {"max_height", {{"type", "number"}, {"minimum", -500.0}, {"maximum", 5000.0}}},
+        {"min_slope_degrees", {{"type", "number"}, {"minimum", 0.0}, {"maximum", 90.0}}},
+        {"max_slope_degrees", {{"type", "number"}, {"minimum", 0.0}, {"maximum", 90.0}}}
+      }},
+      {"required", {
+        "name", "points", "density_per_tile", "min_spacing_ratio",
+        "min_height", "max_height", "min_slope_degrees", "max_slope_degrees"
+      }},
+      {"additionalProperties", false}
+    };
+    auto scatter_exclusion_parameters = nlohmann::json{
+      {"type", "object"},
+      {"properties", {
+        {"shape", {{"type", "string"}, {"enum", {"corridor", "area"}}}},
+        {"points", {
+          {"type", "array"}, {"items", scatter_point_parameters},
+          {"minItems", 1}, {"maxItems", 16}
+        }},
+        {"half_width_ratio", {{"type", "number"}, {"minimum", 0.001}, {"maximum", 0.25}}}
+      }},
+      {"required", {"shape", "points", "half_width_ratio"}},
+      {"additionalProperties", false}
+    };
+    auto scatter_parameters = nlohmann::json{
+      {"type", "object"},
+      {"properties", {
+        {"seed", {{"type", "string"}, {"minLength", 1}, {"maxLength", 64}}},
+        {"assets", {
+          {"type", "array"}, {"items", std::move(scatter_asset_parameters)},
+          {"minItems", 1}, {"maxItems", 16}
+        }},
+        {"regions", {
+          {"type", "array"}, {"items", std::move(scatter_region_parameters)},
+          {"minItems", 1}, {"maxItems", 16}
+        }},
+        {"exclusions", {
+          {"type", "array"}, {"items", std::move(scatter_exclusion_parameters)},
+          {"minItems", 0}, {"maxItems", 32}
+        }}
+      }},
+      {"required", {"seed", "assets", "regions", "exclusions"}},
+      {"additionalProperties", false}
+    };
+
     return nlohmann::json::array({
       {
         {"type", "function"},
@@ -524,6 +633,13 @@ namespace Noggit::Ai
       },
       {
         {"type", "function"},
+        {"name", "scatter_assets_on_map"},
+        {"description", "Répartit en un appel des arbres, rochers, buissons et décors M2/WMO dans des zones polygonales. Respecte les exclusions, la hauteur, la pente, la densité et l'espacement. Opération globale déterministe, sauvegardée et réservée à un plan approuvé."},
+        {"parameters", std::move(scatter_parameters)},
+        {"strict", true}
+      },
+      {
+        {"type", "function"},
         {"name", "set_base_texture_on_map"},
         {"description", "Remplace les couches des 256 chunks de chaque tuile existante par une texture de base unique. Opération globale enregistrée tuile par tuile, non annulable avec Ctrl+Z, réservée à un plan approuvé."},
         {"parameters", loaded_tiles_texture_parameters},
@@ -545,9 +661,23 @@ namespace Noggit::Ai
       },
       {
         {"type", "function"},
+        {"name", "inspect_map_view"},
+        {"description", "Capture la vue 3D actuelle et la montre visuellement au modèle. À appeler une fois après validate_map pour contrôler le rendu, sans relancer automatiquement une modification globale."},
+        {"parameters", context_parameters},
+        {"strict", true}
+      },
+      {
+        {"type", "function"},
         {"name", "search_textures"},
-        {"description", "Cherche les textures de terrain BLP connues dans la listfile du client. À utiliser avant paint_texture quand aucun chemin exact ou aucune texture sélectionnée n'est disponible."},
+        {"description", "Cherche les textures de terrain BLP connues dans la listfile du client. À utiliser avant toute texturation locale ou globale ; parcourir plusieurs termes et pages pour construire une palette variée."},
         {"parameters", std::move(search_parameters)},
+        {"strict", true}
+      },
+      {
+        {"type", "function"},
+        {"name", "preview_textures"},
+        {"description", "Génère et montre un aperçu visuel de 1 à 12 textures BLP candidates. À appeler après search_textures et avant de choisir une palette dans un plan."},
+        {"parameters", std::move(texture_preview_parameters)},
         {"strict", true}
       },
       {

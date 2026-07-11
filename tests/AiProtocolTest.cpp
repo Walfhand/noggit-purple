@@ -47,11 +47,14 @@ int main()
 {
   auto const tools = Noggit::Ai::toolDefinitions();
   require(tools.is_array(), "tools must be an array");
-  require(tools.size() == 14, "unexpected tool count");
+  require(tools.size() == 17, "unexpected tool count");
 
   std::set<std::string> tool_names;
   nlohmann::json const* terrain_layout = nullptr;
   nlohmann::json const* liquid_layout = nullptr;
+  nlohmann::json const* texture_search = nullptr;
+  nlohmann::json const* texture_preview = nullptr;
+  nlohmann::json const* asset_scatter = nullptr;
 
   for (auto const& tool : tools)
   {
@@ -64,6 +67,15 @@ int main()
     {
       liquid_layout = &tool;
     }
+    if (tool.at("name") == "search_textures")
+    {
+      texture_search = &tool;
+    }
+    if (tool.at("name") == "preview_textures")
+    {
+      texture_preview = &tool;
+    }
+    if (tool.at("name") == "scatter_assets_on_map") asset_scatter = &tool;
     require(tool.at("type") == "function", "tool type must be function");
     require(tool.at("strict") == true, "tool must use strict mode");
     auto const& parameters = tool.at("parameters");
@@ -100,13 +112,25 @@ int main()
   require(tool_names.count("blend_terrain_textures_on_map") == 1,
           "blend_terrain_textures_on_map tool is missing");
   require(tool_names.count("validate_map") == 1, "validate_map tool is missing");
+  require(tool_names.count("inspect_map_view") == 1, "inspect_map_view tool is missing");
   require(tool_names.count("search_textures") == 1, "search_textures tool is missing");
+  require(tool_names.count("preview_textures") == 1, "preview_textures tool is missing");
   require(tool_names.count("search_assets") == 1, "search_assets tool is missing");
+  require(tool_names.count("scatter_assets_on_map") == 1,
+          "scatter_assets_on_map tool is missing");
+
+  require(asset_scatter != nullptr, "asset scatter schema is missing");
+  auto const& scatter_properties = asset_scatter->at("parameters").at("properties");
+  require(scatter_properties.at("assets").at("minItems") == 1
+            && scatter_properties.at("assets").at("maxItems") == 16
+            && scatter_properties.at("regions").at("maxItems") == 16
+            && scatter_properties.at("exclusions").at("maxItems") == 32,
+          "asset scatter bounds changed");
 
   require(terrain_layout != nullptr, "terrain layout schema is missing");
   auto const& layout_properties = terrain_layout->at("parameters").at("properties");
   require(layout_properties.at("texture_paths").at("minItems") == 2
-            && layout_properties.at("texture_paths").at("maxItems") == 4,
+            && layout_properties.at("texture_paths").at("maxItems") == 16,
           "terrain layout texture count changed");
   require(layout_properties.at("features").at("minItems") == 1
             && layout_properties.at("features").at("maxItems") == 32,
@@ -132,8 +156,27 @@ int main()
   require(feature_properties.at("shape").at("enum")
             == nlohmann::json::array({"corridor", "area"})
             && feature_properties.at("height_mode").at("enum")
-              == nlohmann::json::array({"absolute", "offset"}),
+              == nlohmann::json::array({"absolute", "offset"})
+            && feature_properties.at("texture_layer").at("maximum") == 15
+            && feature_properties.at("roughness_amplitude").at("minimum") == 0.0
+            && feature_properties.at("roughness_amplitude").at("maximum") == 100.0
+            && feature_properties.at("texture_strength").at("minimum") == 0.05
+            && feature_properties.at("texture_strength").at("maximum") == 1.0
+            && feature_properties.at("width_variation_ratio").at("minimum") == 0.0
+            && feature_properties.at("width_variation_ratio").at("maximum") == 0.75,
           "terrain layout feature modes changed");
+
+  require(texture_search != nullptr, "texture search schema is missing");
+  auto const& search_properties = texture_search->at("parameters").at("properties");
+  require(search_properties.at("offset").at("minimum") == 0
+            && search_properties.at("offset").at("maximum") == 1000000,
+          "texture search pagination changed");
+
+  require(texture_preview != nullptr, "texture preview schema is missing");
+  auto const& preview_paths = texture_preview->at("parameters")
+    .at("properties").at("texture_paths");
+  require(preview_paths.at("minItems") == 1 && preview_paths.at("maxItems") == 12,
+          "texture preview count changed");
 
   require(liquid_layout != nullptr, "liquid layout schema is missing");
   auto const& liquid_properties = liquid_layout->at("parameters").at("properties");

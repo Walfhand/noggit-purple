@@ -57,6 +57,9 @@ namespace
           {"half_width_ratio", 0.03},
           {"transition_width_ratio", 0.02},
           {"texture_layer", 1},
+          {"roughness_amplitude", 0.0},
+          {"texture_strength", 1.0},
+          {"width_variation_ratio", 0.0},
           {"priority", 10}
         },
         {
@@ -69,6 +72,9 @@ namespace
           {"half_width_ratio", 0.08},
           {"transition_width_ratio", 0.02},
           {"texture_layer", 1},
+          {"roughness_amplitude", 0.0},
+          {"texture_strength", 1.0},
+          {"width_variation_ratio", 0.0},
           {"priority", 20}
         }
       }}
@@ -180,6 +186,21 @@ int main()
   require(!Noggit::Ai::parseProceduralLayout(bad_priority).layout,
           "out-of-range priority was accepted");
 
+  auto bad_roughness = validArguments();
+  bad_roughness["features"][0]["roughness_amplitude"] = 100.1;
+  require(!Noggit::Ai::parseProceduralLayout(bad_roughness).layout,
+          "out-of-range roughness was accepted");
+
+  auto bad_texture_strength = validArguments();
+  bad_texture_strength["features"][0]["texture_strength"] = 0.0;
+  require(!Noggit::Ai::parseProceduralLayout(bad_texture_strength).layout,
+          "out-of-range texture strength was accepted");
+
+  auto bad_width_variation = validArguments();
+  bad_width_variation["features"][0]["width_variation_ratio"] = 0.76;
+  require(!Noggit::Ai::parseProceduralLayout(bad_width_variation).layout,
+          "out-of-range width variation was accepted");
+
   auto bad_shape = validArguments();
   bad_shape["features"][0]["shape"] = "spline";
   require(!Noggit::Ai::parseProceduralLayout(bad_shape).layout,
@@ -272,6 +293,33 @@ int main()
   require(!Noggit::Ai::parseProceduralLayout(unused_palette).layout,
           "unused palette layer was accepted");
 
+  auto sixteen_textures = validArguments();
+  sixteen_textures["texture_paths"] = nlohmann::json::array();
+  sixteen_textures["features"] = nlohmann::json::array();
+  sixteen_textures["steep_texture_layer"] = nullptr;
+  sixteen_textures["slope_start_degrees"] = nullptr;
+  sixteen_textures["slope_full_degrees"] = nullptr;
+  for (int layer = 0; layer < 16; ++layer)
+  {
+    sixteen_textures["texture_paths"].push_back(
+      "tileset/test/texture_" + std::to_string(layer) + ".blp");
+    if (layer == 0)
+    {
+      continue;
+    }
+    auto feature = validArguments()["features"][0];
+    feature["name"] = "palette_" + std::to_string(layer);
+    feature["texture_layer"] = layer;
+    sixteen_textures["features"].push_back(std::move(feature));
+  }
+  require(Noggit::Ai::parseProceduralLayout(sixteen_textures).layout.has_value(),
+          "valid 16-texture map palette was rejected");
+  auto seventeen_textures = sixteen_textures;
+  seventeen_textures["texture_paths"].push_back(
+    "tileset/test/texture_16.blp");
+  require(!Noggit::Ai::parseProceduralLayout(seventeen_textures).layout,
+          "map palette with more than 16 textures was accepted");
+
   auto reversed_priority = validArguments();
   std::swap(reversed_priority["features"][0], reversed_priority["features"][1]);
   auto const sorted = Noggit::Ai::parseProceduralLayout(reversed_priority);
@@ -331,6 +379,42 @@ int main()
                "polygon interior is not a full core");
   requireClose(area_outside.height, 20.0f,
                "polygon modified terrain outside its transition");
+
+  auto blended_area = area_layout;
+  blended_area.features.front().texture_strength = 0.5f;
+  auto const blended_sample = Noggit::Ai::sampleProceduralLayout(
+    blended_area, 0.5f, 0.5f, 20.0f, 0.0f, 100.0f, 100.0f);
+  require(blended_sample.semantic_weights[0] > 0.0f
+            && blended_sample.semantic_weights[1] > 0.0f,
+          "reduced texture strength did not blend feature and base textures");
+
+  auto rough_area = area_layout;
+  rough_area.features.front().roughness_amplitude = 6.0f;
+  auto minimum_rough_height = std::numeric_limits<float>::max();
+  auto maximum_rough_height = std::numeric_limits<float>::lowest();
+  for (int z = 3; z <= 7; ++z)
+  {
+    for (int x = 3; x <= 7; ++x)
+    {
+      auto const u = static_cast<float>(x) / 10.0f;
+      auto const v = static_cast<float>(z) / 10.0f;
+      auto const first = Noggit::Ai::sampleProceduralLayout(
+        rough_area, u, v, 20.0f, 0.0f, 100.0f, 100.0f);
+      auto const second = Noggit::Ai::sampleProceduralLayout(
+        rough_area, u, v, 20.0f, 0.0f, 100.0f, 100.0f);
+      require(first.height == second.height,
+              "feature roughness is not deterministic");
+      minimum_rough_height = std::min(minimum_rough_height, first.height);
+      maximum_rough_height = std::max(maximum_rough_height, first.height);
+    }
+  }
+  require(maximum_rough_height - minimum_rough_height > 1.0f,
+          "feature roughness left a flat area core");
+  requireClose(Noggit::Ai::sampleProceduralLayout(
+                 rough_area, 0.05f, 0.5f, 20.0f,
+                 0.0f, 100.0f, 100.0f).height,
+               20.0f,
+               "feature roughness leaked outside its area");
 
   auto bounded_offset = area_layout;
   for (auto& point : bounded_offset.features.front().points)

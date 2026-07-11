@@ -3,6 +3,7 @@
 #include <noggit/ai/AssistantDock.hpp>
 #include <noggit/ai/ProceduralLiquidLayout.hpp>
 #include <noggit/ai/ProceduralLayout.hpp>
+#include <noggit/ai/ProceduralScatter.hpp>
 
 #include <noggit/ActionManager.hpp>
 #include <noggit/Brush.h>
@@ -15,6 +16,7 @@
 #include <noggit/MapView.h>
 #include <noggit/TileIndex.hpp>
 #include <noggit/TileWater.hpp>
+#include <noggit/TextureManager.h>
 #include <noggit/World.h>
 #include <noggit/application/NoggitApplication.hpp>
 #include <noggit/scoped_blp_texture_reference.hpp>
@@ -26,14 +28,19 @@
 #include <FastNoise/FastNoise.h>
 
 #include <QtCore/QByteArray>
+#include <QtCore/QBuffer>
+#include <QtCore/QDebug>
 #include <QtCore/QEvent>
 #include <QtCore/QSettings>
 #include <QtCore/QStringList>
 #include <QtCore/QTimer>
 #include <QtCore/QUrl>
+#include <QtCore/QUuid>
 #include <QtGui/QColor>
 #include <QtGui/QImage>
 #include <QtGui/QKeyEvent>
+#include <QtGui/QPainter>
+#include <QtGui/QPixmap>
 #include <QtNetwork/QNetworkAccessManager>
 #include <QtNetwork/QNetworkReply>
 #include <QtNetwork/QNetworkRequest>
@@ -70,7 +77,10 @@ namespace Noggit::Ai
   namespace
   {
     constexpr auto max_tool_rounds = std::size_t{32};
-    constexpr auto default_model = "gpt-5.6";
+    constexpr auto max_network_retries = 2;
+    constexpr auto network_timeout_ms = 300000;
+    constexpr auto preview_image_key = "_noggit_input_image_data_url";
+    constexpr auto default_model = "gpt-5.6-terra";
     constexpr auto system_instructions = R"(Tu es l'agent de création intégré à Noggit. Réponds en français.
 Pour une petite retouche locale explicite, utilise directement les outils locaux.
 Pour une création, une refonte ou une opération portant sur toute la carte :
@@ -78,11 +88,13 @@ Pour une création, une refonte ou une opération portant sur toute la carte :
 2. choisis toi-même quand l'utilisateur te délègue les choix esthétiques ;
 3. appelle submit_map_plan et arrête toute mutation jusqu'au message [APPROBATION HOTE] ;
 4. après approbation, exécute toutes les étapes disponibles sans demander de confirmation intermédiaire ;
-5. appelle validate_map après les opérations globales avant d'annoncer leur réussite.
-Après un relief global naturel, utilise blend_terrain_textures_on_map pour répartir les textures selon la hauteur et la pente. Réserve paint_texture aux retouches locales et ne remplace pas ensuite ce mélange par set_base_texture_on_map.
+5. appelle validate_map après les opérations globales, puis inspect_map_view une fois avant d'annoncer leur réussite ; utilise la capture pour signaler honnêtement les défauts visibles mais ne relance jamais automatiquement une autre modification globale.
+Après generate_terrain_on_map, utilise blend_terrain_textures_on_map pour répartir les textures selon la hauteur et la pente. apply_terrain_layout_on_map produit déjà sa texturation finale par zone : ne l'écrase ensuite ni avec blend_terrain_textures_on_map ni avec set_base_texture_on_map. Réserve paint_texture aux retouches locales.
 Pour créer des routes, rivières, voies, plateformes ou autres formes continues, utilise apply_terrain_layout_on_map afin d'appliquer ensemble leur hauteur et leurs textures sémantiques.
+Avant une texturation globale, explore plusieurs termes anglais de noms de fichiers et plusieurs pages avec search_textures : grass, dirt, leaf, moss, mud, root et rock. Appelle ensuite preview_textures sur les candidates sérieuses et choisis la palette d'après l'image obtenue, pas seulement d'après leurs noms. Évite de reprendre systématiquement la même famille. Un layout peut référencer jusqu'à 16 textures sur la carte, mais jamais plus de quatre textures actives dans un même chunk ; réserve les variantes aux zones éloignées. Pour casser une grande surface uniforme, ajoute quelques petites areas de texture avec height_mode=offset, height=0 et roughness_amplitude=0 plutôt que de modifier de nouveau tout le relief.
 Une texture de boue n'est pas de l'eau. Pour une rivière, un lac ou un océan visible en jeu, crée d'abord son lit avec apply_terrain_layout_on_map puis appelle apply_liquid_layout_on_map avec les mêmes points. Choisis uniquement un liquid_type_id eau ou océan retourné par inspect_map. Place la surface au-dessus du fond et sous les berges. depth est une profondeur/opacité MH2O normalisée : environ 0.2 à 0.6 pour une eau peu profonde, 0.7 à 1 pour une eau profonde. Utilise replace_existing=true seulement lors d'une refonte totale.
-Pour un rendu naturel, trace les corridors avec 5 à 10 points non colinéaires. Pour une jungle/biome, utilise shape=area avec 3 à 16 sommets simples portant tous le même height, et height_mode=offset avec un petit delta typique de +4 à +10 ; puis choisis edge_noise_ratio entre 0.003 et 0.012, max_slope_degrees entre 25 et 35 et smoothing_strength entre 0.5 et 0.8. Réserve height_mode=absolute aux voies, rivières et plateformes qui exigent une altitude précise.
+Pour rendre une jungle, forêt ou zone rocheuse vivante, recherche plusieurs arbres, buissons et rochers avec search_assets puis utilise scatter_assets_on_map après le relief et l'eau. Décris les zones par des polygones, exclue explicitement les voies et plateformes avec des corridors, et laisse aussi l'outil éviter l'eau MH2O. Mélange plusieurs M2/WMO avec des poids et des échelles proches de 1 ; préfère une densité modérée et un espacement cohérent à une masse uniforme. N'utilise pas le scatter pour les bâtiments uniques ou les objectifs placés précisément.
+Pour un rendu naturel, trace les corridors avec 5 à 10 points non colinéaires et width_variation_ratio entre 0.1 et 0.3 ; utilise 0 uniquement pour une construction volontairement régulière. Une jungle n'est pas un plateau : utilise shape=area avec height_mode=offset, un delta proche de 0, roughness_amplitude entre 3 et 8 et texture_strength entre 0.35 et 0.75 pour éviter les aplats colorés ; garde roughness_amplitude=0 et texture_strength proche de 1 sur les voies, rivières et plateformes. Utilise des corridors étroits séparés pour les crêtes ou murs. Un étang ou une clairière organique doit être une area à plusieurs points, jamais un corridor à un seul point qui produirait un cercle. Choisis edge_noise_ratio entre 0.003 et 0.012, max_slope_degrees entre 25 et 35 et smoothing_strength entre 0.3 et 0.6. Réserve height_mode=absolute aux formes qui exigent une altitude précise.
 Aux croisements, donne la priorité la plus élevée à la forme qui doit conserver sa hauteur et sa texture finales.
 Regroupe toutes les formes globales dans un seul appel à cet outil ; n'enchaîne jamais des change_terrain_height pour construire un layout complet et ne rappelle pas le layout uniquement pour retoucher ses textures.
 Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulables avec Ctrl+Z. Rapporte uniquement leurs compteurs réels. Ne prétends jamais qu'une action a réussi sans résultat ok=true. Si un outil échoue partiellement, indique précisément ce qui a été fait et ce qui reste. Une question n'est permise que si une information indispensable ne peut pas être choisie raisonnablement.)";
@@ -215,6 +227,7 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
       GenerateTerrain,
       ApplyTerrainLayout,
       ApplyLiquidLayout,
+      ScatterAssets,
       BlendTerrainTextures,
       SetBaseTexture,
       Validate
@@ -225,6 +238,7 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
       if (name == "generate_terrain_on_map") return MapBatchOperation::GenerateTerrain;
       if (name == "apply_terrain_layout_on_map") return MapBatchOperation::ApplyTerrainLayout;
       if (name == "apply_liquid_layout_on_map") return MapBatchOperation::ApplyLiquidLayout;
+      if (name == "scatter_assets_on_map") return MapBatchOperation::ScatterAssets;
       if (name == "blend_terrain_textures_on_map") return MapBatchOperation::BlendTerrainTextures;
       if (name == "set_base_texture_on_map") return MapBatchOperation::SetBaseTexture;
       if (name == "validate_map") return MapBatchOperation::Validate;
@@ -348,7 +362,7 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
     std::size_t mixed_texture_chunks = 0;
     std::size_t mixed_texture_pixels = 0;
     std::size_t max_texture_layers = 0;
-    std::array<std::size_t, 4> visible_texture_pixels{};
+    std::array<std::size_t, procedural_layout_max_texture_paths> visible_texture_pixels{};
     std::map<std::string, std::size_t> texture_chunks_by_path;
     std::map<std::string, std::size_t> visible_texture_pixels_by_path;
     std::map<std::string, std::size_t> strong_texture_pixels_by_path;
@@ -368,11 +382,12 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
     std::size_t height_chunks_changed = 0;
     std::optional<ProceduralLayout> procedural_layout;
     std::optional<ProceduralLiquidLayout> procedural_liquid_layout;
+    std::optional<ProceduralScatter> procedural_scatter;
     std::vector<scoped_blp_texture_reference> procedural_textures;
     std::vector<std::size_t> feature_core_pixels;
     std::vector<std::size_t> feature_transition_pixels;
-    std::array<std::size_t, 4> strong_texture_pixels{};
-    std::array<std::uint8_t, 4> max_texture_alpha{};
+    std::array<std::size_t, procedural_layout_max_texture_paths> strong_texture_pixels{};
+    std::array<std::uint8_t, procedural_layout_max_texture_paths> max_texture_alpha{};
     std::vector<TileIndex> height_changed_tiles;
     std::vector<TileIndex> normal_tiles;
     std::vector<TileIndex> normal_neighborhood;
@@ -389,6 +404,18 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
     std::map<int, float> max_liquid_height_by_type;
     std::map<int, float> min_liquid_depth_by_type;
     std::map<int, float> max_liquid_depth_by_type;
+    std::set<std::uint32_t> known_instance_uids;
+    std::vector<glm::vec2> occupied_positions;
+    std::size_t scatter_candidates = 0;
+    std::size_t scatter_placed = 0;
+    std::size_t scatter_rejected_outside = 0;
+    std::size_t scatter_rejected_exclusion = 0;
+    std::size_t scatter_rejected_terrain = 0;
+    std::size_t scatter_rejected_liquid = 0;
+    std::size_t scatter_rejected_spacing = 0;
+    std::map<std::string, std::size_t> scatter_by_asset;
+    std::map<std::string, std::size_t> scatter_by_region;
+    std::vector<TileIndex> scatter_changed_tiles;
   };
 
   AssistantDock::AssistantDock(MapView* map_view, QWidget* parent)
@@ -509,6 +536,14 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
     {
       _cancel_requested = true;
       _active_reply->abort();
+      return;
+    }
+
+    if (_busy)
+    {
+      _cancel_requested = true;
+      _status->setText(tr("Requête annulée."));
+      setBusy(false);
     }
   }
 
@@ -553,6 +588,11 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
 
   void AssistantDock::sendRequest()
   {
+    sendRequest(nlohmann::json::array());
+  }
+
+  void AssistantDock::sendRequest(nlohmann::json const& extra_input)
+  {
     if (!_map_view)
     {
       failTurn(tr("La vue de carte a été fermée."));
@@ -576,10 +616,15 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
       model = default_model;
     }
 
+    auto request_input = _input;
+    for (auto const& item : extra_input)
+    {
+      request_input.push_back(item);
+    }
     auto request_body = nlohmann::json{
       {"model", model.toStdString()},
       {"instructions", system_instructions},
-      {"input", _input},
+      {"input", std::move(request_input)},
       {"tools", toolDefinitions()},
       {"parallel_tool_calls", false},
       {"max_output_tokens", 4096},
@@ -587,15 +632,42 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
       {"include", {"reasoning.encrypted_content"}}
     };
 
+    postRequest(QByteArray::fromStdString(request_body.dump()), 0);
+  }
+
+  void AssistantDock::postRequest(QByteArray const& body, int attempt)
+  {
+    auto key = _api_key->text().trimmed().toUtf8();
+    if (key.isEmpty())
+    {
+      key = qgetenv("OPENAI_API_KEY");
+    }
+
+    auto const client_request_id = QUuid::createUuid().toString(QUuid::WithoutBraces).toUtf8();
     QNetworkRequest request(QUrl("https://api.openai.com/v1/responses"));
     request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
     request.setRawHeader("Authorization", QByteArray("Bearer ") + key);
     request.setRawHeader("User-Agent", "Noggit-Purple/AI");
+    request.setRawHeader("X-Client-Request-Id", client_request_id);
 
-    auto* reply = _network->post(request, QByteArray::fromStdString(request_body.dump()));
+    auto* reply = _network->post(request, body);
+    reply->setProperty("noggitRequestBody", body);
+    reply->setProperty("noggitRequestAttempt", attempt);
+    reply->setProperty("noggitClientRequestId", client_request_id);
     _active_reply = reply;
     connect(reply, &QNetworkReply::finished, this, [this, reply] { handleReply(reply); });
-    _status->setText(tr("OpenAI réfléchit…"));
+    QTimer::singleShot(network_timeout_ms, reply, [reply]
+    {
+      if (reply->isRunning())
+      {
+        reply->setProperty("noggitTimedOut", true);
+        reply->abort();
+      }
+    });
+    _status->setText(attempt == 0
+      ? tr("OpenAI réfléchit…")
+      : tr("OpenAI réfléchit… tentative %1/%2")
+          .arg(attempt + 1).arg(max_network_retries + 1));
   }
 
   void AssistantDock::handleReply(QNetworkReply* reply)
@@ -603,8 +675,17 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
     auto const body = reply->readAll();
     auto const status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
     auto const network_error = reply->error();
-    auto const network_error_text = reply->errorString();
+    auto network_error_text = reply->errorString();
     auto const request_id = QString::fromUtf8(reply->rawHeader("x-request-id"));
+    auto const client_request_id = QString::fromUtf8(
+      reply->property("noggitClientRequestId").toByteArray());
+    auto const request_body = reply->property("noggitRequestBody").toByteArray();
+    auto const attempt = reply->property("noggitRequestAttempt").toInt();
+    auto const timed_out = reply->property("noggitTimedOut").toBool();
+    if (timed_out)
+    {
+      network_error_text = tr("délai de réponse dépassé");
+    }
     if (_active_reply == reply)
     {
       _active_reply.clear();
@@ -619,6 +700,53 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
       return;
     }
 
+    auto const retryable_http = status == 408 || status == 409 || status == 429
+      || (status >= 500 && status <= 599);
+    auto const retryable_transport = status == 0
+      && network_error != QNetworkReply::NoError
+      && network_error != QNetworkReply::OperationCanceledError;
+    if (attempt < max_network_retries
+        && (retryable_http || retryable_transport || timed_out))
+    {
+      auto delay_ms = 1000 * (1 << attempt);
+      auto retry_after_ok = false;
+      auto const retry_after_seconds = QString::fromUtf8(
+        reply->rawHeader("Retry-After")).toInt(&retry_after_ok);
+      if (retry_after_ok && retry_after_seconds >= 0)
+      {
+        delay_ms = std::min(retry_after_seconds * 1000, 30000);
+      }
+      qWarning().noquote()
+        << "OpenAI request retry"
+        << attempt + 1
+        << "HTTP" << status
+        << "Qt error" << static_cast<int>(network_error)
+        << network_error_text
+        << "x-request-id" << request_id
+        << "client-request-id" << client_request_id;
+      _status->setText(tr("Connexion interrompue — nouvelle tentative dans %1 s…")
+        .arg(static_cast<double>(delay_ms) / 1000.0, 0, 'g', 2));
+      QTimer::singleShot(delay_ms, this, [this, request_body, attempt]
+      {
+        if (_busy && !_cancel_requested && !_active_reply)
+        {
+          postRequest(request_body, attempt + 1);
+        }
+      });
+      return;
+    }
+
+    if (network_error != QNetworkReply::NoError)
+    {
+      qWarning().noquote()
+        << "OpenAI request failed"
+        << "HTTP" << status
+        << "Qt error" << static_cast<int>(network_error)
+        << network_error_text
+        << "x-request-id" << request_id
+        << "client-request-id" << client_request_id;
+    }
+
     nlohmann::json response;
     try
     {
@@ -628,7 +756,10 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
     {
       if (network_error != QNetworkReply::NoError)
       {
-        failTurn(tr("Erreur réseau : %1").arg(network_error_text));
+        failTurn(tr("Erreur réseau : %1 (code Qt %2, requête cliente %3)")
+          .arg(network_error_text)
+          .arg(static_cast<int>(network_error))
+          .arg(client_request_id));
       }
       else
       {
@@ -745,15 +876,39 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
 
   void AssistantDock::continueAfterTool(FunctionCall const& call, nlohmann::json const& result)
   {
+    auto public_result = result;
+    auto image_data_url = std::string{};
+    auto const image = public_result.find(preview_image_key);
+    if (image != public_result.end() && image->is_string())
+    {
+      image_data_url = image->get<std::string>();
+      public_result.erase(image);
+    }
     _input.push_back({
       {"type", "function_call_output"},
       {"call_id", call.call_id},
-      {"output", result.dump()}
+      {"output", public_result.dump()}
     });
     ++_tool_rounds;
     _status->setText(tr("Noggit a terminé %1, poursuite du plan…")
                        .arg(QString::fromStdString(call.name)));
-    sendRequest();
+    if (image_data_url.empty())
+    {
+      sendRequest();
+      return;
+    }
+    auto const is_map_capture = call.name == "inspect_map_view";
+    auto const image_prompt = is_map_capture
+      ? "Capture actuelle de la vue 3D de Noggit. Évalue la continuité, les formes trop géométriques, les aplats de texture et les défauts visuels évidents. Rapporte-les honnêtement sans lancer automatiquement une nouvelle modification globale."
+      : "Aperçu produit par Noggit pour les texture_paths du résultat précédent. Chaque case porte son index ; la moitié gauche montre l'aperçu BLP et la moitié droite sa répétition 2x2. Compare les couleurs, le contraste et les motifs répétitifs avant de choisir.";
+    sendRequest(nlohmann::json::array({{
+      {"role", "user"},
+      {"content", nlohmann::json::array({
+        {{"type", "input_text"}, {"text", image_prompt}},
+        {{"type", "input_image"}, {"image_url", image_data_url},
+         {"detail", is_map_capture ? "high" : "low"}}
+      })}
+    }}));
   }
 
   bool AssistantDock::startMapBatch(FunctionCall const& call)
@@ -808,6 +963,7 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
     }
     std::optional<ProceduralLayout> procedural_layout;
     std::optional<ProceduralLiquidLayout> procedural_liquid_layout;
+    std::optional<ProceduralScatter> procedural_scatter;
 
     if (*operation == MapBatchOperation::Validate)
     {
@@ -949,6 +1105,41 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
         }
       }
       procedural_liquid_layout = std::move(*parsed.layout);
+    }
+    else if (*operation == MapBatchOperation::ScatterAssets)
+    {
+      auto parsed = parseProceduralScatter(arguments);
+      if (!parsed.scatter)
+      {
+        return completeWith(toolError(parsed.error.empty()
+          ? "Le scatter d'assets est invalide." : parsed.error));
+      }
+      auto* application = Noggit::Application::NoggitApplication::instance();
+      if (!application->hasClientData())
+      {
+        return completeWith(toolError("Aucune donnée client n'est chargée."));
+      }
+      for (std::size_t index = 0; index < parsed.scatter->assets.size(); ++index)
+      {
+        auto path = BlizzardArchive::ClientData::normalizeFilenameInternal(
+          parsed.scatter->assets[index].path);
+        auto const is_m2 = path.ends_with(".m2");
+        auto const is_wmo = path.ends_with(".wmo");
+        auto const is_wmo_group = is_wmo && path.size() >= 8
+          && path[path.size() - 8] == '_'
+          && std::isdigit(static_cast<unsigned char>(path[path.size() - 7]))
+          && std::isdigit(static_cast<unsigned char>(path[path.size() - 6]))
+          && std::isdigit(static_cast<unsigned char>(path[path.size() - 5]));
+        if ((!is_m2 && !is_wmo) || is_wmo_group || path.find("..") != std::string::npos
+            || !application->clientData()->exists(path))
+        {
+          return completeWith(toolError(
+            "Asset M2/WMO racine introuvable dans les données client : " + path));
+        }
+        parsed.scatter->assets[index].path = path;
+        arguments["assets"][index]["path"] = std::move(path);
+      }
+      procedural_scatter = std::move(*parsed.scatter);
     }
     else if (*operation == MapBatchOperation::BlendTerrainTextures)
     {
@@ -1121,6 +1312,7 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
     batch->arguments = std::move(arguments);
     batch->procedural_layout = std::move(procedural_layout);
     batch->procedural_liquid_layout = std::move(procedural_liquid_layout);
+    batch->procedural_scatter = std::move(procedural_scatter);
     for (std::size_t z = 0; z < 64; ++z)
     {
       for (std::size_t x = 0; x < 64; ++x)
@@ -1142,6 +1334,17 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
     if (batch->tiles.empty())
     {
       return completeWith(toolError("La carte ouverte ne contient aucune tuile."));
+    }
+    if (batch->procedural_scatter)
+    {
+      auto requested = std::size_t{0};
+      for (auto const& region : batch->procedural_scatter->regions)
+        requested += region.density_per_tile * batch->tiles.size();
+      if (requested > 4096)
+      {
+        return completeWith(toolError(
+          "Le scatter dépasse 4096 candidats. Réduis density_per_tile ou le nombre de régions."));
+      }
     }
     if (batch->procedural_layout)
     {
@@ -1528,7 +1731,9 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
     std::size_t tile_height_chunks_changed = 0;
     std::size_t tile_vertices_changed = 0;
     bool tile_was_modified = !isValidation(_map_batch->operation)
-      && _map_batch->operation != MapBatchOperation::ApplyLiquidLayout;
+      && _map_batch->operation != MapBatchOperation::ApplyLiquidLayout
+      && _map_batch->operation != MapBatchOperation::ApplyTerrainLayout
+      && _map_batch->operation != MapBatchOperation::ScatterAssets;
     std::size_t tile_liquid_chunks_changed = 0;
     try
     {
@@ -1771,6 +1976,65 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
           }
         }
 
+        std::array<std::vector<std::size_t>, 256> chunk_texture_layers;
+        // ponytail: resampling is cheaper than caching every 16-layer pixel for
+        // a whole tile; add a compact mask cache only if profiling needs it.
+        for (unsigned chunk_z = 0; chunk_z < 16; ++chunk_z)
+        {
+          for (unsigned chunk_x = 0; chunk_x < 16; ++chunk_x)
+          {
+            auto* chunk = tile->getChunk(chunk_x, chunk_z);
+            std::array<bool, procedural_layout_max_texture_paths> active_layers{};
+            for (int alpha_z = 0; alpha_z < 64; ++alpha_z)
+            {
+              for (int alpha_x = 0; alpha_x < 64; ++alpha_x)
+              {
+                auto const world_x = chunk->xbase
+                  + (static_cast<float>(alpha_x) + 0.5f) * TEXDETAILSIZE;
+                auto const world_z = chunk->zbase
+                  + (static_cast<float>(alpha_z) + 0.5f) * TEXDETAILSIZE;
+                auto const sample = sampleProceduralLayout(
+                  layout,
+                  normalizeWorld(world_x, map_min_x, map_width),
+                  normalizeWorld(world_z, map_min_z, map_height),
+                  source_alpha_heights[alphaSourceIndex(
+                    chunk_x, chunk_z, alpha_x, alpha_z)],
+                  0.0f, map_width, map_height);
+                for (std::size_t layer = 0;
+                     layer < layout.texture_paths.size(); ++layer)
+                {
+                  active_layers[layer] = active_layers[layer]
+                    || sample.semantic_weights[layer] > 0.0f;
+                }
+              }
+            }
+            if (layout.steep)
+            {
+              active_layers[layout.steep->texture_layer] = true;
+            }
+            auto& local_layers = chunk_texture_layers[chunk_z * 16 + chunk_x];
+            for (std::size_t layer = 0;
+                 layer < layout.texture_paths.size(); ++layer)
+            {
+              if (active_layers[layer])
+              {
+                local_layers.push_back(layer);
+              }
+            }
+            if (local_layers.size() > 4)
+            {
+              throw std::runtime_error(
+                "Le chunk " + std::to_string(chunk_x) + ","
+                + std::to_string(chunk_z) + " de la tuile "
+                + std::to_string(tile_index.x) + ","
+                + std::to_string(tile_index.z)
+                + " recevrait plus de quatre textures actives.");
+            }
+          }
+        }
+        tile_was_modified = true;
+        world->mapIndex.setChanged(tile);
+
         for (unsigned chunk_z = 0; chunk_z < 16; ++chunk_z)
         {
           for (unsigned chunk_x = 0; chunk_x < 16; ++chunk_x)
@@ -1809,22 +2073,26 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
           for (unsigned chunk_x = 0; chunk_x < 16; ++chunk_x)
           {
             auto* chunk = tile->getChunk(chunk_x, chunk_z);
+            auto const& local_layers
+              = chunk_texture_layers[chunk_z * 16 + chunk_x];
             auto& texture_set = ensureTextureSet(
               *chunk, _map_view->getRenderContext());
             texture_set.eraseTextures();
-            for (std::size_t layer = 0; layer < textures.size(); ++layer)
+            for (std::size_t local = 0; local < local_layers.size(); ++local)
             {
-              if (texture_set.addTexture(textures[layer]) != static_cast<int>(layer))
+              if (texture_set.addTexture(textures[local_layers[local]])
+                  != static_cast<int>(local))
               {
                 throw std::runtime_error("Impossible d'ajouter les couches du layout.");
               }
             }
-            ++_map_batch->chunks_with_multiple_texture_layers;
+            _map_batch->chunks_with_multiple_texture_layers
+              += local_layers.size() > 1 ? 1 : 0;
             _map_batch->max_texture_layers = std::max(
-              _map_batch->max_texture_layers, layout.texture_paths.size());
+              _map_batch->max_texture_layers, local_layers.size());
 
             texture_set.create_temporary_alphamaps_if_needed();
-            auto& alpha = *texture_set.getTempAlphamaps();
+            auto* alpha = texture_set.getTempAlphamaps().get();
             bool chunk_is_mixed = false;
             for (int alpha_z = 0; alpha_z < 64; ++alpha_z)
             {
@@ -1856,25 +2124,32 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
                   }
                 }
 
-                auto visible_layers = 0;
-                for (std::size_t layer = 0; layer < 4; ++layer)
+                for (std::size_t local = 0; local < 4; ++local)
                 {
-                  auto const value = sample.quantized_weights[layer];
-                  alpha[layer][pixel] = value;
-                  if (layer >= layout.texture_paths.size())
+                  if (alpha)
                   {
-                    continue;
+                    (*alpha)[local][pixel] = 0.0f;
                   }
-                  _map_batch->max_texture_alpha[layer] = std::max(
-                    _map_batch->max_texture_alpha[layer], value);
+                }
+                auto visible_layers = 0;
+                for (std::size_t local = 0; local < local_layers.size(); ++local)
+                {
+                  auto const global = local_layers[local];
+                  auto const value = sample.quantized_weights[global];
+                  if (alpha)
+                  {
+                    (*alpha)[local][pixel] = value;
+                  }
+                  _map_batch->max_texture_alpha[global] = std::max(
+                    _map_batch->max_texture_alpha[global], value);
                   if (value >= visible_alpha)
                   {
                     ++visible_layers;
-                    ++_map_batch->visible_texture_pixels[layer];
+                    ++_map_batch->visible_texture_pixels[global];
                   }
                   if (value >= strong_alpha)
                   {
-                    ++_map_batch->strong_texture_pixels[layer];
+                    ++_map_batch->strong_texture_pixels[global];
                   }
                 }
                 if (visible_layers >= 2)
@@ -1896,7 +2171,8 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
             {
               ++_map_batch->mixed_texture_chunks;
             }
-            if (!texture_set.apply_alpha_changes())
+            if (local_layers.size() > 1
+                && !texture_set.apply_alpha_changes())
             {
               throw std::runtime_error("Impossible d'appliquer les alphamaps du layout.");
             }
@@ -2071,6 +2347,120 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
           }
         }
       }
+      else if (_map_batch->operation == MapBatchOperation::ScatterAssets)
+      {
+        auto const& scatter = *_map_batch->procedural_scatter;
+        auto const map_width = static_cast<float>(
+          _map_batch->max_tile_x - _map_batch->min_tile_x + 1) * TILESIZE;
+        auto const map_height = static_cast<float>(
+          _map_batch->max_tile_z - _map_batch->min_tile_z + 1) * TILESIZE;
+        auto const map_min_x = static_cast<float>(_map_batch->min_tile_x) * TILESIZE;
+        auto const map_min_z = static_cast<float>(_map_batch->min_tile_z) * TILESIZE;
+        auto const short_side = std::min(map_width, map_height);
+        auto const u_min = (static_cast<float>(tile_index.x) * TILESIZE - map_min_x) / map_width;
+        auto const v_min = (static_cast<float>(tile_index.z) * TILESIZE - map_min_z) / map_height;
+        auto const u_max = (static_cast<float>(tile_index.x + 1) * TILESIZE - map_min_x) / map_width;
+        auto const v_max = (static_cast<float>(tile_index.z + 1) * TILESIZE - map_min_z) / map_height;
+
+        auto rememberInstance = [&](auto const& instance)
+        {
+          if (_map_batch->known_instance_uids.insert(instance.uid).second)
+            _map_batch->occupied_positions.emplace_back(instance.pos.x, instance.pos.z);
+        };
+        world->getModelInstanceStorage().for_each_m2_instance(rememberInstance);
+        world->getModelInstanceStorage().for_each_wmo_instance(rememberInstance);
+
+        for (std::size_t region_index = 0; region_index < scatter.regions.size(); ++region_index)
+        {
+          auto const& region = scatter.regions[region_index];
+          auto const spacing = region.min_spacing_ratio * short_side;
+          auto const spacing_squared = spacing * spacing;
+          for (std::size_t candidate_index = 0;
+               candidate_index < region.density_per_tile; ++candidate_index)
+          {
+            ++_map_batch->scatter_candidates;
+            auto const candidate = proceduralScatterCandidate(
+              scatter, region_index, tile_index.x, tile_index.z, candidate_index,
+              u_min, u_max, v_min, v_max);
+            if (!proceduralScatterContains(region.points, candidate.u, candidate.v))
+            {
+              ++_map_batch->scatter_rejected_outside;
+              continue;
+            }
+            if (proceduralScatterExcluded(
+                  scatter, candidate.u, candidate.v, map_width, map_height))
+            {
+              ++_map_batch->scatter_rejected_exclusion;
+              continue;
+            }
+
+            auto const world_x = map_min_x + candidate.u * map_width;
+            auto const world_z = map_min_z + candidate.v * map_height;
+            auto const local_x = std::clamp(
+              world_x - static_cast<float>(tile_index.x) * TILESIZE,
+              0.0f, TILESIZE - std::numeric_limits<float>::epsilon());
+            auto const local_z = std::clamp(
+              world_z - static_cast<float>(tile_index.z) * TILESIZE,
+              0.0f, TILESIZE - std::numeric_limits<float>::epsilon());
+            auto const chunk_x = std::clamp(static_cast<int>(local_x / CHUNKSIZE), 0, 15);
+            auto const chunk_z = std::clamp(static_cast<int>(local_z / CHUNKSIZE), 0, 15);
+            auto* chunk = tile->getChunk(chunk_x, chunk_z);
+            auto const chunk_local_x = local_x - chunk_x * CHUNKSIZE;
+            auto const chunk_local_z = local_z - chunk_z * CHUNKSIZE;
+            auto const alpha_x = std::clamp(
+              static_cast<int>(chunk_local_x / TEXDETAILSIZE), 0, 63);
+            auto const alpha_z = std::clamp(
+              static_cast<int>(chunk_local_z / TEXDETAILSIZE), 0, 63);
+            auto const terrain = sampleTerrain(*chunk, alpha_x, alpha_z);
+            if (terrain.height < region.min_height || terrain.height > region.max_height
+                || terrain.slope_degrees < region.min_slope_degrees
+                || terrain.slope_degrees > region.max_slope_degrees)
+            {
+              ++_map_batch->scatter_rejected_terrain;
+              continue;
+            }
+
+            auto const cell_x = std::clamp(alpha_x / 8, 0, 7);
+            auto const cell_z = std::clamp(alpha_z / 8, 0, 7);
+            auto const* layers = chunk->liquid_chunk()->getLayers();
+            if (std::any_of(layers->begin(), layers->end(), [&](liquid_layer const& layer)
+                { return layer.hasSubchunk(cell_x, cell_z); }))
+            {
+              ++_map_batch->scatter_rejected_liquid;
+              continue;
+            }
+
+            auto const too_close = std::any_of(
+              _map_batch->occupied_positions.begin(), _map_batch->occupied_positions.end(),
+              [&](glm::vec2 const& position)
+              {
+                auto const dx = position.x - world_x;
+                auto const dz = position.y - world_z;
+                return dx * dx + dz * dz < spacing_squared;
+              });
+            // ponytail: bounded O(n²) scan (4096 candidates); use a spatial hash only
+            // if real maps make this batch measurably slow.
+            if (too_close)
+            {
+              ++_map_batch->scatter_rejected_spacing;
+              continue;
+            }
+
+            auto const& asset = scatter.assets[candidate.asset_index];
+            auto const position = glm::vec3{world_x, terrain.height, world_z};
+            auto const rotation = math::degrees::vec3{0.0f, candidate.yaw_degrees, 0.0f};
+            if (asset.path.ends_with(".m2"))
+              world->addM2(asset.path, position, candidate.scale, rotation, nullptr, false);
+            else
+              world->addWMO(asset.path, position, candidate.scale, rotation, nullptr, false);
+            _map_batch->occupied_positions.emplace_back(world_x, world_z);
+            ++_map_batch->scatter_placed;
+            ++_map_batch->scatter_by_asset[asset.path];
+            ++_map_batch->scatter_by_region[region.name];
+            tile_was_modified = true;
+          }
+        }
+      }
       else if (_map_batch->operation == MapBatchOperation::BlendTerrainTextures)
       {
         constexpr int alpha_tile_size = 16 * 64;
@@ -2230,6 +2620,14 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
         _map_batch->tiles_changed += tile_was_modified ? 1 : 0;
         _map_batch->chunks_changed += tile_liquid_chunks_changed;
       }
+      else if (_map_batch->operation == MapBatchOperation::ScatterAssets)
+      {
+        _map_batch->tiles_changed += tile_was_modified ? 1 : 0;
+        if (tile_was_modified)
+        {
+          _map_batch->scatter_changed_tiles.push_back(tile_index);
+        }
+      }
       else
       {
         ++_map_batch->tiles_changed;
@@ -2287,6 +2685,20 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
       auto* world = _map_view->getWorld();
       if (!isValidation(batch.operation))
       {
+        if (batch.operation == MapBatchOperation::ScatterAssets)
+        {
+          _map_view->makeCurrent();
+          OpenGL::context::scoped_setter const current_context(
+            ::gl, _map_view->context());
+          world->mapIndex.saveChanged(world);
+          for (auto const& tile : batch.scatter_changed_tiles)
+          {
+            if (world->mapIndex.tileLoaded(tile))
+            {
+              world->reload_tile(tile);
+            }
+          }
+        }
         world->horizon.save_wdl(world);
         _map_view->invalidate();
       }
@@ -2375,12 +2787,14 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
               batch.liquid_feature_cells.begin(), batch.liquid_feature_cells.end(),
               [](std::size_t cells) { return cells > 0; });
         }
+        auto const scatter_is_valid = batch.operation != MapBatchOperation::ScatterAssets
+          || batch.scatter_placed > 0;
         auto const normals_are_current = !changesHeight(batch.operation)
           || batch.normals_recalculated == batch.normal_tiles.size();
         result = {
           {"ok", batch.failures == 0
             && normals_are_current && blend_is_visible && layout_is_valid
-            && liquid_layout_is_valid},
+            && liquid_layout_is_valid && scatter_is_valid},
           {"operation", batch.call.name},
           {"tiles_total", batch.tiles.size()},
           {"tiles_changed", batch.tiles_changed},
@@ -2412,6 +2826,11 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
       {
         result["error"] = "Le layout liquide a été enregistré, mais au moins une feature ne possède aucune cellule MH2O visible après découpe par le terrain. Rapporte les compteurs et corrige le niveau ou la largeur.";
         result["partial_change_possible"] = true;
+      }
+      else if (batch.operation == MapBatchOperation::ScatterAssets
+               && !result.at("ok").get<bool>())
+      {
+        result["error"] = "Aucun asset n'a été placé. Vérifie les régions, exclusions, pentes, hauteurs et l'espacement.";
       }
       if (batch.operation == MapBatchOperation::GenerateTerrain)
       {
@@ -2498,6 +2917,9 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
           {"half_width_ratio", definition.half_width_ratio},
           {"transition_width_ratio", definition.transition_width_ratio},
           {"texture_layer", definition.texture_layer},
+          {"roughness_amplitude", definition.roughness_amplitude},
+          {"texture_strength", definition.texture_strength},
+          {"width_variation_ratio", definition.width_variation_ratio},
           {"priority", definition.priority},
           {"effective_core_pixels", core},
           {"effective_transition_pixels", batch.feature_transition_pixels[feature]}
@@ -2535,6 +2957,8 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
       result["smoothing_strength"] = batch.procedural_layout->smoothing_strength;
       result["textures"] = std::move(texture_stats);
       result["layers_requested"] = batch.procedural_layout->texture_paths.size();
+      result["map_palette_limit"] = procedural_layout_max_texture_paths;
+      result["chunk_texture_limit"] = 4;
       result["layers_with_strong_coverage"] = layers_with_strong_coverage;
       result["visible_alpha_threshold"] = 8;
       result["strong_alpha_threshold"] = 64;
@@ -2593,6 +3017,40 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
       result["liquid_cells_changed"] = batch.liquid_cells_changed;
       result["liquid_cells_cropped"] = batch.liquid_cells_cropped;
       result["format"] = "MH2O";
+    }
+    else if (batch.operation == MapBatchOperation::ScatterAssets
+             && batch.procedural_scatter)
+    {
+      auto assets = nlohmann::json::array();
+      for (auto const& asset : batch.procedural_scatter->assets)
+      {
+        assets.push_back({
+          {"path", asset.path},
+          {"placed", batch.scatter_by_asset[asset.path]}
+        });
+      }
+      auto regions = nlohmann::json::array();
+      for (auto const& region : batch.procedural_scatter->regions)
+      {
+        regions.push_back({
+          {"name", region.name},
+          {"placed", batch.scatter_by_region[region.name]}
+        });
+      }
+      result["seed"] = batch.procedural_scatter->seed;
+      result["assets"] = std::move(assets);
+      result["regions"] = std::move(regions);
+      result["candidates"] = batch.scatter_candidates;
+      result["instances_placed"] = batch.scatter_placed;
+      result["rejected"] = {
+        {"outside_regions", batch.scatter_rejected_outside},
+        {"exclusions", batch.scatter_rejected_exclusion},
+        {"terrain_filters", batch.scatter_rejected_terrain},
+        {"liquid", batch.scatter_rejected_liquid},
+        {"spacing_or_existing_objects", batch.scatter_rejected_spacing}
+      };
+      result["tiles_processed"] = batch.next_tile;
+      result["avoids_visible_liquid"] = true;
     }
     else if (batch.operation == MapBatchOperation::Validate)
     {
@@ -2930,10 +3388,11 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
 
     if (call.name == "search_textures")
     {
-      static auto const expected_fields = std::set<std::string>{"query", "limit"};
+      static auto const expected_fields = std::set<std::string>{
+        "query", "limit", "offset"};
       if (arguments.size() != expected_fields.size())
       {
-        return toolError("search_textures exige exactement query et limit.");
+        return toolError("search_textures exige exactement query, limit et offset.");
       }
       for (auto const& [name, value] : arguments.items())
       {
@@ -2960,11 +3419,18 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
       }
 
       double limit_value = 0.0;
+      double offset_value = 0.0;
       if (!readFiniteNumber(arguments, "limit", limit_value)
           || std::floor(limit_value) != limit_value
           || limit_value < 1.0 || limit_value > 100.0)
       {
         return toolError("limit doit être un entier compris entre 1 et 100.");
+      }
+      if (!readFiniteNumber(arguments, "offset", offset_value)
+          || std::floor(offset_value) != offset_value
+          || offset_value < 0.0 || offset_value > 1000000.0)
+      {
+        return toolError("offset doit être un entier compris entre 0 et 1000000.");
       }
 
       auto* application = Noggit::Application::NoggitApplication::instance();
@@ -2989,20 +3455,195 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
 
       auto const total_matches = matches.size();
       auto const limit = static_cast<std::size_t>(limit_value);
-      if (matches.size() > limit)
-      {
-        matches.resize(limit);
-      }
+      auto const offset = std::min(
+        static_cast<std::size_t>(offset_value), total_matches);
+      auto const end = std::min(offset + limit, total_matches);
+      std::vector<std::string> page(
+        matches.begin() + static_cast<std::ptrdiff_t>(offset),
+        matches.begin() + static_cast<std::ptrdiff_t>(end));
 
       return {
         {"ok", true},
         {"operation", "search_textures"},
         {"query", query},
-        {"textures", matches},
-        {"returned", matches.size()},
+        {"textures", page},
+        {"offset", offset},
+        {"returned", page.size()},
         {"total_matches", total_matches},
-        {"truncated", total_matches > matches.size()},
+        {"next_offset", end < total_matches
+          ? nlohmann::json(end) : nlohmann::json(nullptr)},
+        {"truncated", end < total_matches},
         {"source", "client_listfile"}
+      };
+    }
+
+    if (call.name == "preview_textures")
+    {
+      if (arguments.size() != 1 || !arguments.contains("texture_paths")
+          || !arguments.at("texture_paths").is_array())
+      {
+        return toolError("preview_textures exige exactement texture_paths.");
+      }
+      auto const& requested_paths = arguments.at("texture_paths");
+      if (requested_paths.empty() || requested_paths.size() > 12)
+      {
+        return toolError("texture_paths doit contenir entre une et 12 textures.");
+      }
+
+      auto* application = Noggit::Application::NoggitApplication::instance();
+      if (!application->hasClientData())
+      {
+        return toolError("Aucune donnée client n'est chargée.");
+      }
+
+      std::vector<std::string> paths;
+      std::set<std::string> unique_paths;
+      for (auto const& value : requested_paths)
+      {
+        if (!value.is_string())
+        {
+          return toolError("Chaque texture doit être un chemin texte.");
+        }
+        auto path = BlizzardArchive::ClientData::normalizeFilenameInternal(
+          value.get<std::string>());
+        if (path.size() > 260 || !path.starts_with("tileset/")
+            || !path.ends_with(".blp"))
+        {
+          return toolError("Chaque chemin doit désigner une texture tileset/*.blp.");
+        }
+        if (!unique_paths.insert(path).second)
+        {
+          return toolError("Les textures à prévisualiser doivent être uniques.");
+        }
+        if (!application->clientData()->exists(path))
+        {
+          return toolError("Texture introuvable : " + path);
+        }
+        paths.push_back(std::move(path));
+      }
+
+      constexpr auto columns = 3;
+      constexpr auto cell_width = 300;
+      constexpr auto cell_height = 176;
+      constexpr auto preview_size = 128;
+      auto const rows = static_cast<int>((paths.size() + columns - 1) / columns);
+      QImage sheet(columns * cell_width, rows * cell_height, QImage::Format_RGB32);
+      sheet.fill(QColor(28, 31, 35));
+      QPainter painter(&sheet);
+      painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
+      auto font = painter.font();
+      font.setBold(true);
+      font.setPixelSize(20);
+      painter.setFont(font);
+
+      auto mapping = nlohmann::json::array();
+      for (std::size_t index = 0; index < paths.size(); ++index)
+      {
+        auto const column = static_cast<int>(index % columns);
+        auto const row = static_cast<int>(index / columns);
+        auto const left = column * cell_width;
+        auto const top = row * cell_height;
+        auto* pixmap = Noggit::BLPRenderer::getInstance().render_blp_to_pixmap(
+          paths[index], preview_size, preview_size);
+        if (!pixmap || pixmap->isNull())
+        {
+          return toolError("Impossible de rendre la texture : " + paths[index]);
+        }
+        auto const preview = pixmap->toImage().scaled(
+          preview_size, preview_size, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+        painter.drawImage(left + 8, top + 38, preview);
+        auto const tile = preview.scaled(64, 64, Qt::IgnoreAspectRatio,
+                                         Qt::SmoothTransformation);
+        for (auto y = 0; y < 2; ++y)
+        {
+          for (auto x = 0; x < 2; ++x)
+          {
+            painter.drawImage(left + 156 + x * 64, top + 38 + y * 64, tile);
+          }
+        }
+        painter.setPen(Qt::white);
+        painter.drawText(left + 8, top + 27,
+                         QString::number(static_cast<int>(index + 1)));
+        mapping.push_back({
+          {"index", index + 1},
+          {"path", paths[index]}
+        });
+      }
+      painter.end();
+
+      QByteArray png;
+      QBuffer buffer(&png);
+      if (!buffer.open(QIODevice::WriteOnly) || !sheet.save(&buffer, "PNG"))
+      {
+        return toolError("Impossible d'encoder l'aperçu des textures.");
+      }
+      auto const data_url = QByteArray("data:image/png;base64,") + png.toBase64();
+      return {
+        {"ok", true},
+        {"operation", "preview_textures"},
+        {"textures", std::move(mapping)},
+        {"count", paths.size()},
+        {"layout", "left=BLP preview; right=2x2 repetition"},
+        {preview_image_key, data_url.toStdString()}
+      };
+    }
+
+    if (call.name == "inspect_map_view")
+    {
+      if (!arguments.empty())
+      {
+        return toolError("inspect_map_view n'accepte aucun argument.");
+      }
+      auto capture = [&]
+      {
+        _map_view->invalidate();
+        return _map_view->grabFramebuffer();
+      };
+      auto screenshot = capture();
+      if (screenshot.isNull())
+      {
+        return toolError("Impossible de capturer la vue 3D actuelle.");
+      }
+      auto const is_black = [](QImage const& image)
+      {
+        auto const step_x = std::max(1, image.width() / 64);
+        auto const step_y = std::max(1, image.height() / 64);
+        for (auto y = 0; y < image.height(); y += step_y)
+          for (auto x = 0; x < image.width(); x += step_x)
+            if (qRed(image.pixel(x, y)) + qGreen(image.pixel(x, y))
+                + qBlue(image.pixel(x, y)) > 12)
+              return false;
+        return true;
+      };
+      if (is_black(screenshot))
+      {
+        _map_view->repaint();
+        screenshot = capture();
+      }
+      if (is_black(screenshot))
+      {
+        return toolError(
+          "La vue OpenGL a produit une capture entièrement noire après un nouveau rendu.");
+      }
+      if (screenshot.width() > 1280 || screenshot.height() > 1280)
+      {
+        screenshot = screenshot.scaled(
+          1280, 1280, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+      }
+      QByteArray jpeg;
+      QBuffer buffer(&jpeg);
+      if (!buffer.open(QIODevice::WriteOnly) || !screenshot.save(&buffer, "JPEG", 82))
+      {
+        return toolError("Impossible d'encoder la capture de la vue 3D.");
+      }
+      auto const data_url = QByteArray("data:image/jpeg;base64,") + jpeg.toBase64();
+      return {
+        {"ok", true},
+        {"operation", "inspect_map_view"},
+        {"width", screenshot.width()},
+        {"height", screenshot.height()},
+        {"instruction", "Inspection visuelle uniquement ; ne pas remodifier automatiquement la carte."},
+        {preview_image_key, data_url.toStdString()}
       };
     }
 

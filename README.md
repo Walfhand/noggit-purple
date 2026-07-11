@@ -45,6 +45,10 @@ masked API key field. The key stays in process memory and is not saved;
 `Recherche 10 textures contenant grass.` The API key is never copied into the
 image. Remove the generated files with `rm -rf out`, and Docker build artifacts
 with `docker image rm noggit-purple:local` and `docker builder prune` when needed.
+Transient OpenAI transport failures, HTTP 429 responses and server errors are
+retried twice with a short backoff. Final network errors include a Qt error code
+and an `X-Client-Request-Id` that can be used to trace requests which never
+returned an OpenAI `x-request-id`.
 
 For a global generation request, the assistant inspects the open map and shows
 a structured plan. Review it, then click **Approuver et exécuter**. The current global
@@ -56,6 +60,20 @@ applies their semantic textures in the same pass. Areas can preserve the existin
 micro-relief while being raised or lowered; deterministic edge variation,
 automatic slope widening and light smoothing keep global shapes natural and
 seamless. This avoids approximating large shapes with dozens of local brush strokes.
+The layout may reference up to 16 textures across the map and remaps them to the
+native limit of four active layers per chunk. A strict preflight rejects any chunk
+that would exceed that limit. Each feature can also add deterministic internal
+roughness, so forest and jungle areas keep rolling ground instead of becoming flat
+raised plates. `search_textures` is paginated with `offset`/`next_offset` so the
+assistant can explore beyond the same first filenames.
+`preview_textures` reuses Noggit's BLP renderer to send the model a temporary
+visual comparison sheet before it chooses a palette. Preview images are attached
+only to the next Responses API request and are not retained in the multi-turn
+history. Layout features can blend their semantic texture with the base and vary
+corridor width continuously to avoid solid color patches and uniform ribbons.
+After validation, `inspect_map_view` can send one scaled viewport capture for an
+honest visual report; it is explicitly read-only and never triggers an automatic
+second global edit.
 `apply_liquid_layout_on_map` can then reuse those corridors or areas to create
 real WoW `MH2O` water or ocean surfaces. Liquid levels are sampled
 in world space so they remain continuous across chunk and tile boundaries; cells
@@ -65,6 +83,12 @@ reports visible liquid cells, types, surface heights and normalized depths. The
 legacy **MCLQ liquids export** setting must be disabled for this tool.
 Noggit also rejects a merge that would exceed the renderer limit of 14 active
 liquid IDs on one tile; a total replacement can use `replace_existing=true`.
+`scatter_assets_on_map` adds the vegetation and mineral decoration after terrain
+and water generation. It distributes a weighted M2/WMO palette deterministically
+inside polygonal regions, filters candidates by terrain height and slope, and
+rejects explicit corridor/area exclusions, visible MH2O cells, existing objects
+and placements that violate the requested spacing. A batch is capped at 4096
+candidates and reports every rejection reason plus counts per region and asset.
 The procedural blend follows the terrain height and slope, with continuous noise
 to avoid chunk-shaped borders, and reports how many pixels were actually mixed.
 The assistant validates every chunk afterward. It processes and saves one tile at
@@ -81,11 +105,12 @@ d'herbe. Choisis toi-même les paramètres et propose-moi le plan avant d'agir.
 
 ```text
 Crée une arène verdoyante avec trois voies continues, deux bases, une rivière
-centrale avec de l'eau réelle, et de la roche sur les pentes. Propose le plan avant
-d'agir, puis valide les textures et les cellules liquides.
+centrale avec de l'eau réelle, de la roche sur les pentes et une jungle peuplée
+d'arbres, buissons et rochers sans bloquer les voies. Propose le plan avant d'agir,
+puis valide la carte.
 ```
 
-The default model is `gpt-5.6`; set `OPENAI_MODEL` to override it.
+The default model is `gpt-5.6-terra`; set `OPENAI_MODEL` to override it.
 
 ## Windows ##
 Text in `<brackets>` below are up to your choice but shall be replaced

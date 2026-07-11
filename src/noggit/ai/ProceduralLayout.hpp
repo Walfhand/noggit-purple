@@ -15,6 +15,7 @@
 namespace Noggit::Ai
 {
   inline constexpr std::size_t procedural_layout_max_features = 32;
+  inline constexpr std::size_t procedural_layout_max_texture_paths = 16;
 
   enum class ProceduralLayoutShape : std::uint8_t
   {
@@ -68,6 +69,9 @@ namespace Noggit::Ai
     int priority = 0;
     ProceduralLayoutShape shape = ProceduralLayoutShape::Corridor;
     ProceduralLayoutHeightMode height_mode = ProceduralLayoutHeightMode::Absolute;
+    float roughness_amplitude = 0.0f;
+    float texture_strength = 1.0f;
+    float width_variation_ratio = 0.0f;
   };
 
   struct ProceduralLayoutSteep
@@ -96,8 +100,8 @@ namespace Noggit::Ai
   struct ProceduralLayoutSample
   {
     float height = 0.0f;
-    std::array<float, 4> semantic_weights{};
-    std::array<std::uint8_t, 4> quantized_weights{};
+    std::array<float, procedural_layout_max_texture_paths> semantic_weights{};
+    std::array<std::uint8_t, procedural_layout_max_texture_paths> quantized_weights{};
     std::array<float, procedural_layout_max_features> feature_masks{};
   };
 

@@ -4,6 +4,7 @@
 
 #include <noggit/ai/AiProtocol.hpp>
 
+#include <QtCore/QByteArray>
 #include <QtCore/QPointer>
 #include <QtWidgets/QDockWidget>
 
@@ -35,6 +36,8 @@ namespace Noggit::Ai
     void approvePlan();
     void resetConversation();
     void sendRequest();
+    void sendRequest(nlohmann::json const& extra_input);
+    void postRequest(QByteArray const& body, int attempt);
     void handleReply(QNetworkReply* reply);
     void continueAfterTool(FunctionCall const& call, nlohmann::json const& result);
     bool startMapBatch(FunctionCall const& call);

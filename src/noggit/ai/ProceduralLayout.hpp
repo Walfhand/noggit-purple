@@ -16,12 +16,47 @@ namespace Noggit::Ai
 {
   inline constexpr std::size_t procedural_layout_max_features = 32;
 
+  enum class ProceduralLayoutShape : std::uint8_t
+  {
+    Corridor,
+    Area
+  };
+
+  enum class ProceduralLayoutHeightMode : std::uint8_t
+  {
+    Absolute,
+    Offset
+  };
+
   struct ProceduralLayoutPoint
   {
     float u = 0.0f;
     float v = 0.0f;
     float height = 0.0f;
   };
+
+  struct ProceduralShapeDistance
+  {
+    float distance = 0.0f;
+    float height = 0.0f;
+  };
+
+  bool isSimpleProceduralArea(std::vector<ProceduralLayoutPoint> const& points);
+
+  ProceduralShapeDistance distanceToProceduralShape(
+    std::vector<ProceduralLayoutPoint> const& points,
+    ProceduralLayoutShape shape,
+    float sample_x,
+    float sample_z,
+    float scale_x,
+    float scale_z);
+
+  float proceduralShapeMask(
+    float half_width_ratio,
+    float transition_width_ratio,
+    float distance);
+
+  float proceduralEdgeNoise(float x, float z, std::string const& name);
 
   struct ProceduralLayoutFeature
   {
@@ -31,6 +66,8 @@ namespace Noggit::Ai
     float transition_width_ratio = 0.0f;
     std::size_t texture_layer = 0;
     int priority = 0;
+    ProceduralLayoutShape shape = ProceduralLayoutShape::Corridor;
+    ProceduralLayoutHeightMode height_mode = ProceduralLayoutHeightMode::Absolute;
   };
 
   struct ProceduralLayoutSteep
@@ -45,6 +82,9 @@ namespace Noggit::Ai
     std::vector<std::string> texture_paths;
     std::optional<ProceduralLayoutSteep> steep;
     std::vector<ProceduralLayoutFeature> features;
+    float edge_noise_ratio = 0.0f;
+    std::optional<float> max_slope_degrees;
+    float smoothing_strength = 0.0f;
   };
 
   struct ProceduralLayoutParseResult
@@ -71,6 +111,15 @@ namespace Noggit::Ai
     float slope_degrees,
     float map_width,
     float map_height);
+
+  float sampleSmoothedProceduralLayoutHeight(
+    ProceduralLayout const& layout,
+    float u,
+    float v,
+    float original_height,
+    float map_width,
+    float map_height,
+    float sample_spacing_world);
 }
 
 #endif

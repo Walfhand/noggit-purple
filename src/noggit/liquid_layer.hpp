@@ -73,6 +73,7 @@ public:
   void update_underground_vertices_depth(MapChunk* chunk);
 
   std::array<liquid_vertex, 9 * 9>& getVertices();
+  std::array<liquid_vertex, 9 * 9> const& getVertices() const;
   // std::array<float, 9 * 9>& getDepth() { return _depth; };
   // std::array<glm::vec2, 9 * 9>& getTexCoords() { return _tex_coords; };
 
@@ -114,6 +115,13 @@ public:
   bool has_fatigue() const;
 
 private:
+  bool applyCellUpdate(
+    int x,
+    int z,
+    bool active,
+    std::array<float, 4> const& heights,
+    std::array<float, 4> const& depths);
+  void finishCellUpdates();
   void create_vertices(float height);
 
   void update_min_max();
@@ -147,5 +155,6 @@ private:
   glm::vec3 pos;
   ChunkWater* _chunk;
 
+  friend class ChunkWater;
   friend class MapView;
 };

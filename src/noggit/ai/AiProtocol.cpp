@@ -267,7 +267,7 @@ namespace Noggit::Ai
         }},
         {"height", {
           {"type", "number"},
-          {"description", "Hauteur monde absolue visée au cœur de la forme."},
+          {"description", "Hauteur monde visée si height_mode=absolute ; delta ajouté au relief existant si height_mode=offset."},
           {"minimum", -500.0},
           {"maximum", 5000.0}
         }}
@@ -281,11 +281,19 @@ namespace Noggit::Ai
       {"properties", {
         {"name", {
           {"type", "string"}, {"minLength", 1}, {"maxLength", 64},
-          {"description", "Nom ASCII unique utilisé dans le rapport d'exécution."}
+          {"description", "Nom ASCII unique utilisé dans le rapport et comme graine déterministe des bordures."}
+        }},
+        {"shape", {
+          {"type", "string"}, {"enum", {"corridor", "area"}},
+          {"description", "corridor suit les points ; area ferme au moins trois points en polygone."}
+        }},
+        {"height_mode", {
+          {"type", "string"}, {"enum", {"absolute", "offset"}},
+          {"description", "absolute fixe la hauteur ; offset conserve le relief et ajoute la valeur height."}
         }},
         {"points", {
           {"type", "array"},
-          {"description", "Un point crée une plateforme ; plusieurs points forment un corridor continu."},
+          {"description", "Pour corridor : un point crée une plateforme, plusieurs tracent le chemin. Pour area : 3 à 16 sommets simples avec la même hauteur."},
           {"items", std::move(layout_point_parameters)},
           {"minItems", 1},
           {"maxItems", 16}
@@ -308,8 +316,8 @@ namespace Noggit::Ai
         }}
       }},
       {"required", {
-        "name", "points", "half_width_ratio", "transition_width_ratio",
-        "texture_layer", "priority"
+        "name", "shape", "height_mode", "points", "half_width_ratio",
+        "transition_width_ratio", "texture_layer", "priority"
       }},
       {"additionalProperties", false}
     };
@@ -334,6 +342,18 @@ namespace Noggit::Ai
         {"slope_full_degrees", {
           {"type", {"number", "null"}}, {"minimum", 1.0}, {"maximum", 90.0}
         }},
+        {"edge_noise_ratio", {
+          {"type", "number"}, {"minimum", 0.0}, {"maximum", 0.05},
+          {"description", "Variation déterministe des bordures selon le plus petit côté ; 0 désactive, 0.003 à 0.012 donne un rendu naturel."}
+        }},
+        {"max_slope_degrees", {
+          {"type", {"number", "null"}}, {"minimum", 5.0}, {"maximum", 60.0},
+          {"description", "Élargit automatiquement les transitions trop abruptes ; 25 à 35 convient aux zones jouables, null désactive."}
+        }},
+        {"smoothing_strength", {
+          {"type", "number"}, {"minimum", 0.0}, {"maximum", 1.0},
+          {"description", "Lissage léger du déplacement généré ; 0 désactive, 0.5 à 0.8 convient à un relief naturel."}
+        }},
         {"features", {
           {"type", "array"},
           {"description", "Formes aux noms ASCII uniques, avec au plus 128 segments au total."},
@@ -344,8 +364,97 @@ namespace Noggit::Ai
       }},
       {"required", {
         "texture_paths", "steep_texture_layer", "slope_start_degrees",
-        "slope_full_degrees", "features"
+        "slope_full_degrees", "edge_noise_ratio", "max_slope_degrees",
+        "smoothing_strength", "features"
       }},
+      {"additionalProperties", false}
+    };
+
+    auto liquid_point_parameters = nlohmann::json{
+      {"type", "object"},
+      {"properties", {
+        {"u", {
+          {"type", "number"}, {"minimum", 0.0}, {"maximum", 1.0},
+          {"description", "Position X normalisée dans les bornes des tuiles existantes."}
+        }},
+        {"v", {
+          {"type", "number"}, {"minimum", 0.0}, {"maximum", 1.0},
+          {"description", "Position Z normalisée dans les bornes des tuiles existantes."}
+        }},
+        {"height", {
+          {"type", "number"}, {"minimum", -500.0}, {"maximum", 5000.0},
+          {"description", "Hauteur absolue de la surface du liquide en unités monde."}
+        }}
+      }},
+      {"required", {"u", "v", "height"}},
+      {"additionalProperties", false}
+    };
+
+    auto liquid_feature_parameters = nlohmann::json{
+      {"type", "object"},
+      {"properties", {
+        {"name", {
+          {"type", "string"}, {"minLength", 1}, {"maxLength", 64},
+          {"description", "Nom ASCII unique de la zone liquide."}
+        }},
+        {"shape", {
+          {"type", "string"}, {"enum", {"corridor", "area"}},
+          {"description", "corridor trace une rivière ou un bassin ; area remplit un polygone fermé."}
+        }},
+        {"points", {
+          {"type", "array"},
+          {"items", std::move(liquid_point_parameters)},
+          {"minItems", 1},
+          {"maxItems", 16}
+        }},
+        {"half_width_ratio", {
+          {"type", "number"}, {"minimum", 0.005}, {"maximum", 0.25},
+          {"description", "Demi-largeur du cœur liquide, relative au plus petit côté de la carte."}
+        }},
+        {"transition_width_ratio", {
+          {"type", "number"}, {"minimum", 0.001}, {"maximum", 0.25},
+          {"description", "Largeur où la profondeur visuelle décroît jusqu'à zéro au rivage."}
+        }},
+        {"liquid_type_id", {
+          {"type", "integer"}, {"minimum", 1}, {"maximum", 65535},
+          {"description", "ID terrain eau ou océan de LiquidType.dbc retourné par inspect_map ; au plus 14 IDs distincts par layout."}
+        }},
+        {"depth", {
+          {"type", "number"}, {"minimum", 0.01}, {"maximum", 1.0},
+          {"description", "Profondeur/opacité MH2O normalisée, pas une profondeur en unités monde."}
+        }},
+        {"priority", {
+          {"type", "integer"}, {"minimum", 0}, {"maximum", 100},
+          {"description", "Le liquide de priorité la plus élevée gagne aux croisements."}
+        }}
+      }},
+      {"required", {
+        "name", "shape", "points", "half_width_ratio",
+        "transition_width_ratio", "liquid_type_id", "depth", "priority"
+      }},
+      {"additionalProperties", false}
+    };
+
+    auto liquid_layout_parameters = nlohmann::json{
+      {"type", "object"},
+      {"properties", {
+        {"replace_existing", {
+          {"type", "boolean"},
+          {"description", "Efface toute eau existante avant l'application. Utiliser true seulement pour une refonte globale ; en mode fusion, l'union des IDs existants et nouveaux reste limitée à 14 par tuile."}
+        }},
+        {"edge_noise_ratio", {
+          {"type", "number"}, {"minimum", 0.0}, {"maximum", 0.05},
+          {"description", "Irrégularité déterministe des rives relative au plus petit côté de la carte."}
+        }},
+        {"features", {
+          {"type", "array"},
+          {"description", "Une à 32 zones d'eau ou d'océan, avec au plus 128 segments et 14 IDs distincts au total."},
+          {"items", std::move(liquid_feature_parameters)},
+          {"minItems", 1},
+          {"maxItems", 32}
+        }}
+      }},
+      {"required", {"replace_existing", "edge_noise_ratio", "features"}},
       {"additionalProperties", false}
     };
 
@@ -402,8 +511,15 @@ namespace Noggit::Ai
       {
         {"type", "function"},
         {"name", "apply_terrain_layout_on_map"},
-        {"description", "Applique sur toute la carte un layout de terrain et de textures décrit en coordonnées normalisées. Une feature avec un point crée une plateforme ; avec plusieurs points, elle crée un corridor. Les paramètres de pente doivent être tous null ou tous renseignés. Opération globale sauvegardée tuile par tuile, non annulable avec Ctrl+Z, réservée à un plan approuvé."},
+        {"description", "Applique sur toute la carte un layout naturel de terrain et de textures décrit en coordonnées normalisées : plateformes, corridors et zones polygonales, en hauteur absolue ou relative. Les paramètres de texture de pente doivent être tous null ou tous renseignés. Opération globale sauvegardée tuile par tuile, non annulable avec Ctrl+Z, réservée à un plan approuvé."},
         {"parameters", std::move(terrain_layout_parameters)},
+        {"strict", true}
+      },
+      {
+        {"type", "function"},
+        {"name", "apply_liquid_layout_on_map"},
+        {"description", "Crée de vraies surfaces liquides MH2O sur les tuiles existantes à partir de corridors et zones normalisés. Utilise un ID terrain LiquidType.dbc retourné par inspect_map. Opération globale sauvegardée tuile par tuile, non annulable avec Ctrl+Z, réservée à un plan approuvé."},
+        {"parameters", std::move(liquid_layout_parameters)},
         {"strict", true}
       },
       {
@@ -423,7 +539,7 @@ namespace Noggit::Ai
       {
         {"type", "function"},
         {"name", "validate_map"},
-        {"description", "Relit toutes les tuiles existantes et vérifie les 256 chunks de chacune : plage de hauteurs, chunks sans texture et pixels réellement mélangés. À appeler après les opérations globales avant d'annoncer leur réussite."},
+        {"description", "Relit toutes les tuiles existantes et vérifie terrain, textures réellement visibles et cellules liquides MH2O. À appeler après les opérations globales avant d'annoncer leur réussite."},
         {"parameters", context_parameters},
         {"strict", true}
       },

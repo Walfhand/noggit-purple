@@ -5,6 +5,8 @@
 #include <noggit/MapHeaders.h>
 #include <noggit/tool_enums.hpp>
 
+#include <array>
+#include <cstddef>
 #include <vector>
 
 class MapChunk;
@@ -23,6 +25,24 @@ namespace util
 class ChunkWater
 {
 public:
+  struct CellUpdate
+  {
+    bool touched = false;
+    bool active = false;
+    int liquid_id = LIQUID_WATER;
+    // Corner order: top-left, top-right, bottom-left, bottom-right.
+    std::array<float, 4> vertex_heights = {};
+    std::array<float, 4> vertex_depths = {1.0f, 1.0f, 1.0f, 1.0f};
+  };
+
+  struct CellUpdateStats
+  {
+    std::size_t changed_cells = 0;
+    std::size_t cropped_cells = 0;
+  };
+
+  using CellUpdates = std::array<CellUpdate, 8 * 8>;
+
   ChunkWater() = delete;
   explicit ChunkWater(MapChunk* chunk, TileWater* water_tile, float x, float z, bool use_mclq_green_lava);
 
@@ -71,6 +91,13 @@ public:
                   , MapChunk* chunk
                   , float opacity_factor
                   );
+
+  // Touched cells become a single surface. Untouched cells are preserved unless
+  // replace_existing is set, in which case the update replaces the whole chunk.
+  CellUpdateStats applyCellUpdates(
+    CellUpdates const& updates,
+    bool replace_existing,
+    MapChunk* terrain);
 
   MapChunk* getChunk();
   TileWater* getWaterTile();

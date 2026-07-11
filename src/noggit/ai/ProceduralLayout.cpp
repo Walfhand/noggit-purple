@@ -20,6 +20,8 @@ namespace Noggit::Ai
     constexpr std::size_t max_texture_paths = 4;
     constexpr std::size_t max_points_per_feature = 16;
     constexpr std::size_t max_total_segments = 128;
+    constexpr float minimum_layout_height = -500.0f;
+    constexpr float maximum_layout_height = 5000.0f;
 
     bool hasExactFields(nlohmann::json const& object, std::set<std::string> const& fields)
     {
@@ -98,14 +100,151 @@ namespace Noggit::Ai
       return ratio * ratio * (3.0f - 2.0f * ratio);
     }
 
-    struct FeatureDistance
+    float cross(
+      ProceduralLayoutPoint const& a,
+      ProceduralLayoutPoint const& b,
+      ProceduralLayoutPoint const& c)
     {
-      float distance = std::numeric_limits<float>::max();
-      float height = 0.0f;
-    };
+      return (b.u - a.u) * (c.v - a.v) - (b.v - a.v) * (c.u - a.u);
+    }
 
-    FeatureDistance distanceToFeature(
-      ProceduralLayoutFeature const& feature,
+    bool pointOnSegment(
+      ProceduralLayoutPoint const& point,
+      ProceduralLayoutPoint const& a,
+      ProceduralLayoutPoint const& b)
+    {
+      constexpr float epsilon = 1.0e-6f;
+      return std::abs(cross(a, b, point)) <= epsilon
+        && point.u >= std::min(a.u, b.u) - epsilon
+        && point.u <= std::max(a.u, b.u) + epsilon
+        && point.v >= std::min(a.v, b.v) - epsilon
+        && point.v <= std::max(a.v, b.v) + epsilon;
+    }
+
+    bool segmentsIntersect(
+      ProceduralLayoutPoint const& a,
+      ProceduralLayoutPoint const& b,
+      ProceduralLayoutPoint const& c,
+      ProceduralLayoutPoint const& d)
+    {
+      auto const ab_c = cross(a, b, c);
+      auto const ab_d = cross(a, b, d);
+      auto const cd_a = cross(c, d, a);
+      auto const cd_b = cross(c, d, b);
+      constexpr float epsilon = 1.0e-6f;
+      auto opposite = [=](float first, float second)
+      {
+        return (first > epsilon && second < -epsilon)
+          || (first < -epsilon && second > epsilon);
+      };
+      if (opposite(ab_c, ab_d) && opposite(cd_a, cd_b))
+      {
+        return true;
+      }
+      return (std::abs(ab_c) <= epsilon && pointOnSegment(c, a, b))
+        || (std::abs(ab_d) <= epsilon && pointOnSegment(d, a, b))
+        || (std::abs(cd_a) <= epsilon && pointOnSegment(a, c, d))
+        || (std::abs(cd_b) <= epsilon && pointOnSegment(b, c, d));
+    }
+
+    bool isSimpleAreaImpl(std::vector<ProceduralLayoutPoint> const& points)
+    {
+      if (points.size() < 3)
+      {
+        return false;
+      }
+
+      constexpr float epsilon = 1.0e-6f;
+      auto signed_area = 0.0f;
+      for (std::size_t index = 0; index < points.size(); ++index)
+      {
+        auto const& current = points[index];
+        auto const& next = points[(index + 1) % points.size()];
+        signed_area += current.u * next.v - next.u * current.v;
+        if (std::abs(current.height - points.front().height) > epsilon)
+        {
+          return false;
+        }
+        for (std::size_t other = index + 1; other < points.size(); ++other)
+        {
+          if (current.u == points[other].u && current.v == points[other].v)
+          {
+            return false;
+          }
+        }
+      }
+      if (std::abs(signed_area) <= epsilon)
+      {
+        return false;
+      }
+
+      for (std::size_t first = 0; first < points.size(); ++first)
+      {
+        auto const first_next = (first + 1) % points.size();
+        for (std::size_t second = first + 1; second < points.size(); ++second)
+        {
+          auto const second_next = (second + 1) % points.size();
+          if (first == second || first_next == second || second_next == first)
+          {
+            continue;
+          }
+          if (segmentsIntersect(
+                points[first], points[first_next],
+                points[second], points[second_next]))
+          {
+            return false;
+          }
+        }
+      }
+      return true;
+    }
+
+    std::uint32_t stableHash(std::string const& value)
+    {
+      auto hash = std::uint32_t{2166136261U};
+      for (auto const character : value)
+      {
+        hash ^= static_cast<unsigned char>(character);
+        hash *= 16777619U;
+      }
+      return hash;
+    }
+
+    float gridNoise(int x, int z, std::uint32_t seed)
+    {
+      auto value = static_cast<std::uint32_t>(x) * 0x9e3779b9U
+        ^ static_cast<std::uint32_t>(z) * 0x85ebca6bU ^ seed;
+      value ^= value >> 16U;
+      value *= 0x7feb352dU;
+      value ^= value >> 15U;
+      value *= 0x846ca68bU;
+      value ^= value >> 16U;
+      return static_cast<float>(value & 0x00ffffffU) / 8388607.5f - 1.0f;
+    }
+
+    float valueNoise(float x, float z, std::uint32_t seed)
+    {
+      auto const x0 = static_cast<int>(std::floor(x));
+      auto const z0 = static_cast<int>(std::floor(z));
+      auto const tx = smooth(0.0f, 1.0f, x - static_cast<float>(x0));
+      auto const tz = smooth(0.0f, 1.0f, z - static_cast<float>(z0));
+      auto const top = gridNoise(x0, z0, seed)
+        + (gridNoise(x0 + 1, z0, seed) - gridNoise(x0, z0, seed)) * tx;
+      auto const bottom = gridNoise(x0, z0 + 1, seed)
+        + (gridNoise(x0 + 1, z0 + 1, seed) - gridNoise(x0, z0 + 1, seed)) * tx;
+      return top + (bottom - top) * tz;
+    }
+
+    float edgeNoiseImpl(float x, float z, std::string const& name)
+    {
+      auto const seed = stableHash(name);
+      return 0.65f * valueNoise(x * 6.0f, z * 6.0f, seed)
+        + 0.35f * valueNoise(x * 15.0f, z * 15.0f, seed ^ 0xa511e9b3U);
+    }
+
+    ProceduralShapeDistance distanceToShapeImpl(
+      std::vector<ProceduralLayoutPoint> const& points,
+      ProceduralLayoutShape shape,
       float sample_x,
       float sample_z,
       float scale_x,
@@ -116,20 +255,27 @@ namespace Noggit::Ai
         return std::array<float, 2>{point.u * scale_x, point.v * scale_z};
       };
 
-      if (feature.points.size() == 1)
+      if (points.empty())
       {
-        auto const point = scaledPoint(feature.points.front());
+        return {std::numeric_limits<float>::max(), 0.0f};
+      }
+
+      if (shape == ProceduralLayoutShape::Corridor && points.size() == 1)
+      {
+        auto const point = scaledPoint(points.front());
         return {
           std::hypot(sample_x - point[0], sample_z - point[1]),
-          feature.points.front().height
+          points.front().height
         };
       }
 
-      FeatureDistance result;
-      for (std::size_t index = 1; index < feature.points.size(); ++index)
+      ProceduralShapeDistance result{std::numeric_limits<float>::max(), 0.0f};
+      auto const segment_count = shape == ProceduralLayoutShape::Area
+        ? points.size() : points.size() - 1;
+      for (std::size_t index = 0; index < segment_count; ++index)
       {
-        auto const& first = feature.points[index - 1];
-        auto const& second = feature.points[index];
+        auto const& first = points[index];
+        auto const& second = points[(index + 1) % points.size()];
         auto const a = scaledPoint(first);
         auto const b = scaledPoint(second);
         auto const dx = b[0] - a[0];
@@ -150,23 +296,45 @@ namespace Noggit::Ai
         }
       }
 
+      if (shape == ProceduralLayoutShape::Area)
+      {
+        auto inside = false;
+        for (std::size_t current = 0, previous = points.size() - 1;
+             current < points.size(); previous = current++)
+        {
+          auto const a = scaledPoint(points[current]);
+          auto const b = scaledPoint(points[previous]);
+          if ((a[1] > sample_z) != (b[1] > sample_z)
+              && sample_x < (b[0] - a[0]) * (sample_z - a[1])
+                   / (b[1] - a[1]) + a[0])
+          {
+            inside = !inside;
+          }
+        }
+        result.distance = inside ? -result.distance : result.distance;
+        result.height = points.front().height;
+      }
+
       return result;
     }
 
-    float featureMask(ProceduralLayoutFeature const& feature, float distance)
+    float shapeMaskImpl(
+      float half_width,
+      float transition_width,
+      float distance)
     {
-      if (distance <= feature.half_width_ratio)
+      if (distance <= half_width)
       {
         return 1.0f;
       }
-      if (feature.transition_width_ratio == 0.0f)
+      if (transition_width == 0.0f)
       {
         return 0.0f;
       }
 
       return 1.0f - smooth(
-        feature.half_width_ratio,
-        feature.half_width_ratio + feature.transition_width_ratio,
+        half_width,
+        half_width + transition_width,
         distance);
     }
 
@@ -217,15 +385,47 @@ namespace Noggit::Ai
     }
   }
 
+  bool isSimpleProceduralArea(std::vector<ProceduralLayoutPoint> const& points)
+  {
+    return isSimpleAreaImpl(points);
+  }
+
+  ProceduralShapeDistance distanceToProceduralShape(
+    std::vector<ProceduralLayoutPoint> const& points,
+    ProceduralLayoutShape shape,
+    float sample_x,
+    float sample_z,
+    float scale_x,
+    float scale_z)
+  {
+    return distanceToShapeImpl(
+      points, shape, sample_x, sample_z, scale_x, scale_z);
+  }
+
+  float proceduralShapeMask(
+    float half_width_ratio,
+    float transition_width_ratio,
+    float distance)
+  {
+    return shapeMaskImpl(
+      half_width_ratio, transition_width_ratio, distance);
+  }
+
+  float proceduralEdgeNoise(float x, float z, std::string const& name)
+  {
+    return edgeNoiseImpl(x, z, name);
+  }
+
   ProceduralLayoutParseResult parseProceduralLayout(nlohmann::json const& arguments)
   {
     static auto const root_fields = std::set<std::string>{
       "texture_paths", "steep_texture_layer", "slope_start_degrees",
-      "slope_full_degrees", "features"
+      "slope_full_degrees", "edge_noise_ratio", "max_slope_degrees",
+      "smoothing_strength", "features"
     };
     static auto const feature_fields = std::set<std::string>{
       "name", "points", "half_width_ratio", "transition_width_ratio",
-      "texture_layer", "priority"
+      "texture_layer", "priority", "shape", "height_mode"
     };
     static auto const point_fields = std::set<std::string>{"u", "v", "height"};
 
@@ -237,7 +437,8 @@ namespace Noggit::Ai
     if (!hasExactFields(arguments, root_fields))
     {
       return fail("Le layout exige exactement texture_paths, steep_texture_layer, "
-                  "slope_start_degrees, slope_full_degrees et features.");
+                  "slope_start_degrees, slope_full_degrees, edge_noise_ratio, "
+                  "max_slope_degrees, smoothing_strength et features.");
     }
 
     auto const& texture_paths = arguments.at("texture_paths");
@@ -294,6 +495,24 @@ namespace Noggit::Ai
       };
     }
 
+    if (!readFiniteFloat(arguments.at("edge_noise_ratio"), layout.edge_noise_ratio)
+        || layout.edge_noise_ratio < 0.0f || layout.edge_noise_ratio > 0.05f
+        || !readFiniteFloat(arguments.at("smoothing_strength"), layout.smoothing_strength)
+        || layout.smoothing_strength < 0.0f || layout.smoothing_strength > 1.0f)
+    {
+      return fail("edge_noise_ratio doit être dans [0,0.05] et smoothing_strength dans [0,1].");
+    }
+    auto const& max_slope = arguments.at("max_slope_degrees");
+    if (!max_slope.is_null())
+    {
+      float degrees = 0.0f;
+      if (!readFiniteFloat(max_slope, degrees) || degrees < 5.0f || degrees > 60.0f)
+      {
+        return fail("max_slope_degrees doit être null ou compris dans [5,60].");
+      }
+      layout.max_slope_degrees = degrees;
+    }
+
     auto const& features = arguments.at("features");
     if (!features.is_array() || features.empty()
         || features.size() > procedural_layout_max_features)
@@ -314,7 +533,7 @@ namespace Noggit::Ai
       if (!hasExactFields(feature_value, feature_fields))
       {
         return fail("Chaque feature exige exactement name, points, half_width_ratio, "
-                    "transition_width_ratio, texture_layer et priority.");
+                    "transition_width_ratio, texture_layer, priority, shape et height_mode.");
       }
 
       auto const& name_value = feature_value.at("name");
@@ -326,6 +545,43 @@ namespace Noggit::Ai
       }
 
       ProceduralLayoutFeature feature;
+      auto const& shape = feature_value.at("shape");
+      auto const& height_mode = feature_value.at("height_mode");
+      if (!shape.is_string() || !height_mode.is_string())
+      {
+        return fail("shape et height_mode doivent être des chaînes.");
+      }
+      auto const shape_name = shape.get<std::string>();
+      auto const height_mode_name = height_mode.get<std::string>();
+      if (shape_name == "corridor")
+      {
+        feature.shape = ProceduralLayoutShape::Corridor;
+      }
+      else if (shape_name == "area")
+      {
+        feature.shape = ProceduralLayoutShape::Area;
+      }
+      else
+      {
+        return fail("shape doit valoir corridor ou area.");
+      }
+      if (height_mode_name == "absolute")
+      {
+        feature.height_mode = ProceduralLayoutHeightMode::Absolute;
+      }
+      else if (height_mode_name == "offset")
+      {
+        feature.height_mode = ProceduralLayoutHeightMode::Offset;
+      }
+      else
+      {
+        return fail("height_mode doit valoir absolute ou offset.");
+      }
+      if (feature.shape == ProceduralLayoutShape::Area && points.size() < 3)
+      {
+        return fail("Une area exige entre trois et 16 points.");
+      }
+
       feature.name = name_value.get<std::string>();
       if (feature.name.empty() || feature.name.size() > 64
           || !isPrintableAscii(feature.name)
@@ -334,7 +590,8 @@ namespace Noggit::Ai
         return fail("Les noms de feature doivent être ASCII imprimables, uniques et limités à 64 caractères.");
       }
 
-      total_segments += points.size() - 1;
+      total_segments += feature.shape == ProceduralLayoutShape::Area
+        ? points.size() : points.size() - 1;
       if (total_segments > max_total_segments)
       {
         return fail("Le layout ne peut pas dépasser 128 segments au total.");
@@ -352,7 +609,8 @@ namespace Noggit::Ai
             || !readFiniteFloat(point_value.at("height"), point.height)
             || point.u < 0.0f || point.u > 1.0f
             || point.v < 0.0f || point.v > 1.0f
-            || point.height < -500.0f || point.height > 5000.0f)
+            || point.height < minimum_layout_height
+            || point.height > maximum_layout_height)
         {
           return fail("u et v doivent être dans [0,1] et height dans [-500,5000].");
         }
@@ -363,6 +621,12 @@ namespace Noggit::Ai
           return fail("Deux points consécutifs d'une feature ne peuvent pas avoir les mêmes coordonnées.");
         }
         feature.points.emplace_back(point);
+      }
+
+      if (feature.shape == ProceduralLayoutShape::Area
+          && !isSimpleProceduralArea(feature.points))
+      {
+        return fail("Une area doit être un polygone simple, non dégénéré, avec la même hauteur à chaque point.");
       }
 
       if (!readFiniteFloat(feature_value.at("half_width_ratio"), feature.half_width_ratio)
@@ -455,9 +719,42 @@ namespace Noggit::Ai
       {
         continue;
       }
-      auto const nearest = distanceToFeature(
-        feature, sample_x, sample_z, scale_x, scale_z);
-      auto const mask = featureMask(feature, nearest.distance);
+      auto const nearest = distanceToProceduralShape(
+        feature.points, feature.shape, sample_x, sample_z, scale_x, scale_z);
+      auto distance = nearest.distance;
+      auto const target_height = feature.height_mode == ProceduralLayoutHeightMode::Offset
+        ? std::clamp(sample.height + nearest.height,
+                     minimum_layout_height, maximum_layout_height)
+        : nearest.height;
+      auto transition_width = feature.transition_width_ratio;
+      // ponytail: analytic widening bounds the generated transition on a flat
+      // source; use a global vertex graph only if arbitrary source slopes need
+      // a hard guarantee.
+      if (layout.max_slope_degrees
+          && std::isfinite(*layout.max_slope_degrees)
+          && *layout.max_slope_degrees >= 5.0f
+          && *layout.max_slope_degrees <= 60.0f)
+      {
+        constexpr float degrees_to_radians = 0.017453292519943295f;
+        auto const maximum_gradient = std::tan(
+          *layout.max_slope_degrees * degrees_to_radians);
+        auto const minimum_transition = 1.5f
+          * std::abs(target_height - sample.height)
+          / (maximum_gradient * minimum_dimension);
+        transition_width = std::max(transition_width, minimum_transition);
+      }
+      if (layout.edge_noise_ratio > 0.0f)
+      {
+        auto const amplitude = std::min(
+          layout.edge_noise_ratio, feature.half_width_ratio * 0.75f);
+        if (distance <= feature.half_width_ratio + transition_width + amplitude)
+        {
+          distance += amplitude
+            * proceduralEdgeNoise(sample_x, sample_z, feature.name);
+        }
+      }
+      auto const mask = proceduralShapeMask(
+        feature.half_width_ratio, transition_width, distance);
       sample.feature_masks[index] = mask;
       if (mask <= 0.0f)
       {
@@ -466,7 +763,7 @@ namespace Noggit::Ai
 
       // ponytail: transitions are one-shot; preserve source heights only if
       // repeatable layout reapplication becomes a real editing workflow.
-      sample.height += (nearest.height - sample.height) * mask;
+      sample.height += (target_height - sample.height) * mask;
       for (std::size_t layer = 0; layer < layer_count; ++layer)
       {
         sample.semantic_weights[layer] *= 1.0f - mask;
@@ -506,5 +803,59 @@ namespace Noggit::Ai
       sample.semantic_weights,
       layer_count);
     return sample;
+  }
+
+  float sampleSmoothedProceduralLayoutHeight(
+    ProceduralLayout const& layout,
+    float u,
+    float v,
+    float original_height,
+    float map_width,
+    float map_height,
+    float sample_spacing_world)
+  {
+    auto const center_sample = sampleProceduralLayout(
+      layout, u, v, original_height, 0.0f, map_width, map_height);
+    auto const center = center_sample.height;
+    if (layout.smoothing_strength <= 0.0f
+        || !std::isfinite(sample_spacing_world) || sample_spacing_world <= 0.0f
+        || !std::isfinite(map_width) || map_width <= 0.0f
+        || !std::isfinite(map_height) || map_height <= 0.0f)
+    {
+      return center;
+    }
+    if (std::any_of(
+          center_sample.feature_masks.begin(), center_sample.feature_masks.end(),
+          [](float mask) { return mask >= 0.999f; }))
+    {
+      return center;
+    }
+    if (std::none_of(
+          center_sample.feature_masks.begin(), center_sample.feature_masks.end(),
+          [](float mask) { return mask > 0.0f; }))
+    {
+      return center;
+    }
+
+    auto const du = sample_spacing_world / map_width;
+    auto const dv = sample_spacing_world / map_height;
+    // ponytail: filter only the analytic displacement to stay streaming and
+    // seam-safe; a true source-terrain blur would require a global snapshot.
+    auto filtered_delta = 0.5f * (center - original_height);
+    for (auto const& offset : std::array<std::array<float, 2>, 4>{
+           std::array<float, 2>{-du, -dv}, {du, -dv}, {-du, dv}, {du, dv}})
+    {
+      auto const neighbor = sampleProceduralLayout(
+        layout,
+        std::clamp(u + offset[0], 0.0f, 1.0f),
+        std::clamp(v + offset[1], 0.0f, 1.0f),
+        original_height, 0.0f, map_width, map_height).height;
+      filtered_delta += 0.125f * (neighbor - original_height);
+    }
+
+    auto const center_delta = center - original_height;
+    return original_height + center_delta
+      + (filtered_delta - center_delta)
+        * std::clamp(layout.smoothing_strength, 0.0f, 1.0f);
   }
 }

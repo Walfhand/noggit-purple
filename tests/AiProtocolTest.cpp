@@ -47,10 +47,11 @@ int main()
 {
   auto const tools = Noggit::Ai::toolDefinitions();
   require(tools.is_array(), "tools must be an array");
-  require(tools.size() == 13, "unexpected tool count");
+  require(tools.size() == 14, "unexpected tool count");
 
   std::set<std::string> tool_names;
   nlohmann::json const* terrain_layout = nullptr;
+  nlohmann::json const* liquid_layout = nullptr;
 
   for (auto const& tool : tools)
   {
@@ -58,6 +59,10 @@ int main()
     if (tool.at("name") == "apply_terrain_layout_on_map")
     {
       terrain_layout = &tool;
+    }
+    if (tool.at("name") == "apply_liquid_layout_on_map")
+    {
+      liquid_layout = &tool;
     }
     require(tool.at("type") == "function", "tool type must be function");
     require(tool.at("strict") == true, "tool must use strict mode");
@@ -88,6 +93,8 @@ int main()
           "generate_terrain_on_map tool is missing");
   require(tool_names.count("apply_terrain_layout_on_map") == 1,
           "apply_terrain_layout_on_map tool is missing");
+  require(tool_names.count("apply_liquid_layout_on_map") == 1,
+          "apply_liquid_layout_on_map tool is missing");
   require(tool_names.count("set_base_texture_on_map") == 1,
           "set_base_texture_on_map tool is missing");
   require(tool_names.count("blend_terrain_textures_on_map") == 1,
@@ -111,6 +118,41 @@ int main()
             && layout_properties.at("slope_full_degrees").at("type")
             == nlohmann::json::array({"number", "null"}),
           "terrain layout steep parameters must stay nullable");
+  require(layout_properties.at("edge_noise_ratio").at("minimum") == 0.0
+            && layout_properties.at("edge_noise_ratio").at("maximum") == 0.05
+            && layout_properties.at("max_slope_degrees").at("type")
+              == nlohmann::json::array({"number", "null"})
+            && layout_properties.at("max_slope_degrees").at("minimum") == 5.0
+            && layout_properties.at("max_slope_degrees").at("maximum") == 60.0
+            && layout_properties.at("smoothing_strength").at("minimum") == 0.0
+            && layout_properties.at("smoothing_strength").at("maximum") == 1.0,
+          "terrain layout naturalization bounds changed");
+  auto const& feature_properties = layout_properties.at("features")
+    .at("items").at("properties");
+  require(feature_properties.at("shape").at("enum")
+            == nlohmann::json::array({"corridor", "area"})
+            && feature_properties.at("height_mode").at("enum")
+              == nlohmann::json::array({"absolute", "offset"}),
+          "terrain layout feature modes changed");
+
+  require(liquid_layout != nullptr, "liquid layout schema is missing");
+  auto const& liquid_properties = liquid_layout->at("parameters").at("properties");
+  require(liquid_properties.at("replace_existing").at("type") == "boolean"
+            && liquid_properties.at("edge_noise_ratio").at("minimum") == 0.0
+            && liquid_properties.at("edge_noise_ratio").at("maximum") == 0.05,
+          "liquid layout root contract changed");
+  require(liquid_properties.at("features").at("minItems") == 1
+            && liquid_properties.at("features").at("maxItems") == 32,
+          "liquid layout feature count changed");
+  auto const& liquid_feature_properties = liquid_properties.at("features")
+    .at("items").at("properties");
+  require(liquid_feature_properties.at("shape").at("enum")
+            == nlohmann::json::array({"corridor", "area"})
+            && liquid_feature_properties.at("liquid_type_id").at("minimum") == 1
+            && liquid_feature_properties.at("liquid_type_id").at("maximum") == 65535
+            && liquid_feature_properties.at("depth").at("minimum") == 0.01
+            && liquid_feature_properties.at("depth").at("maximum") == 1.0,
+          "liquid layout feature contract changed");
 
   require(std::abs(Noggit::Ai::terrainRatio("plains", -1.0f, 1.0f) - 0.4f) < 0.0001f,
           "plains terrain ratio changed");

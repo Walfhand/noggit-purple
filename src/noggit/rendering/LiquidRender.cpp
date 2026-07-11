@@ -94,6 +94,10 @@ void LiquidRender::updateLayerData(LiquidTextureManager* tex_manager)
     std::size_t layer_counter = 0;
     for(;;)
     {
+      if (layer_counter < _render_layers.size())
+      {
+        _render_layers[layer_counter].texture_samplers.clear();
+      }
       std::size_t n_chunks = 0;
       for (std::size_t z = 0; z < 16; ++z)
       {

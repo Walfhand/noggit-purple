@@ -42,9 +42,14 @@ namespace
       {"steep_texture_layer", 2},
       {"slope_start_degrees", 30.0},
       {"slope_full_degrees", 50.0},
+      {"edge_noise_ratio", 0.0},
+      {"max_slope_degrees", nullptr},
+      {"smoothing_strength", 0.0},
       {"features", {
         {
           {"name", "middle_lane"},
+          {"shape", "corridor"},
+          {"height_mode", "absolute"},
           {"points", {
             {{"u", 0.1}, {"v", 0.5}, {"height", 10.0}},
             {{"u", 0.9}, {"v", 0.5}, {"height", 30.0}}
@@ -56,6 +61,8 @@ namespace
         },
         {
           {"name", "blue_base"},
+          {"shape", "corridor"},
+          {"height_mode", "absolute"},
           {"points", {
             {{"u", 0.1}, {"v", 0.9}, {"height", 10.0}}
           }},
@@ -127,6 +134,21 @@ int main()
   require(!Noggit::Ai::parseProceduralLayout(partial_steep).layout,
           "partial steep override was accepted");
 
+  auto bad_noise = validArguments();
+  bad_noise["edge_noise_ratio"] = 0.051;
+  require(!Noggit::Ai::parseProceduralLayout(bad_noise).layout,
+          "out-of-range edge noise was accepted");
+
+  auto bad_max_slope = validArguments();
+  bad_max_slope["max_slope_degrees"] = 4.9;
+  require(!Noggit::Ai::parseProceduralLayout(bad_max_slope).layout,
+          "out-of-range maximum slope was accepted");
+
+  auto bad_smoothing = validArguments();
+  bad_smoothing["smoothing_strength"] = 1.1;
+  require(!Noggit::Ai::parseProceduralLayout(bad_smoothing).layout,
+          "out-of-range smoothing strength was accepted");
+
   auto extra_field = validArguments();
   extra_field["unexpected"] = true;
   require(!Noggit::Ai::parseProceduralLayout(extra_field).layout,
@@ -158,6 +180,16 @@ int main()
   require(!Noggit::Ai::parseProceduralLayout(bad_priority).layout,
           "out-of-range priority was accepted");
 
+  auto bad_shape = validArguments();
+  bad_shape["features"][0]["shape"] = "spline";
+  require(!Noggit::Ai::parseProceduralLayout(bad_shape).layout,
+          "unknown feature shape was accepted");
+
+  auto bad_height_mode = validArguments();
+  bad_height_mode["features"][0]["height_mode"] = "relative";
+  require(!Noggit::Ai::parseProceduralLayout(bad_height_mode).layout,
+          "unknown feature height mode was accepted");
+
   auto bad_layer = validArguments();
   bad_layer["features"][0]["texture_layer"] = 3;
   require(!Noggit::Ai::parseProceduralLayout(bad_layer).layout,
@@ -168,6 +200,31 @@ int main()
   duplicate_point["features"][0]["points"][1]["v"] = 0.5;
   require(!Noggit::Ai::parseProceduralLayout(duplicate_point).layout,
           "duplicate consecutive feature points were accepted");
+
+  auto short_area = validArguments();
+  short_area["features"][0]["shape"] = "area";
+  require(!Noggit::Ai::parseProceduralLayout(short_area).layout,
+          "area with fewer than three points was accepted");
+
+  auto crossed_area = validArguments();
+  crossed_area["features"][0]["shape"] = "area";
+  crossed_area["features"][0]["points"] = {
+    {{"u", 0.1}, {"v", 0.1}, {"height", 10.0}},
+    {{"u", 0.9}, {"v", 0.9}, {"height", 10.0}},
+    {{"u", 0.1}, {"v", 0.9}, {"height", 10.0}},
+    {{"u", 0.9}, {"v", 0.1}, {"height", 10.0}}
+  };
+  require(!Noggit::Ai::parseProceduralLayout(crossed_area).layout,
+          "self-intersecting area was accepted");
+
+  auto varying_area = crossed_area;
+  varying_area["features"][0]["points"] = {
+    {{"u", 0.1}, {"v", 0.1}, {"height", 10.0}},
+    {{"u", 0.9}, {"v", 0.1}, {"height", 11.0}},
+    {{"u", 0.5}, {"v", 0.9}, {"height", 10.0}}
+  };
+  require(!Noggit::Ai::parseProceduralLayout(varying_area).layout,
+          "area with ambiguous vertex heights was accepted");
 
   auto too_many_points = validArguments();
   auto& oversized_points = too_many_points["features"][0]["points"];
@@ -250,6 +307,104 @@ int main()
   requireClose(outside.height, 7.0f, "outside terrain height was modified");
   require(outside.quantized_weights[0] == 255,
           "outside terrain did not keep base semantics");
+
+  auto area_layout = baseLayout();
+  auto area = Noggit::Ai::ProceduralLayoutFeature{
+    "jungle_area",
+    {{0.2f, 0.2f, 6.0f}, {0.8f, 0.2f, 6.0f},
+     {0.7f, 0.8f, 6.0f}, {0.3f, 0.8f, 6.0f}},
+    0.005f,
+    0.05f,
+    1,
+    0
+  };
+  area.shape = Noggit::Ai::ProceduralLayoutShape::Area;
+  area.height_mode = Noggit::Ai::ProceduralLayoutHeightMode::Offset;
+  area_layout.features.push_back(area);
+  auto const area_inside = Noggit::Ai::sampleProceduralLayout(
+    area_layout, 0.5f, 0.5f, 20.0f, 0.0f, 100.0f, 100.0f);
+  auto const area_outside = Noggit::Ai::sampleProceduralLayout(
+    area_layout, 0.05f, 0.5f, 20.0f, 0.0f, 100.0f, 100.0f);
+  requireClose(area_inside.height, 26.0f,
+               "relative area did not preserve and offset source relief");
+  requireClose(area_inside.feature_masks[0], 1.0f,
+               "polygon interior is not a full core");
+  requireClose(area_outside.height, 20.0f,
+               "polygon modified terrain outside its transition");
+
+  auto bounded_offset = area_layout;
+  for (auto& point : bounded_offset.features.front().points)
+  {
+    point.height = 5000.0f;
+  }
+  requireClose(Noggit::Ai::sampleProceduralLayout(
+                 bounded_offset, 0.5f, 0.5f, 100.0f,
+                 0.0f, 100.0f, 100.0f).height,
+               5000.0f,
+               "relative features escaped the supported height range");
+
+  auto slope_limited = layout;
+  slope_limited.max_slope_degrees = 30.0f;
+  auto const formerly_outside = Noggit::Ai::sampleProceduralLayout(
+    slope_limited, 0.8f, 0.5f, 0.0f, 0.0f, 100.0f, 100.0f);
+  require(formerly_outside.height > 0.0f,
+          "maximum slope did not widen an abrupt transition");
+  requireClose(Noggit::Ai::sampleProceduralLayout(
+                 slope_limited, 0.5f, 0.5f, 0.0f, 0.0f, 100.0f, 100.0f).height,
+               50.0f,
+               "maximum slope prevented the core from reaching its target");
+
+  auto noisy = area_layout;
+  noisy.edge_noise_ratio = 0.03f;
+  auto noise_changed_boundary = false;
+  for (int sample = 0; sample <= 40; ++sample)
+  {
+    auto const v = static_cast<float>(sample) / 40.0f;
+    auto const plain = Noggit::Ai::sampleProceduralLayout(
+      area_layout, 0.15f, v, 20.0f, 0.0f, 100.0f, 100.0f);
+    auto const natural = Noggit::Ai::sampleProceduralLayout(
+      noisy, 0.15f, v, 20.0f, 0.0f, 100.0f, 100.0f);
+    noise_changed_boundary = noise_changed_boundary
+      || plain.height != natural.height;
+    auto const repeated = Noggit::Ai::sampleProceduralLayout(
+      noisy, 0.15f, v, 20.0f, 0.0f, 100.0f, 100.0f);
+    require(natural.height == repeated.height,
+            "edge naturalization is not deterministic");
+  }
+  require(noise_changed_boundary,
+          "edge naturalization did not alter any boundary sample");
+
+  auto tiny_noisy_area = baseLayout();
+  auto tiny_area = area;
+  tiny_area.points = {
+    {0.495f, 0.495f, 2.0f}, {0.505f, 0.495f, 2.0f},
+    {0.505f, 0.505f, 2.0f}, {0.495f, 0.505f, 2.0f}
+  };
+  tiny_area.transition_width_ratio = 0.001f;
+  tiny_noisy_area.features.push_back(tiny_area);
+  tiny_noisy_area.edge_noise_ratio = 0.05f;
+  requireClose(Noggit::Ai::sampleProceduralLayout(
+                 tiny_noisy_area, 0.5f, 0.5f, 10.0f,
+                 0.0f, 100.0f, 100.0f).feature_masks[0],
+               1.0f,
+               "edge noise removed the core of a small valid area");
+
+  auto smoothed = layout;
+  smoothed.smoothing_strength = 1.0f;
+  auto const raw_boundary = Noggit::Ai::sampleProceduralLayout(
+    smoothed, 0.625f, 0.5f, 0.0f, 0.0f, 100.0f, 100.0f).height;
+  auto const smooth_boundary = Noggit::Ai::sampleSmoothedProceduralLayoutHeight(
+    smoothed, 0.625f, 0.5f, 0.0f, 100.0f, 100.0f, 5.0f);
+  require(smooth_boundary != raw_boundary,
+          "height smoothing did not filter a transition");
+  requireClose(Noggit::Ai::sampleSmoothedProceduralLayoutHeight(
+                 smoothed, 0.705f, 0.5f, 0.0f, 100.0f, 100.0f, 5.0f),
+               0.0f,
+               "height smoothing leaked beyond the semantic mask");
+  requireClose(Noggit::Ai::sampleSmoothedProceduralLayoutHeight(
+                 smoothed, 0.5f, 0.5f, 0.0f, 100.0f, 100.0f, 1.0f),
+               50.0f,
+               "height smoothing changed a wide feature core");
 
   auto corridor_layout = baseLayout();
   corridor_layout.features.push_back({

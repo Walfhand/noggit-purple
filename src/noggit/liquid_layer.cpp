@@ -500,6 +500,11 @@ std::array<liquid_layer::liquid_vertex, 9 * 9>& liquid_layer::getVertices()
   return _vertices;
 }
 
+std::array<liquid_layer::liquid_vertex, 9 * 9> const& liquid_layer::getVertices() const
+{
+  return _vertices;
+}
+
 float liquid_layer::min() const
 {
   return _minimum;
@@ -538,6 +543,36 @@ bool liquid_layer::hasSubchunk(int x, int z, int size) const
 void liquid_layer::setSubchunk(int x, int z, bool water)
 {
   misc::set_bit(_subchunks, x, z, water);
+}
+
+bool liquid_layer::applyCellUpdate(
+  int x,
+  int z,
+  bool active,
+  std::array<float, 4> const& heights,
+  std::array<float, 4> const& depths)
+{
+  auto changed = hasSubchunk(x, z) != active;
+  if (active)
+  {
+    auto const first = z * 9 + x;
+    std::array const indices = {first, first + 1, first + 9, first + 10};
+    for (std::size_t corner = 0; corner < indices.size(); ++corner)
+    {
+      auto& vertex = _vertices[indices[corner]];
+      changed = changed || vertex.position.y != heights[corner]
+        || vertex.depth != depths[corner];
+      vertex.position.y = heights[corner];
+      vertex.depth = depths[corner];
+    }
+  }
+  setSubchunk(x, z, active);
+  return changed;
+}
+
+void liquid_layer::finishCellUpdates()
+{
+  update_min_max();
 }
 
 std::uint64_t liquid_layer::getSubchunks()
@@ -618,20 +653,20 @@ void liquid_layer::update_min_max()
 {
   _minimum = std::numeric_limits<float>::max();
   _maximum = std::numeric_limits<float>::lowest();
-  int x = 0, z = 0;
-
-  for (liquid_vertex& v : _vertices)
+  for (int z = 0; z < 8; ++z)
   {
-    if (hasSubchunk(std::min(x, 7), std::min(z, 7)))
+    for (int x = 0; x < 8; ++x)
     {
-      _maximum = std::max(_maximum, v.position.y);
-      _minimum = std::min(_minimum, v.position.y);
-    }
-
-    if (++x == 9)
-    {
-      z++;
-      x = 0;
+      if (!hasSubchunk(x, z))
+      {
+        continue;
+      }
+      auto const first = z * 9 + x;
+      for (auto const index : {first, first + 1, first + 9, first + 10})
+      {
+        _maximum = std::max(_maximum, _vertices[index].position.y);
+        _minimum = std::min(_minimum, _vertices[index].position.y);
+      }
     }
   }
 

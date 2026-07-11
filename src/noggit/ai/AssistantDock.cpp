@@ -1,16 +1,20 @@
 // This file is part of Noggit3, licensed under GNU General Public License (version 3).
 
 #include <noggit/ai/AssistantDock.hpp>
+#include <noggit/ai/ProceduralLiquidLayout.hpp>
 #include <noggit/ai/ProceduralLayout.hpp>
 
 #include <noggit/ActionManager.hpp>
 #include <noggit/Brush.h>
 #include <noggit/Camera.hpp>
+#include <noggit/ChunkWater.hpp>
+#include <noggit/DBC.h>
 #include <noggit/MapHeaders.h>
 #include <noggit/MapChunk.h>
 #include <noggit/MapTile.h>
 #include <noggit/MapView.h>
 #include <noggit/TileIndex.hpp>
+#include <noggit/TileWater.hpp>
 #include <noggit/World.h>
 #include <noggit/application/NoggitApplication.hpp>
 #include <noggit/scoped_blp_texture_reference.hpp>
@@ -23,6 +27,7 @@
 
 #include <QtCore/QByteArray>
 #include <QtCore/QEvent>
+#include <QtCore/QSettings>
 #include <QtCore/QStringList>
 #include <QtCore/QTimer>
 #include <QtCore/QUrl>
@@ -57,6 +62,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <vector>
 
 namespace Noggit::Ai
@@ -75,6 +81,9 @@ Pour une création, une refonte ou une opération portant sur toute la carte :
 5. appelle validate_map après les opérations globales avant d'annoncer leur réussite.
 Après un relief global naturel, utilise blend_terrain_textures_on_map pour répartir les textures selon la hauteur et la pente. Réserve paint_texture aux retouches locales et ne remplace pas ensuite ce mélange par set_base_texture_on_map.
 Pour créer des routes, rivières, voies, plateformes ou autres formes continues, utilise apply_terrain_layout_on_map afin d'appliquer ensemble leur hauteur et leurs textures sémantiques.
+Une texture de boue n'est pas de l'eau. Pour une rivière, un lac ou un océan visible en jeu, crée d'abord son lit avec apply_terrain_layout_on_map puis appelle apply_liquid_layout_on_map avec les mêmes points. Choisis uniquement un liquid_type_id eau ou océan retourné par inspect_map. Place la surface au-dessus du fond et sous les berges. depth est une profondeur/opacité MH2O normalisée : environ 0.2 à 0.6 pour une eau peu profonde, 0.7 à 1 pour une eau profonde. Utilise replace_existing=true seulement lors d'une refonte totale.
+Pour un rendu naturel, trace les corridors avec 5 à 10 points non colinéaires. Pour une jungle/biome, utilise shape=area avec 3 à 16 sommets simples portant tous le même height, et height_mode=offset avec un petit delta typique de +4 à +10 ; puis choisis edge_noise_ratio entre 0.003 et 0.012, max_slope_degrees entre 25 et 35 et smoothing_strength entre 0.5 et 0.8. Réserve height_mode=absolute aux voies, rivières et plateformes qui exigent une altitude précise.
+Aux croisements, donne la priorité la plus élevée à la forme qui doit conserver sa hauteur et sa texture finales.
 Regroupe toutes les formes globales dans un seul appel à cet outil ; n'enchaîne jamais des change_terrain_height pour construire un layout complet et ne rappelle pas le layout uniquement pour retoucher ses textures.
 Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulables avec Ctrl+Z. Rapporte uniquement leurs compteurs réels. Ne prétends jamais qu'une action a réussi sans résultat ok=true. Si un outil échoue partiellement, indique précisément ce qui a été fait et ce qui reste. Une question n'est permise que si une information indispensable ne peut pas être choisie raisonnablement.)";
 
@@ -205,6 +214,7 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
     {
       GenerateTerrain,
       ApplyTerrainLayout,
+      ApplyLiquidLayout,
       BlendTerrainTextures,
       SetBaseTexture,
       Validate
@@ -214,6 +224,7 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
     {
       if (name == "generate_terrain_on_map") return MapBatchOperation::GenerateTerrain;
       if (name == "apply_terrain_layout_on_map") return MapBatchOperation::ApplyTerrainLayout;
+      if (name == "apply_liquid_layout_on_map") return MapBatchOperation::ApplyLiquidLayout;
       if (name == "blend_terrain_textures_on_map") return MapBatchOperation::BlendTerrainTextures;
       if (name == "set_base_texture_on_map") return MapBatchOperation::SetBaseTexture;
       if (name == "validate_map") return MapBatchOperation::Validate;
@@ -356,6 +367,7 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
     std::size_t vertices_changed = 0;
     std::size_t height_chunks_changed = 0;
     std::optional<ProceduralLayout> procedural_layout;
+    std::optional<ProceduralLiquidLayout> procedural_liquid_layout;
     std::vector<scoped_blp_texture_reference> procedural_textures;
     std::vector<std::size_t> feature_core_pixels;
     std::vector<std::size_t> feature_transition_pixels;
@@ -365,6 +377,18 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
     std::vector<TileIndex> normal_tiles;
     std::vector<TileIndex> normal_neighborhood;
     std::vector<bool> normal_keep_loaded;
+    std::size_t liquid_chunks_changed = 0;
+    std::size_t liquid_cells_changed = 0;
+    std::size_t liquid_cells_cropped = 0;
+    std::size_t liquid_chunks_inspected = 0;
+    std::size_t liquid_cells_inspected = 0;
+    std::size_t liquid_cells_under_terrain = 0;
+    std::vector<std::size_t> liquid_feature_cells;
+    std::map<int, std::size_t> liquid_cells_by_type;
+    std::map<int, float> min_liquid_height_by_type;
+    std::map<int, float> max_liquid_height_by_type;
+    std::map<int, float> min_liquid_depth_by_type;
+    std::map<int, float> max_liquid_depth_by_type;
   };
 
   AssistantDock::AssistantDock(MapView* map_view, QWidget* parent)
@@ -783,6 +807,7 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
       return completeWith(toolError("Les arguments de l'outil doivent être un objet JSON."));
     }
     std::optional<ProceduralLayout> procedural_layout;
+    std::optional<ProceduralLiquidLayout> procedural_liquid_layout;
 
     if (*operation == MapBatchOperation::Validate)
     {
@@ -886,6 +911,44 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
         arguments["texture_paths"][layer] = std::move(path);
       }
       procedural_layout = std::move(*parsed.layout);
+    }
+    else if (*operation == MapBatchOperation::ApplyLiquidLayout)
+    {
+      auto parsed = parseProceduralLiquidLayout(arguments);
+      if (!parsed.layout)
+      {
+        return completeWith(toolError(parsed.error.empty()
+          ? "Le layout liquide est invalide." : parsed.error));
+      }
+      if (QSettings{}.value("use_mclq_liquids_export", false).toBool())
+      {
+        return completeWith(toolError(
+          "L'export MCLQ est activé dans les réglages. Désactive-le avant de créer de l'eau MH2O."));
+      }
+
+      static auto const forbidden_wmo_types = std::set<int>{
+        LIQUID_WMO_Water, LIQUID_WMO_Ocean, LIQUID_WMO_Water_Interior,
+        LIQUID_WMO_Magma, LIQUID_WMO_Slime
+      };
+      for (auto const& feature : parsed.layout->features)
+      {
+        auto const id = static_cast<int>(feature.liquid_type_id);
+        if (forbidden_wmo_types.contains(id) || !gLiquidTypeDB.CheckIfIdExists(id))
+        {
+          return completeWith(toolError(
+            "LiquidType.dbc ne contient pas ce type terrain autorisé : "
+            + std::to_string(id)));
+        }
+        auto const basic_type = LiquidTypeDB::getLiquidType(id);
+        if (basic_type != liquid_basic_types_water
+            && basic_type != liquid_basic_types_ocean)
+        {
+          return completeWith(toolError(
+            "Cette première version accepte uniquement les types eau et océan ; ID refusé : "
+            + std::to_string(id)));
+        }
+      }
+      procedural_liquid_layout = std::move(*parsed.layout);
     }
     else if (*operation == MapBatchOperation::BlendTerrainTextures)
     {
@@ -1057,6 +1120,7 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
     batch->operation = *operation;
     batch->arguments = std::move(arguments);
     batch->procedural_layout = std::move(procedural_layout);
+    batch->procedural_liquid_layout = std::move(procedural_liquid_layout);
     for (std::size_t z = 0; z < 64; ++z)
     {
       for (std::size_t x = 0; x < 64; ++x)
@@ -1094,8 +1158,38 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
       auto const short_side = std::min(map_width, map_height);
       for (auto const& feature : batch->procedural_layout->features)
       {
+        if (batch->procedural_layout->max_slope_degrees
+            && feature.shape == ProceduralLayoutShape::Corridor)
+        {
+          constexpr double degrees_to_radians = 0.017453292519943295;
+          auto const maximum_gradient = std::tan(
+            *batch->procedural_layout->max_slope_degrees * degrees_to_radians);
+          for (std::size_t point = 1; point < feature.points.size(); ++point)
+          {
+            auto const& first = feature.points[point - 1];
+            auto const& second = feature.points[point];
+            auto const segment_length = std::hypot(
+              (second.u - first.u) * map_width,
+              (second.v - first.v) * map_height);
+            if (std::abs(second.height - first.height)
+                > maximum_gradient * segment_length)
+            {
+              return completeWith(toolError(
+                "La variation longitudinale dépasse max_slope_degrees dans la feature : "
+                + feature.name));
+            }
+          }
+        }
+
         auto const radius = static_cast<double>(
           feature.half_width_ratio) * short_side;
+        ProceduralLayout area_core;
+        if (feature.shape == ProceduralLayoutShape::Area)
+        {
+          area_core.texture_paths.resize(std::max(
+            std::size_t{2}, feature.texture_layer + 1));
+          area_core.features.push_back(feature);
+        }
         auto intersects_map = false;
         for (auto const& tile : batch->tiles)
         {
@@ -1120,6 +1214,32 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
               map_min_x + second.u * map_width,
               map_min_z + second.v * map_height,
               radius, tile.x, tile.z);
+          }
+          if (!intersects_map
+              && feature.shape == ProceduralLayoutShape::Area)
+          {
+            auto const& first = feature.points.back();
+            auto const& second = feature.points.front();
+            intersects_map = segmentTouchesTile(
+              map_min_x + first.u * map_width,
+              map_min_z + first.v * map_height,
+              map_min_x + second.u * map_width,
+              map_min_z + second.v * map_height,
+              radius, tile.x, tile.z);
+          }
+          if (!intersects_map
+              && feature.shape == ProceduralLayoutShape::Area)
+          {
+            auto const u = static_cast<float>(
+              (static_cast<double>(tile.x) + 0.5 - batch->min_tile_x)
+              / (batch->max_tile_x - batch->min_tile_x + 1));
+            auto const v = static_cast<float>(
+              (static_cast<double>(tile.z) + 0.5 - batch->min_tile_z)
+              / (batch->max_tile_z - batch->min_tile_z + 1));
+            intersects_map = sampleProceduralLayout(
+              area_core, u, v, 0.0f, 0.0f,
+              static_cast<float>(map_width), static_cast<float>(map_height))
+                .feature_masks.front() >= 0.999f;
           }
           if (intersects_map)
           {
@@ -1154,6 +1274,11 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
             + batch->procedural_layout->texture_paths[layer]));
         }
       }
+    }
+    if (batch->procedural_liquid_layout)
+    {
+      auto const& layout = *batch->procedural_liquid_layout;
+      batch->liquid_feature_cells.assign(layout.features.size(), 0);
     }
 
     if (mutates_map && !_plan_checkpoint_saved)
@@ -1402,11 +1527,14 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
     bool tile_height_changed = false;
     std::size_t tile_height_chunks_changed = 0;
     std::size_t tile_vertices_changed = 0;
+    bool tile_was_modified = !isValidation(_map_batch->operation)
+      && _map_batch->operation != MapBatchOperation::ApplyLiquidLayout;
+    std::size_t tile_liquid_chunks_changed = 0;
     try
     {
       _map_view->makeCurrent();
       OpenGL::context::scoped_setter const current_context(::gl, _map_view->context());
-      if (!isValidation(_map_batch->operation))
+      if (tile_was_modified)
       {
         world->mapIndex.setChanged(tile);
       }
@@ -1490,6 +1618,58 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
               _map_batch->max_height = std::max(_map_batch->max_height, vertex.y);
               ++_map_batch->vertices_inspected;
             }
+
+            auto* water_chunk = tile->Water.getChunk(x, z);
+            auto chunk_has_liquid = false;
+            for (auto const& layer : *water_chunk->getLayers())
+            {
+              auto const id = layer.liquidID();
+              _map_batch->min_liquid_height_by_type.try_emplace(
+                id, std::numeric_limits<float>::max());
+              _map_batch->max_liquid_height_by_type.try_emplace(
+                id, std::numeric_limits<float>::lowest());
+              _map_batch->min_liquid_depth_by_type.try_emplace(
+                id, std::numeric_limits<float>::max());
+              _map_batch->max_liquid_depth_by_type.try_emplace(
+                id, std::numeric_limits<float>::lowest());
+              auto const& vertices = layer.getVertices();
+              for (int cell_z = 0; cell_z < 8; ++cell_z)
+              {
+                for (int cell_x = 0; cell_x < 8; ++cell_x)
+                {
+                  if (!layer.hasSubchunk(cell_x, cell_z))
+                  {
+                    continue;
+                  }
+                  chunk_has_liquid = true;
+                  ++_map_batch->liquid_cells_inspected;
+                  ++_map_batch->liquid_cells_by_type[id];
+                  auto const water_index = cell_z * 9 + cell_x;
+                  auto const terrain_index = cell_z * 17 + cell_x;
+                  auto cell_below_terrain = true;
+                  for (auto const [water_offset, terrain_offset]
+                       : std::array<std::pair<int, int>, 4>{
+                           std::pair{0, 0}, {1, 1}, {9, 17}, {10, 18}})
+                  {
+                    auto const& vertex = vertices[water_index + water_offset];
+                    _map_batch->min_liquid_height_by_type[id] = std::min(
+                      _map_batch->min_liquid_height_by_type[id], vertex.position.y);
+                    _map_batch->max_liquid_height_by_type[id] = std::max(
+                      _map_batch->max_liquid_height_by_type[id], vertex.position.y);
+                    _map_batch->min_liquid_depth_by_type[id] = std::min(
+                      _map_batch->min_liquid_depth_by_type[id], vertex.depth);
+                    _map_batch->max_liquid_depth_by_type[id] = std::max(
+                      _map_batch->max_liquid_depth_by_type[id], vertex.depth);
+                    cell_below_terrain = cell_below_terrain
+                      && vertex.position.y
+                        < chunk->mVertices[terrain_index + terrain_offset].y;
+                  }
+                  _map_batch->liquid_cells_under_terrain
+                    += cell_below_terrain ? 1 : 0;
+                }
+              }
+            }
+            _map_batch->liquid_chunks_inspected += chunk_has_liquid ? 1 : 0;
           }
         }
       }
@@ -1563,6 +1743,34 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
           throw std::runtime_error("Les textures prévalidées du layout sont absentes.");
         }
 
+        constexpr auto alpha_pixels_per_chunk = std::size_t{64 * 64};
+        auto alphaSourceIndex = [](unsigned chunk_x, unsigned chunk_z,
+                                   int alpha_x, int alpha_z)
+        {
+          return (static_cast<std::size_t>(chunk_z * 16 + chunk_x)
+                    * alpha_pixels_per_chunk)
+            + static_cast<std::size_t>(alpha_z * 64 + alpha_x);
+        };
+        // Preserve the source used to widen height transitions; texture masks
+        // must not recompute that width from the already modified terrain.
+        std::vector<float> source_alpha_heights(256 * alpha_pixels_per_chunk);
+        for (unsigned chunk_z = 0; chunk_z < 16; ++chunk_z)
+        {
+          for (unsigned chunk_x = 0; chunk_x < 16; ++chunk_x)
+          {
+            auto const* chunk = tile->getChunk(chunk_x, chunk_z);
+            for (int alpha_z = 0; alpha_z < 64; ++alpha_z)
+            {
+              for (int alpha_x = 0; alpha_x < 64; ++alpha_x)
+              {
+                source_alpha_heights[alphaSourceIndex(
+                  chunk_x, chunk_z, alpha_x, alpha_z)]
+                  = sampleTerrain(*chunk, alpha_x, alpha_z).height;
+              }
+            }
+          }
+        }
+
         for (unsigned chunk_z = 0; chunk_z < 16; ++chunk_z)
         {
           for (unsigned chunk_x = 0; chunk_x < 16; ++chunk_x)
@@ -1573,15 +1781,15 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
             {
               auto const u = normalizeWorld(vertex.x, map_min_x, map_width);
               auto const v = normalizeWorld(vertex.z, map_min_z, map_height);
-              auto const sample = sampleProceduralLayout(
-                layout, u, v, vertex.y, 0.0f, map_width, map_height);
-              if (!std::isfinite(sample.height))
+              auto const height = sampleSmoothedProceduralLayoutHeight(
+                layout, u, v, vertex.y, map_width, map_height, UNITSIZE * 0.5f);
+              if (!std::isfinite(height))
               {
                 throw std::runtime_error("Le layout a produit une hauteur non finie.");
               }
-              if (sample.height != vertex.y)
+              if (height != vertex.y)
               {
-                vertex.y = sample.height;
+                vertex.y = height;
                 chunk_height_changed = true;
                 ++tile_vertices_changed;
               }
@@ -1632,7 +1840,9 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
                   layout,
                   normalizeWorld(world_x, map_min_x, map_width),
                   normalizeWorld(world_z, map_min_z, map_height),
-                  terrain.height, terrain.slope_degrees, map_width, map_height);
+                  source_alpha_heights[alphaSourceIndex(
+                    chunk_x, chunk_z, alpha_x, alpha_z)],
+                  terrain.slope_degrees, map_width, map_height);
                 for (std::size_t feature = 0; feature < layout.features.size(); ++feature)
                 {
                   auto const mask = sample.feature_masks[feature];
@@ -1689,6 +1899,174 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
             if (!texture_set.apply_alpha_changes())
             {
               throw std::runtime_error("Impossible d'appliquer les alphamaps du layout.");
+            }
+          }
+        }
+      }
+      else if (_map_batch->operation == MapBatchOperation::ApplyLiquidLayout)
+      {
+        if (!_map_batch->procedural_liquid_layout)
+        {
+          throw std::runtime_error("Le layout liquide validé est absent.");
+        }
+        auto const& layout = *_map_batch->procedural_liquid_layout;
+        auto const map_min_x = static_cast<float>(_map_batch->min_tile_x) * TILESIZE;
+        auto const map_min_z = static_cast<float>(_map_batch->min_tile_z) * TILESIZE;
+        auto const map_width = static_cast<float>(
+          _map_batch->max_tile_x - _map_batch->min_tile_x + 1) * TILESIZE;
+        auto const map_height = static_cast<float>(
+          _map_batch->max_tile_z - _map_batch->min_tile_z + 1) * TILESIZE;
+        std::set<int> effective_liquid_types;
+        for (auto const& feature : layout.features)
+        {
+          effective_liquid_types.insert(feature.liquid_type_id);
+        }
+        if (!layout.replace_existing)
+        {
+          for (unsigned existing_z = 0; existing_z < 16; ++existing_z)
+          {
+            for (unsigned existing_x = 0; existing_x < 16; ++existing_x)
+            {
+              auto* existing = tile->Water.getChunk(existing_x, existing_z);
+              for (auto const& layer : *existing->getLayers())
+              {
+                if (!layer.empty())
+                {
+                  effective_liquid_types.insert(layer.liquidID());
+                }
+              }
+            }
+          }
+        }
+        if (effective_liquid_types.size()
+            > procedural_liquid_max_distinct_types)
+        {
+          throw std::runtime_error(
+            "La fusion dépasserait 14 types de liquide actifs sur cette tuile. "
+            "Réduis les IDs du layout ou utilise replace_existing=true pour une refonte totale.");
+        }
+        auto normalizeWorld = [](float coordinate, float minimum, float extent)
+        {
+          return std::clamp((coordinate - minimum) / extent, 0.0f, 1.0f);
+        };
+        constexpr auto no_feature = procedural_layout_max_features;
+        constexpr std::array<std::array<float, 2>, 4> corner_offsets{{
+          {0.0f, 0.0f}, {1.0f, 0.0f}, {0.0f, 1.0f}, {1.0f, 1.0f}
+        }};
+
+        for (unsigned chunk_z = 0; chunk_z < 16; ++chunk_z)
+        {
+          for (unsigned chunk_x = 0; chunk_x < 16; ++chunk_x)
+          {
+            auto* terrain = tile->getChunk(chunk_x, chunk_z);
+            auto* water = tile->Water.getChunk(chunk_x, chunk_z);
+            ChunkWater::CellUpdates updates{};
+            std::array<std::size_t, 8 * 8> cell_features{};
+            cell_features.fill(no_feature);
+
+            for (unsigned cell_z = 0; cell_z < 8; ++cell_z)
+            {
+              for (unsigned cell_x = 0; cell_x < 8; ++cell_x)
+              {
+                auto const cell = static_cast<std::size_t>(cell_z * 8 + cell_x);
+                auto const world_x = terrain->xbase
+                  + (static_cast<float>(cell_x) + 0.5f) * UNITSIZE;
+                auto const world_z = terrain->zbase
+                  + (static_cast<float>(cell_z) + 0.5f) * UNITSIZE;
+                auto const center = sampleProceduralLiquidLayout(
+                  layout,
+                  normalizeWorld(world_x, map_min_x, map_width),
+                  normalizeWorld(world_z, map_min_z, map_height),
+                  map_width, map_height);
+                if (!center.has_liquid)
+                {
+                  continue;
+                }
+
+                auto& update = updates[cell];
+                update.touched = true;
+                update.active = true;
+                update.liquid_id = center.liquid_type_id;
+                cell_features[cell] = center.feature_index;
+                for (std::size_t corner = 0; corner < corner_offsets.size(); ++corner)
+                {
+                  auto const corner_x = terrain->xbase
+                    + (static_cast<float>(cell_x) + corner_offsets[corner][0])
+                      * UNITSIZE;
+                  auto const corner_z = terrain->zbase
+                    + (static_cast<float>(cell_z) + corner_offsets[corner][1])
+                      * UNITSIZE;
+                  auto const corner_sample = sampleProceduralLiquidFeature(
+                    layout, center.feature_index,
+                    normalizeWorld(corner_x, map_min_x, map_width),
+                    normalizeWorld(corner_z, map_min_z, map_height),
+                    map_width, map_height);
+                  update.vertex_heights[corner] = corner_sample.height;
+                  update.vertex_depths[corner] = corner_sample.depth;
+                }
+              }
+            }
+
+            std::map<std::tuple<int, unsigned, unsigned>, std::pair<float, float>>
+              shared_vertices;
+            for (unsigned cell_z = 0; cell_z < 8; ++cell_z)
+            {
+              for (unsigned cell_x = 0; cell_x < 8; ++cell_x)
+              {
+                auto& update = updates[cell_z * 8 + cell_x];
+                if (!update.touched || !update.active)
+                {
+                  continue;
+                }
+                for (std::size_t corner = 0; corner < corner_offsets.size(); ++corner)
+                {
+                  auto const vertex_x = cell_x
+                    + static_cast<unsigned>(corner_offsets[corner][0]);
+                  auto const vertex_z = cell_z
+                    + static_cast<unsigned>(corner_offsets[corner][1]);
+                  auto const key = std::tuple{
+                    update.liquid_id, vertex_x, vertex_z};
+                  auto const [position, inserted] = shared_vertices.emplace(
+                    key, std::pair{update.vertex_heights[corner],
+                                   update.vertex_depths[corner]});
+                  if (!inserted)
+                  {
+                    update.vertex_heights[corner] = position->second.first;
+                    update.vertex_depths[corner] = position->second.second;
+                  }
+                }
+              }
+            }
+
+            auto const stats = water->applyCellUpdates(
+              updates, layout.replace_existing, terrain);
+            _map_batch->liquid_cells_changed += stats.changed_cells;
+            _map_batch->liquid_cells_cropped += stats.cropped_cells;
+            _map_batch->liquid_chunks_changed += stats.changed_cells > 0 ? 1 : 0;
+            tile_liquid_chunks_changed += stats.changed_cells > 0 ? 1 : 0;
+            if (stats.changed_cells > 0 && !tile_was_modified)
+            {
+              tile_was_modified = true;
+              world->mapIndex.setChanged(tile);
+            }
+
+            for (std::size_t cell = 0; cell < cell_features.size(); ++cell)
+            {
+              auto const feature = cell_features[cell];
+              if (feature == no_feature || feature >= layout.features.size())
+              {
+                continue;
+              }
+              auto const x = static_cast<int>(cell % 8);
+              auto const z = static_cast<int>(cell / 8);
+              auto const id = static_cast<int>(layout.features[feature].liquid_type_id);
+              auto const visible = std::any_of(
+                water->getLayers()->begin(), water->getLayers()->end(),
+                [=](liquid_layer const& layer)
+                {
+                  return layer.liquidID() == id && layer.hasSubchunk(x, z);
+                });
+              _map_batch->liquid_feature_cells[feature] += visible ? 1 : 0;
             }
           }
         }
@@ -1831,7 +2209,7 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
         }
       }
 
-      if (!isValidation(_map_batch->operation))
+      if (!isValidation(_map_batch->operation) && tile_was_modified)
       {
         world->mapIndex.saveTile(tile_index, world);
         tile->changed = false;
@@ -1842,8 +2220,21 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
         _map_batch->height_chunks_changed += tile_height_chunks_changed;
         _map_batch->vertices_changed += tile_vertices_changed;
       }
-      ++_map_batch->tiles_changed;
-      _map_batch->chunks_changed += 256;
+      if (isValidation(_map_batch->operation))
+      {
+        ++_map_batch->tiles_changed;
+        _map_batch->chunks_changed += 256;
+      }
+      else if (_map_batch->operation == MapBatchOperation::ApplyLiquidLayout)
+      {
+        _map_batch->tiles_changed += tile_was_modified ? 1 : 0;
+        _map_batch->chunks_changed += tile_liquid_chunks_changed;
+      }
+      else
+      {
+        ++_map_batch->tiles_changed;
+        _map_batch->chunks_changed += 256;
+      }
       if (!_map_batch->keep_loaded[_map_batch->next_tile])
       {
         world->mapIndex.unloadTile(tile_index);
@@ -1976,11 +2367,20 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
             layout_is_valid = false;
           }
         }
+        auto liquid_layout_is_valid = true;
+        if (batch.operation == MapBatchOperation::ApplyLiquidLayout)
+        {
+          liquid_layout_is_valid = batch.procedural_liquid_layout
+            && std::all_of(
+              batch.liquid_feature_cells.begin(), batch.liquid_feature_cells.end(),
+              [](std::size_t cells) { return cells > 0; });
+        }
         auto const normals_are_current = !changesHeight(batch.operation)
           || batch.normals_recalculated == batch.normal_tiles.size();
         result = {
           {"ok", batch.failures == 0
-            && normals_are_current && blend_is_visible && layout_is_valid},
+            && normals_are_current && blend_is_visible && layout_is_valid
+            && liquid_layout_is_valid},
           {"operation", batch.call.name},
           {"tiles_total", batch.tiles.size()},
           {"tiles_changed", batch.tiles_changed},
@@ -2005,6 +2405,12 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
                && !result.at("ok").get<bool>())
       {
         result["error"] = "Le layout a été enregistré, mais une feature n'a aucun cœur effectif ou une texture n'atteint pas 64 pixels fortement visibles. Ne relance pas automatiquement la géométrie : rapporte les compteurs et demande une correction explicite.";
+        result["partial_change_possible"] = true;
+      }
+      else if (batch.operation == MapBatchOperation::ApplyLiquidLayout
+               && !result.at("ok").get<bool>())
+      {
+        result["error"] = "Le layout liquide a été enregistré, mais au moins une feature ne possède aucune cellule MH2O visible après découpe par le terrain. Rapporte les compteurs et corrige le niveau ou la largeur.";
         result["partial_change_possible"] = true;
       }
       if (batch.operation == MapBatchOperation::GenerateTerrain)
@@ -2084,6 +2490,13 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
         auto const& definition = batch.procedural_layout->features[feature];
         feature_stats.push_back({
           {"name", definition.name},
+          {"shape", definition.shape == ProceduralLayoutShape::Area
+            ? "area" : "corridor"},
+          {"height_mode", definition.height_mode == ProceduralLayoutHeightMode::Offset
+            ? "offset" : "absolute"},
+          {"point_count", definition.points.size()},
+          {"half_width_ratio", definition.half_width_ratio},
+          {"transition_width_ratio", definition.transition_width_ratio},
           {"texture_layer", definition.texture_layer},
           {"priority", definition.priority},
           {"effective_core_pixels", core},
@@ -2115,6 +2528,11 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
       result["features_requested"] = batch.procedural_layout->features.size();
       result["features_with_core"] = features_with_core;
       result["feature_mask_semantics"] = "effective_after_priority_composition";
+      result["edge_noise_ratio"] = batch.procedural_layout->edge_noise_ratio;
+      result["max_slope_degrees"] = batch.procedural_layout->max_slope_degrees
+        ? nlohmann::json(*batch.procedural_layout->max_slope_degrees)
+        : nlohmann::json(nullptr);
+      result["smoothing_strength"] = batch.procedural_layout->smoothing_strength;
       result["textures"] = std::move(texture_stats);
       result["layers_requested"] = batch.procedural_layout->texture_paths.size();
       result["layers_with_strong_coverage"] = layers_with_strong_coverage;
@@ -2146,6 +2564,36 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
       result["sampled_max_slope_degrees"] = sampled
         ? nlohmann::json(batch.max_slope) : nlohmann::json(nullptr);
     }
+    else if (batch.operation == MapBatchOperation::ApplyLiquidLayout
+             && batch.procedural_liquid_layout)
+    {
+      auto features = nlohmann::json::array();
+      for (std::size_t index = 0;
+           index < batch.procedural_liquid_layout->features.size(); ++index)
+      {
+        auto const& feature = batch.procedural_liquid_layout->features[index];
+        features.push_back({
+          {"name", feature.name},
+          {"shape", feature.shape == ProceduralLayoutShape::Area
+            ? "area" : "corridor"},
+          {"liquid_type_id", feature.liquid_type_id},
+          {"liquid_name", LiquidTypeDB::getLiquidName(feature.liquid_type_id)},
+          {"priority", feature.priority},
+          {"cells_visible", batch.liquid_feature_cells[index]}
+        });
+      }
+      result["features"] = std::move(features);
+      result["features_requested"] = batch.procedural_liquid_layout->features.size();
+      result["features_with_visible_cells"] = std::count_if(
+        batch.liquid_feature_cells.begin(), batch.liquid_feature_cells.end(),
+        [](std::size_t cells) { return cells > 0; });
+      result["replace_existing"] = batch.procedural_liquid_layout->replace_existing;
+      result["edge_noise_ratio"] = batch.procedural_liquid_layout->edge_noise_ratio;
+      result["liquid_chunks_changed"] = batch.liquid_chunks_changed;
+      result["liquid_cells_changed"] = batch.liquid_cells_changed;
+      result["liquid_cells_cropped"] = batch.liquid_cells_cropped;
+      result["format"] = "MH2O";
+    }
     else if (batch.operation == MapBatchOperation::Validate)
     {
       auto textures = nlohmann::json::array();
@@ -2162,6 +2610,26 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
       result["textures_by_path"] = std::move(textures);
       result["visible_alpha_threshold"] = 8;
       result["strong_alpha_threshold"] = 64;
+
+      auto liquids = nlohmann::json::array();
+      for (auto const& [id, cells] : batch.liquid_cells_by_type)
+      {
+        liquids.push_back({
+          {"liquid_type_id", id},
+          {"liquid_name", LiquidTypeDB::getLiquidName(id)},
+          {"basic_type", LiquidTypeDB::getLiquidType(id)},
+          {"cells", cells},
+          {"min_surface_height", batch.min_liquid_height_by_type[id]},
+          {"max_surface_height", batch.max_liquid_height_by_type[id]},
+          {"min_depth", batch.min_liquid_depth_by_type[id]},
+          {"max_depth", batch.max_liquid_depth_by_type[id]}
+        });
+      }
+      result["liquids_by_type"] = std::move(liquids);
+      result["liquid_chunks"] = batch.liquid_chunks_inspected;
+      result["liquid_cells"] = batch.liquid_cells_inspected;
+      result["liquid_cells_fully_under_terrain"] = batch.liquid_cells_under_terrain;
+      result["liquid_format"] = "MH2O";
     }
 
     _cancel_requested = false;
@@ -2408,6 +2876,35 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
         }
       }
 
+      static auto const forbidden_wmo_types = std::set<int>{
+        LIQUID_WMO_Water, LIQUID_WMO_Ocean, LIQUID_WMO_Water_Interior,
+        LIQUID_WMO_Magma, LIQUID_WMO_Slime
+      };
+      auto available_liquid_types = nlohmann::json::array();
+      for (auto record = gLiquidTypeDB.begin(); record != gLiquidTypeDB.end(); ++record)
+      {
+        auto const id = record->getInt(LiquidTypeDB::ID);
+        auto const basic_type = record->getInt(LiquidTypeDB::Type);
+        if (id < 1 || id > 65535 || forbidden_wmo_types.contains(id)
+            || (basic_type != liquid_basic_types_water
+                && basic_type != liquid_basic_types_ocean))
+        {
+          continue;
+        }
+        auto const basic_name = basic_type == liquid_basic_types_ocean ? "ocean"
+          : "water";
+        available_liquid_types.push_back({
+          {"id", id},
+          {"name", record->getString(LiquidTypeDB::Name)},
+          {"basic_type", basic_name}
+        });
+      }
+      std::sort(available_liquid_types.begin(), available_liquid_types.end(),
+        [](nlohmann::json const& left, nlohmann::json const& right)
+        {
+          return left.at("id").get<int>() < right.at("id").get<int>();
+        });
+
       return {
         {"ok", true},
         {"operation", "inspect_map"},
@@ -2426,6 +2923,7 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
           ? nlohmann::json{{"scope", "loaded_tiles"}, {"vertices", sampled_vertices},
                            {"min_height", min_height}, {"max_height", max_height}}
           : nlohmann::json(nullptr)},
+        {"available_liquid_types", std::move(available_liquid_types)},
         {"global_grid", {{"width", 64}, {"height", 64}}}
       };
     }

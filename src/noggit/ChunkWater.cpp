@@ -1,6 +1,7 @@
 // This file is part of Noggit3, licensed under GNU General Public License (version 3).
 
 #include <noggit/ChunkWater.hpp>
+#include <noggit/DBC.h>
 #include <noggit/TileWater.hpp>
 #include <noggit/liquid_layer.hpp>
 #include <noggit/MapChunk.h>
@@ -9,7 +10,12 @@
 #include <util/sExtendableArray.hpp>
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
+#include <limits>
+#include <map>
+#include <stdexcept>
+#include <tuple>
 
 ChunkWater::ChunkWater(MapChunk* chunk, TileWater* water_tile, float x, float z, bool use_mclq_green_lava)
   : xbase(x)
@@ -315,6 +321,12 @@ void ChunkWater::update_layers()
     count++;
   }
 
+  if (_layers.empty())
+  {
+    vmin.y = 0.0f;
+    vmax.y = 0.0f;
+  }
+
   // some tests to compare with blizzard
   const bool run_tests = false;
   if (run_tests)
@@ -447,6 +459,162 @@ void ChunkWater::paintLiquid( glm::vec3 const& pos
   }
 
   update_layers();
+}
+
+ChunkWater::CellUpdateStats ChunkWater::applyCellUpdates(
+  CellUpdates const& updates,
+  bool replace_existing,
+  MapChunk* terrain)
+{
+  if (!terrain)
+  {
+    throw std::invalid_argument("MH2O cell updates require a terrain chunk");
+  }
+
+  auto any_touched = false;
+  std::map<std::tuple<int, int, int>, std::pair<float, float>> shared_vertices;
+  constexpr std::array<std::array<int, 2>, 4> corner_offsets{{
+    {0, 0}, {1, 0}, {0, 1}, {1, 1}
+  }};
+  for (std::size_t cell = 0; cell < updates.size(); ++cell)
+  {
+    auto const& update = updates[cell];
+    if (!update.touched)
+    {
+      continue;
+    }
+    any_touched = true;
+    if (update.liquid_id < 0
+        || update.liquid_id > std::numeric_limits<std::uint16_t>::max()
+        || !gLiquidTypeDB.CheckIfIdExists(static_cast<unsigned>(update.liquid_id)))
+    {
+      throw std::invalid_argument("MH2O cell update has an invalid liquid id");
+    }
+    if (std::any_of(update.vertex_heights.begin(), update.vertex_heights.end(),
+          [](float height) { return !std::isfinite(height); })
+        || std::any_of(update.vertex_depths.begin(), update.vertex_depths.end(),
+          [](float depth) {
+            return !std::isfinite(depth) || depth < 0.0f || depth > 1.0f;
+          }))
+    {
+      throw std::invalid_argument("MH2O cell update has an invalid height or depth");
+    }
+    if (update.active)
+    {
+      auto const cell_x = static_cast<int>(cell % 8);
+      auto const cell_z = static_cast<int>(cell / 8);
+      for (std::size_t corner = 0; corner < corner_offsets.size(); ++corner)
+      {
+        auto const key = std::tuple{
+          update.liquid_id,
+          cell_x + corner_offsets[corner][0],
+          cell_z + corner_offsets[corner][1]};
+        auto const [position, inserted] = shared_vertices.emplace(
+          key, std::pair{update.vertex_heights[corner],
+                         update.vertex_depths[corner]});
+        if (!inserted
+            && (position->second.first != update.vertex_heights[corner]
+                || position->second.second != update.vertex_depths[corner]))
+        {
+          throw std::invalid_argument(
+            "MH2O adjacent cells disagree on a shared vertex");
+        }
+      }
+    }
+  }
+  if (!any_touched && !replace_existing)
+  {
+    return {};
+  }
+
+  // New vertices live in batch-local layers so shared MH2O vertices outside
+  // the touched cells are never overwritten.
+  std::map<int, std::size_t> target_layer_by_id;
+
+  CellUpdateStats stats;
+  for (std::size_t cell = 0; cell < updates.size(); ++cell)
+  {
+    auto const& update = updates[cell];
+    if (!update.touched && !replace_existing)
+    {
+      continue;
+    }
+
+    auto const x = static_cast<int>(cell % 8);
+    auto const z = static_cast<int>(cell / 8);
+    auto active = update.touched && update.active;
+    if (active)
+    {
+      auto const top_left = MapChunk::indexNoLoD(z, x);
+      active = !(update.vertex_heights[0] < terrain->mVertices[top_left].y
+        && update.vertex_heights[1] < terrain->mVertices[top_left + 1].y
+        && update.vertex_heights[2] < terrain->mVertices[top_left + 17].y
+        && update.vertex_heights[3] < terrain->mVertices[top_left + 18].y);
+      stats.cropped_cells += active ? 0 : 1;
+    }
+
+    auto target_layer = std::numeric_limits<std::size_t>::max();
+    if (active)
+    {
+      auto found = target_layer_by_id.find(update.liquid_id);
+      if (found == target_layer_by_id.end())
+      {
+        target_layer = _layers.size();
+        _layers.emplace_back(
+          this,
+          glm::vec3(xbase, 0.0f, zbase),
+          update.vertex_heights[0],
+          update.liquid_id);
+        target_layer_by_id.emplace(update.liquid_id, target_layer);
+      }
+      else
+      {
+        target_layer = found->second;
+      }
+    }
+
+    auto changed = false;
+    for (std::size_t layer = 0; layer < _layers.size(); ++layer)
+    {
+      if (layer != target_layer)
+      {
+        changed = _layers[layer].applyCellUpdate(
+          x,
+          z,
+          false,
+          update.vertex_heights,
+          update.vertex_depths) || changed;
+      }
+    }
+    if (active)
+    {
+      changed = _layers[target_layer].applyCellUpdate(
+        x,
+        z,
+        true,
+        update.vertex_heights,
+        update.vertex_depths) || changed;
+    }
+    stats.changed_cells += changed ? 1 : 0;
+  }
+
+  if (stats.changed_cells == 0)
+  {
+    return stats;
+  }
+
+  for (auto& layer : _layers)
+  {
+    layer.finishCellUpdates();
+  }
+  _layers.erase(
+    std::remove_if(_layers.begin(), _layers.end(),
+      [](liquid_layer const& layer) { return layer.empty(); }),
+    _layers.end());
+
+  _water_tile->tagUpdate();
+  update_layers();
+  return stats;
 }
 
 MapChunk* ChunkWater::getChunk()

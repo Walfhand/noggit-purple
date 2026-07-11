@@ -50,10 +50,21 @@ For a global generation request, the assistant inspects the open map and shows
 a structured plan. Review it, then click **Approuver et exécuter**. The current global
 executor can generate continuous deterministic terrain, choose and apply a base
 texture, or procedurally blend three or four textures across every existing tile.
-For structured maps, `apply_terrain_layout_on_map` builds continuous corridors
-(roads, rivers or lanes) and circular platforms from normalized map coordinates,
-then applies their semantic textures in the same pass. This avoids approximating
-large shapes with dozens of local brush strokes.
+For structured maps, `apply_terrain_layout_on_map` builds continuous corridors,
+circular platforms and polygonal areas from normalized map coordinates, then
+applies their semantic textures in the same pass. Areas can preserve the existing
+micro-relief while being raised or lowered; deterministic edge variation,
+automatic slope widening and light smoothing keep global shapes natural and
+seamless. This avoids approximating large shapes with dozens of local brush strokes.
+`apply_liquid_layout_on_map` can then reuse those corridors or areas to create
+real WoW `MH2O` water or ocean surfaces. Liquid levels are sampled
+in world space so they remain continuous across chunk and tile boundaries; cells
+fully hidden below terrain are cropped automatically. `inspect_map` exposes the
+terrain liquid IDs available in the loaded `LiquidType.dbc`, and `validate_map`
+reports visible liquid cells, types, surface heights and normalized depths. The
+legacy **MCLQ liquids export** setting must be disabled for this tool.
+Noggit also rejects a merge that would exceed the renderer limit of 14 active
+liquid IDs on one tile; a total replacement can use `replace_existing=true`.
 The procedural blend follows the terrain height and slope, with continuous noise
 to avoid chunk-shaped borders, and reports how many pixels were actually mixed.
 The assistant validates every chunk afterward. It processes and saves one tile at
@@ -70,7 +81,8 @@ d'herbe. Choisis toi-même les paramètres et propose-moi le plan avant d'agir.
 
 ```text
 Crée une arène verdoyante avec trois voies continues, deux bases, une rivière
-centrale et de la roche sur les pentes. Propose le plan avant d'agir.
+centrale avec de l'eau réelle, et de la roche sur les pentes. Propose le plan avant
+d'agir, puis valide les textures et les cellules liquides.
 ```
 
 The default model is `gpt-5.6`; set `OPENAI_MODEL` to override it.

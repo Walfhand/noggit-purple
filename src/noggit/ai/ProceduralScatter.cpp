@@ -66,6 +66,32 @@ namespace Noggit::Ai
       return static_cast<float>((value >> 40) & 0xffffffU) / 16777216.0f;
     }
 
+    float smoothNoise(std::string const& seed, float u, float v,
+                      float scale, std::uint64_t channel)
+    {
+      auto const x = u * scale;
+      auto const y = v * scale;
+      auto const x0 = static_cast<std::int64_t>(std::floor(x));
+      auto const y0 = static_cast<std::int64_t>(std::floor(y));
+      auto const smooth = [](float value) { return value * value * (3.0f - 2.0f * value); };
+      auto const tx = smooth(x - std::floor(x));
+      auto const ty = smooth(y - std::floor(y));
+      auto sample = [&](std::int64_t sx, std::int64_t sy)
+      {
+        return unit(hash(seed, {channel, static_cast<std::uint64_t>(sx),
+                                static_cast<std::uint64_t>(sy)}));
+      };
+      auto const a = std::lerp(sample(x0, y0), sample(x0 + 1, y0), tx);
+      auto const b = std::lerp(sample(x0, y0 + 1), sample(x0 + 1, y0 + 1), tx);
+      return std::lerp(a, b, ty);
+    }
+
+    bool validRole(std::string const& role)
+    {
+      return role == "canopy" || role == "understory"
+          || role == "rock" || role == "detail";
+    }
+
     bool parsePoints(nlohmann::json const& values,
                      std::vector<ProceduralLayoutPoint>& points,
                      std::size_t minimum)
@@ -93,10 +119,11 @@ namespace Noggit::Ai
     static auto const root_fields = std::set<std::string>{
       "seed", "assets", "regions", "exclusions"};
     static auto const asset_fields = std::set<std::string>{
-      "path", "weight", "min_scale", "max_scale"};
+      "path", "role", "weight", "min_scale", "max_scale", "spacing_multiplier"};
     static auto const region_fields = std::set<std::string>{
-      "name", "points", "density_per_tile", "min_spacing_ratio",
-      "min_height", "max_height", "min_slope_degrees", "max_slope_degrees"};
+      "name", "role", "points", "density_per_tile", "min_spacing_ratio",
+      "min_height", "max_height", "min_slope_degrees", "max_slope_degrees",
+      "cluster_scale", "cluster_strength"};
     static auto const exclusion_fields = std::set<std::string>{
       "shape", "points", "half_width_ratio"};
     auto fail = [](std::string error)
@@ -121,17 +148,22 @@ namespace Noggit::Ai
     {
       ProceduralScatterAsset asset;
       if (!exactFields(value, asset_fields) || !value.at("path").is_string()
+          || !value.at("role").is_string()
           || !finiteFloat(value.at("weight"), asset.weight)
           || !finiteFloat(value.at("min_scale"), asset.min_scale)
-          || !finiteFloat(value.at("max_scale"), asset.max_scale))
-        return fail("Chaque asset exige path, weight, min_scale et max_scale valides.");
+          || !finiteFloat(value.at("max_scale"), asset.max_scale)
+          || !finiteFloat(value.at("spacing_multiplier"), asset.spacing_multiplier))
+        return fail("Chaque asset exige path, role, weight, échelles et espacement valides.");
       asset.path = value.at("path").get<std::string>();
+      asset.role = value.at("role").get<std::string>();
       if (asset.path.empty() || asset.path.size() > 260 || !printableAscii(asset.path)
           || !paths.insert(asset.path).second
+          || !validRole(asset.role)
           || asset.weight <= 0.0f || asset.weight > 100.0f
           || asset.min_scale < 0.05f || asset.max_scale > 10.0f
-          || asset.min_scale > asset.max_scale)
-        return fail("Chemins uniques, poids dans ]0,100] et échelles dans [0.05,10] sont requis.");
+          || asset.min_scale > asset.max_scale
+          || asset.spacing_multiplier < 0.25f || asset.spacing_multiplier > 4.0f)
+        return fail("Chemins uniques, rôles valides, poids, échelles et espacements cohérents sont requis.");
       scatter.assets.push_back(std::move(asset));
     }
 
@@ -143,14 +175,18 @@ namespace Noggit::Ai
     {
       ProceduralScatterRegion region;
       if (!exactFields(value, region_fields) || !value.at("name").is_string()
+          || !value.at("role").is_string()
           || !value.at("density_per_tile").is_number_integer()
           || !finiteFloat(value.at("min_spacing_ratio"), region.min_spacing_ratio)
           || !finiteFloat(value.at("min_height"), region.min_height)
           || !finiteFloat(value.at("max_height"), region.max_height)
           || !finiteFloat(value.at("min_slope_degrees"), region.min_slope_degrees)
-          || !finiteFloat(value.at("max_slope_degrees"), region.max_slope_degrees))
+          || !finiteFloat(value.at("max_slope_degrees"), region.max_slope_degrees)
+          || !finiteFloat(value.at("cluster_scale"), region.cluster_scale)
+          || !finiteFloat(value.at("cluster_strength"), region.cluster_strength))
         return fail("Chaque région contient des paramètres invalides.");
       region.name = value.at("name").get<std::string>();
+      region.role = value.at("role").get<std::string>();
       auto const density = value.at("density_per_tile").get<std::int64_t>();
       if (region.name.empty() || region.name.size() > 64 || !printableAscii(region.name)
           || !names.insert(region.name).second || density < 1 || density > 512
@@ -158,7 +194,12 @@ namespace Noggit::Ai
           || region.min_height < -500.0f || region.max_height > 5000.0f
           || region.min_height > region.max_height
           || region.min_slope_degrees < 0.0f || region.max_slope_degrees > 90.0f
-          || region.min_slope_degrees > region.max_slope_degrees)
+          || region.min_slope_degrees > region.max_slope_degrees
+          || !validRole(region.role)
+          || region.cluster_scale < 0.5f || region.cluster_scale > 16.0f
+          || region.cluster_strength < 0.0f || region.cluster_strength > 1.0f
+          || std::none_of(scatter.assets.begin(), scatter.assets.end(), [&](auto const& asset)
+             { return asset.role == region.role; }))
         return fail("Nom, densité, espacement, hauteur ou pente de région invalide.");
       region.density_per_tile = static_cast<std::size_t>(density);
       if (!parsePoints(value.at("points"), region.points, 3)
@@ -198,16 +239,50 @@ namespace Noggit::Ai
   {
     auto const base = hash(scatter.seed, {region_index, tile_x, tile_z, candidate_index});
     ProceduralScatterCandidate candidate;
+    auto const& region = scatter.regions[region_index];
+    auto region_u_min = 1.0f;
+    auto region_u_max = 0.0f;
+    auto region_v_min = 1.0f;
+    auto region_v_max = 0.0f;
+    for (auto const& point : region.points)
+    {
+      region_u_min = std::min(region_u_min, point.u);
+      region_u_max = std::max(region_u_max, point.u);
+      region_v_min = std::min(region_v_min, point.v);
+      region_v_max = std::max(region_v_max, point.v);
+    }
+    u_min = std::max(u_min, region_u_min);
+    u_max = std::min(u_max, region_u_max);
+    v_min = std::max(v_min, region_v_min);
+    v_max = std::min(v_max, region_v_max);
+    if (u_min >= u_max || v_min >= v_max)
+    {
+      candidate.active = false;
+      return candidate;
+    }
     candidate.u = u_min + unit(hash(scatter.seed, {base, 1})) * (u_max - u_min);
     candidate.v = v_min + unit(hash(scatter.seed, {base, 2})) * (v_max - v_min);
-    auto total_weight = 0.0f;
-    for (auto const& asset : scatter.assets) total_weight += asset.weight;
-    auto choice = unit(hash(scatter.seed, {base, 3})) * total_weight;
+    auto const massif = smoothNoise(scatter.seed, candidate.u, candidate.v,
+                                    region.cluster_scale, region_index + 101);
+    auto const clustered_density = std::clamp((massif - 0.25f) / 0.55f, 0.0f, 1.0f);
+    auto const probability = std::lerp(1.0f, clustered_density, region.cluster_strength);
+    candidate.active = unit(hash(scatter.seed, {base, 3})) <= probability;
+
+    auto best_score = -1.0f;
     for (std::size_t index = 0; index < scatter.assets.size(); ++index)
     {
-      candidate.asset_index = index;
-      choice -= scatter.assets[index].weight;
-      if (choice <= 0.0f) break;
+      auto const& asset = scatter.assets[index];
+      if (asset.role != region.role) continue;
+      auto const patch = smoothNoise(scatter.seed, candidate.u, candidate.v,
+                                     region.cluster_scale * 1.8f, 1000 + index * 37);
+      auto const local_variation = unit(hash(scatter.seed, {base, 2000 + index}));
+      auto const score = patch * 0.8f + local_variation * 0.2f
+        + std::log(asset.weight) * 0.05f;
+      if (score > best_score)
+      {
+        best_score = score;
+        candidate.asset_index = index;
+      }
     }
     auto const& asset = scatter.assets[candidate.asset_index];
     candidate.scale = asset.min_scale
@@ -221,6 +296,25 @@ namespace Noggit::Ai
   {
     return distanceToProceduralShape(
       points, ProceduralLayoutShape::Area, u, v, 1.0f, 1.0f).distance <= 0.0f;
+  }
+
+  bool proceduralScatterRegionIntersects(
+    ProceduralScatterRegion const& region,
+    float u_min, float u_max, float v_min, float v_max)
+  {
+    auto region_u_min = 1.0f;
+    auto region_u_max = 0.0f;
+    auto region_v_min = 1.0f;
+    auto region_v_max = 0.0f;
+    for (auto const& point : region.points)
+    {
+      region_u_min = std::min(region_u_min, point.u);
+      region_u_max = std::max(region_u_max, point.u);
+      region_v_min = std::min(region_v_min, point.v);
+      region_v_max = std::max(region_v_max, point.v);
+    }
+    return region_u_max >= u_min && region_u_min <= u_max
+        && region_v_max >= v_min && region_v_min <= v_max;
   }
 
   bool proceduralScatterExcluded(

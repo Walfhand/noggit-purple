@@ -505,17 +505,20 @@ namespace Noggit::Ai
       {"type", "object"},
       {"properties", {
         {"path", {{"type", "string"}, {"minLength", 1}, {"maxLength", 260}}},
+        {"role", {{"type", "string"}, {"enum", {"canopy", "understory", "rock", "detail"}}}},
         {"weight", {{"type", "number"}, {"exclusiveMinimum", 0.0}, {"maximum", 100.0}}},
         {"min_scale", {{"type", "number"}, {"minimum", 0.05}, {"maximum", 10.0}}},
-        {"max_scale", {{"type", "number"}, {"minimum", 0.05}, {"maximum", 10.0}}}
+        {"max_scale", {{"type", "number"}, {"minimum", 0.05}, {"maximum", 10.0}}},
+        {"spacing_multiplier", {{"type", "number"}, {"minimum", 0.25}, {"maximum", 4.0}}}
       }},
-      {"required", {"path", "weight", "min_scale", "max_scale"}},
+      {"required", {"path", "role", "weight", "min_scale", "max_scale", "spacing_multiplier"}},
       {"additionalProperties", false}
     };
     auto scatter_region_parameters = nlohmann::json{
       {"type", "object"},
       {"properties", {
         {"name", {{"type", "string"}, {"minLength", 1}, {"maxLength", 64}}},
+        {"role", {{"type", "string"}, {"enum", {"canopy", "understory", "rock", "detail"}}}},
         {"points", {
           {"type", "array"}, {"items", scatter_point_parameters},
           {"minItems", 3}, {"maxItems", 16}
@@ -525,11 +528,14 @@ namespace Noggit::Ai
         {"min_height", {{"type", "number"}, {"minimum", -500.0}, {"maximum", 5000.0}}},
         {"max_height", {{"type", "number"}, {"minimum", -500.0}, {"maximum", 5000.0}}},
         {"min_slope_degrees", {{"type", "number"}, {"minimum", 0.0}, {"maximum", 90.0}}},
-        {"max_slope_degrees", {{"type", "number"}, {"minimum", 0.0}, {"maximum", 90.0}}}
+        {"max_slope_degrees", {{"type", "number"}, {"minimum", 0.0}, {"maximum", 90.0}}},
+        {"cluster_scale", {{"type", "number"}, {"minimum", 0.5}, {"maximum", 16.0}}},
+        {"cluster_strength", {{"type", "number"}, {"minimum", 0.0}, {"maximum", 1.0}}}
       }},
       {"required", {
-        "name", "points", "density_per_tile", "min_spacing_ratio",
-        "min_height", "max_height", "min_slope_degrees", "max_slope_degrees"
+        "name", "role", "points", "density_per_tile", "min_spacing_ratio",
+        "min_height", "max_height", "min_slope_degrees", "max_slope_degrees",
+        "cluster_scale", "cluster_strength"
       }},
       {"additionalProperties", false}
     };
@@ -564,6 +570,35 @@ namespace Noggit::Ai
         }}
       }},
       {"required", {"seed", "assets", "regions", "exclusions"}},
+      {"additionalProperties", false}
+    };
+
+    auto moba_parameters = nlohmann::json{
+      {"type", "object"},
+      {"properties", {
+        {"texture_paths", {
+          {"type", "array"},
+          {"description", "Exactement quatre textures choisies visuellement : herbe, voie, sol humide, roche."},
+          {"items", {{"type", "string"}, {"minLength", 1}, {"maxLength", 260}}},
+          {"minItems", 4}, {"maxItems", 4}
+        }},
+        {"liquid_type_id", {{"type", "integer"}, {"minimum", 1}, {"maximum", 65535}}},
+        {"assets", scatter_parameters["properties"]["assets"]},
+        {"seed", {{"type", "string"}, {"minLength", 1}, {"maxLength", 64}}},
+        {"base_height", {{"type", "number"}, {"minimum", -450.0}, {"maximum", 4950.0}}},
+        {"river_depth", {{"type", "number"}, {"minimum", 2.0}, {"maximum", 30.0}}},
+        {"lane_width_ratio", {{"type", "number"}, {"minimum", 0.025}, {"maximum", 0.055}}},
+        {"river_width_ratio", {{"type", "number"}, {"minimum", 0.015}, {"maximum", 0.08}}},
+        {"lane_curvature", {{"type", "number"}, {"minimum", 0.0}, {"maximum", 1.0}}},
+        {"river_curvature", {{"type", "number"}, {"minimum", 0.0}, {"maximum", 1.0}}},
+        {"jungle_roughness", {{"type", "number"}, {"minimum", 1.0}, {"maximum", 12.0}}},
+        {"vegetation_density_per_tile", {{"type", "integer"}, {"minimum", 1}, {"maximum", 256}}}
+      }},
+      {"required", {
+        "texture_paths", "liquid_type_id", "assets", "seed", "base_height",
+        "river_depth", "lane_width_ratio", "river_width_ratio", "lane_curvature",
+        "river_curvature", "jungle_roughness", "vegetation_density_per_tile"
+      }},
       {"additionalProperties", false}
     };
 
@@ -636,6 +671,13 @@ namespace Noggit::Ai
         {"name", "scatter_assets_on_map"},
         {"description", "Répartit en un appel des arbres, rochers, buissons et décors M2/WMO dans des zones polygonales. Respecte les exclusions, la hauteur, la pente, la densité et l'espacement. Opération globale déterministe, sauvegardée et réservée à un plan approuvé."},
         {"parameters", std::move(scatter_parameters)},
+        {"strict", true}
+      },
+      {
+        {"type", "function"},
+        {"name", "create_moba_arena_blueprint"},
+        {"description", "Compile les choix esthétiques de l'IA en une topologie MOBA fixe et cohérente : exactement trois voies, deux bases fortifiées à trois entrées, une rivière, quatre jungles et deux clairières d'objectif. Retourne trois appels génériques à exécuter sans modifier leurs arguments."},
+        {"parameters", std::move(moba_parameters)},
         {"strict", true}
       },
       {

@@ -17,14 +17,17 @@ namespace Noggit::Ai
   struct ProceduralScatterAsset
   {
     std::string path;
+    std::string role;
     float weight = 1.0f;
     float min_scale = 1.0f;
     float max_scale = 1.0f;
+    float spacing_multiplier = 1.0f;
   };
 
   struct ProceduralScatterRegion
   {
     std::string name;
+    std::string role;
     std::vector<ProceduralLayoutPoint> points;
     std::size_t density_per_tile = 0;
     float min_spacing_ratio = 0.0f;
@@ -32,6 +35,8 @@ namespace Noggit::Ai
     float max_height = 0.0f;
     float min_slope_degrees = 0.0f;
     float max_slope_degrees = 0.0f;
+    float cluster_scale = 1.0f;
+    float cluster_strength = 0.0f;
   };
 
   struct ProceduralScatterExclusion
@@ -62,6 +67,7 @@ namespace Noggit::Ai
     std::size_t asset_index = 0;
     float scale = 1.0f;
     float yaw_degrees = 0.0f;
+    bool active = true;
   };
 
   ProceduralScatterParseResult parseProceduralScatter(
@@ -82,6 +88,13 @@ namespace Noggit::Ai
     std::vector<ProceduralLayoutPoint> const& points,
     float u,
     float v);
+
+  bool proceduralScatterRegionIntersects(
+    ProceduralScatterRegion const& region,
+    float u_min,
+    float u_max,
+    float v_min,
+    float v_max);
 
   bool proceduralScatterExcluded(
     ProceduralScatter const& scatter,

@@ -401,6 +401,25 @@ if(NOGGIT_BUILD_TESTS)
   target_include_directories(noggit-procedural-scatter-test PRIVATE "${CMAKE_SOURCE_DIR}/src")
   target_link_libraries(noggit-procedural-scatter-test nlohmann_json::nlohmann_json)
   add_test(NAME noggit-procedural-scatter COMMAND noggit-procedural-scatter-test)
+
+  add_executable(noggit-moba-arena-blueprint-test
+    tests/MobaArenaBlueprintTest.cpp
+    src/noggit/ai/MobaArenaBlueprint.cpp
+    src/noggit/ai/ProceduralLayout.cpp
+    src/noggit/ai/ProceduralLiquidLayout.cpp
+    src/noggit/ai/ProceduralScatter.cpp
+  )
+  target_include_directories(noggit-moba-arena-blueprint-test PRIVATE "${CMAKE_SOURCE_DIR}/src")
+  target_link_libraries(noggit-moba-arena-blueprint-test nlohmann_json::nlohmann_json)
+  add_test(NAME noggit-moba-arena-blueprint COMMAND noggit-moba-arena-blueprint-test)
+
+  add_executable(noggit-ground-effect-preview-test
+    tests/GroundEffectPreviewTest.cpp
+    src/noggit/rendering/GroundEffectPreview.cpp
+  )
+  target_include_directories(noggit-ground-effect-preview-test PRIVATE "${CMAKE_SOURCE_DIR}/src")
+  add_test(NAME noggit-ground-effect-preview COMMAND noggit-ground-effect-preview-test)
+
 endif()
 
 #add distribution themes

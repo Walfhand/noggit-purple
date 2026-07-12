@@ -6,9 +6,8 @@
 
 #include <ClientFile.hpp>
 
-#include <QDir>
-
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <string>
 
@@ -65,18 +64,19 @@ void DBCFile::open(std::shared_ptr<BlizzardArchive::ClientData> clientData)
 
 void DBCFile::save()
 {
-  QString str = QString(Noggit::Project::CurrentProject::get()->ProjectPath.c_str());
-  if (!(str.endsWith('\\') || str.endsWith('/')))
-  {
-    str += "/";
-  }
-
-  std::string filename_proj = BlizzardArchive::ClientData::normalizeFilenameUnix(str.toStdString() + filename);
-  QDir dir(str + "/DBFilesClient/");
-  if (!dir.exists())
-    dir.mkpath(".");
+  auto const filename_proj = std::filesystem::path(
+    Noggit::Project::CurrentProject::get()->ProjectPath)
+    / BlizzardArchive::ClientData::normalizeFilenameInternal(filename);
+  std::error_code directory_error;
+  std::filesystem::create_directories(filename_proj.parent_path(), directory_error);
+  if (directory_error)
+    throw std::runtime_error("Could not create DBC directory: " + directory_error.message());
 
   std::ofstream stream(filename_proj, std::ios_base::out | std::ios_base::trunc | std::ios_base::binary);
+  if (!stream)
+  {
+    throw std::runtime_error("Could not open DBC for writing: " + filename_proj.string());
+  }
 
   stream << 'W' << 'D' << 'B' << 'C';
 
@@ -88,6 +88,10 @@ void DBCFile::save()
 
   stream.write(reinterpret_cast<char*>(data.data()), data.size());
   stream.write(stringTable.data(), stringSize);
+  if (!stream)
+  {
+    throw std::runtime_error("Could not write DBC: " + filename_proj.string());
+  }
   stream.close();
 }
 
@@ -247,30 +251,8 @@ void DBCFile::removeRecord(size_t id, size_t id_field)
   {
     if (i->getUInt(id_field) == id)
     {
-      size_t initial_size = data.size();
-
       size_t row_position = row_counter * recordSize; // position of the record to remove
-
-      size_t datasizeafterRow = recordSize * (recordCount - row_counter); // size of the data after the row that needs to be moved at the old row's position
-
-      // assert(initial_size >= (datasizeafterRow + row_position));
-      if ((row_position + datasizeafterRow) > initial_size)
-      {
-        throw std::out_of_range("Attempting to remove more data than available");
-      }
-
-      // size_t numRecordsToMove = recordCount - row_counter; // Number of records to move down
-
-      unsigned char* record = data.data() + row_position; // data to remove at position
-
-      // Move all data after the row to the row's position
-      // only do it if it wasn't the last row
-      if (row_position + recordSize < initial_size)
-      {
-        assert(row_counter < recordCount);
-        std::memmove(record, record + recordSize, datasizeafterRow);
-      }
-      data.resize(initial_size - recordSize);
+      data.erase(data.begin() + row_position, data.begin() + row_position + recordSize);
 
       recordCount--;
       return;

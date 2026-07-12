@@ -719,6 +719,19 @@ void WorldRender::draw (glm::mat4x4 const& model_view
     }
   }
 
+  if (render_settings.draw_models
+      && QSettings{}.value("ground_effect_preview", true).toBool())
+  {
+    for (auto* tile : _world->mapIndex.loaded_tiles())
+    {
+      if (!tile || !tile->_was_rendered_last_frame) continue;
+      for (auto const& instance : tile->renderer()->groundEffectPreviewInstances())
+      {
+        if (instance.model->finishedLoading())
+          models_to_draw[instance.model.get()].push_back(instance.transformMatrix());
+      }
+    }
+  }
 
   // occlusion culling
   // terrain tiles act as occluders for each other, water and M2/WMOs.

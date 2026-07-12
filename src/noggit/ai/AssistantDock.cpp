@@ -1,6 +1,7 @@
 // This file is part of Noggit3, licensed under GNU General Public License (version 3).
 
 #include <noggit/ai/AssistantDock.hpp>
+#include <noggit/ai/MobaArenaBlueprint.hpp>
 #include <noggit/ai/ProceduralLiquidLayout.hpp>
 #include <noggit/ai/ProceduralLayout.hpp>
 #include <noggit/ai/ProceduralScatter.hpp>
@@ -45,10 +46,13 @@
 #include <QtNetwork/QNetworkReply>
 #include <QtNetwork/QNetworkRequest>
 #include <QtWidgets/QHBoxLayout>
+#include <QtWidgets/QDialog>
+#include <QtWidgets/QDialogButtonBox>
 #include <QtWidgets/QLabel>
 #include <QtWidgets/QLineEdit>
 #include <QtWidgets/QPlainTextEdit>
 #include <QtWidgets/QPushButton>
+#include <QtWidgets/QMessageBox>
 #include <QtWidgets/QTextBrowser>
 #include <QtWidgets/QVBoxLayout>
 #include <QtWidgets/QWidget>
@@ -77,6 +81,8 @@ namespace Noggit::Ai
   namespace
   {
     constexpr auto max_tool_rounds = std::size_t{32};
+    constexpr auto max_response_output_tokens = 32768;
+    constexpr auto max_scatter_candidates = std::size_t{16384};
     constexpr auto max_network_retries = 2;
     constexpr auto network_timeout_ms = 300000;
     constexpr auto preview_image_key = "_noggit_input_image_data_url";
@@ -91,9 +97,10 @@ Pour une création, une refonte ou une opération portant sur toute la carte :
 5. appelle validate_map après les opérations globales, puis inspect_map_view une fois avant d'annoncer leur réussite ; utilise la capture pour signaler honnêtement les défauts visibles mais ne relance jamais automatiquement une autre modification globale.
 Après generate_terrain_on_map, utilise blend_terrain_textures_on_map pour répartir les textures selon la hauteur et la pente. apply_terrain_layout_on_map produit déjà sa texturation finale par zone : ne l'écrase ensuite ni avec blend_terrain_textures_on_map ni avec set_base_texture_on_map. Réserve paint_texture aux retouches locales.
 Pour créer des routes, rivières, voies, plateformes ou autres formes continues, utilise apply_terrain_layout_on_map afin d'appliquer ensemble leur hauteur et leurs textures sémantiques.
+Pour toute arène MOBA complète, utilise create_moba_arena_blueprint après avoir choisi quatre textures dans l'ordre herbe, voie, sol humide, roche et plusieurs assets de jungle. Après approbation du plan, exécute dans l'ordre et sans les modifier les trois next_calls retournés. Le blueprint utilise une topologie en X : bases fortifiées au sud-ouest et au nord-est avec trois entrées, voies latérales longeant les bords, voie médiane et rivière sur deux diagonales opposées, quatre jungles, douze camps et deux fosses d'objectif. N'essaie pas de redessiner ces coordonnées toi-même. Les outils génériques restent destinés aux cartes qui ne sont pas des arènes MOBA.
 Avant une texturation globale, explore plusieurs termes anglais de noms de fichiers et plusieurs pages avec search_textures : grass, dirt, leaf, moss, mud, root et rock. Appelle ensuite preview_textures sur les candidates sérieuses et choisis la palette d'après l'image obtenue, pas seulement d'après leurs noms. Évite de reprendre systématiquement la même famille. Un layout peut référencer jusqu'à 16 textures sur la carte, mais jamais plus de quatre textures actives dans un même chunk ; réserve les variantes aux zones éloignées. Pour casser une grande surface uniforme, ajoute quelques petites areas de texture avec height_mode=offset, height=0 et roughness_amplitude=0 plutôt que de modifier de nouveau tout le relief.
 Une texture de boue n'est pas de l'eau. Pour une rivière, un lac ou un océan visible en jeu, crée d'abord son lit avec apply_terrain_layout_on_map puis appelle apply_liquid_layout_on_map avec les mêmes points. Choisis uniquement un liquid_type_id eau ou océan retourné par inspect_map. Place la surface au-dessus du fond et sous les berges. depth est une profondeur/opacité MH2O normalisée : environ 0.2 à 0.6 pour une eau peu profonde, 0.7 à 1 pour une eau profonde. Utilise replace_existing=true seulement lors d'une refonte totale.
-Pour rendre une jungle, forêt ou zone rocheuse vivante, recherche plusieurs arbres, buissons et rochers avec search_assets puis utilise scatter_assets_on_map après le relief et l'eau. Décris les zones par des polygones, exclue explicitement les voies et plateformes avec des corridors, et laisse aussi l'outil éviter l'eau MH2O. Mélange plusieurs M2/WMO avec des poids et des échelles proches de 1 ; préfère une densité modérée et un espacement cohérent à une masse uniforme. N'utilise pas le scatter pour les bâtiments uniques ou les objectifs placés précisément.
+Pour rendre une jungle, forêt ou zone rocheuse vivante, recherche plusieurs arbres, buissons, petites plantes, bois mort et rochers avec search_assets puis utilise scatter_assets_on_map après le relief et l'eau. Classe chaque asset dans canopy, understory, rock ou detail. Utilise au moins deux espèces de canopée, du sous-bois et des rochers pour une arène MOBA ; spacing_multiplier doit être plus grand pour les grands arbres et plus petit pour les détails. Décris les zones par des polygones, exclue explicitement les voies et plateformes avec des corridors, et laisse aussi l'outil éviter l'eau MH2O. cluster_scale et cluster_strength créent des massifs et des trouées à basse fréquence ; ne distribue pas toutes les espèces uniformément. N'utilise pas le scatter pour les bâtiments uniques ou les objectifs placés précisément.
 Pour un rendu naturel, trace les corridors avec 5 à 10 points non colinéaires et width_variation_ratio entre 0.1 et 0.3 ; utilise 0 uniquement pour une construction volontairement régulière. Une jungle n'est pas un plateau : utilise shape=area avec height_mode=offset, un delta proche de 0, roughness_amplitude entre 3 et 8 et texture_strength entre 0.35 et 0.75 pour éviter les aplats colorés ; garde roughness_amplitude=0 et texture_strength proche de 1 sur les voies, rivières et plateformes. Utilise des corridors étroits séparés pour les crêtes ou murs. Un étang ou une clairière organique doit être une area à plusieurs points, jamais un corridor à un seul point qui produirait un cercle. Choisis edge_noise_ratio entre 0.003 et 0.012, max_slope_degrees entre 25 et 35 et smoothing_strength entre 0.3 et 0.6. Réserve height_mode=absolute aux formes qui exigent une altitude précise.
 Aux croisements, donne la priorité la plus élevée à la forme qui doit conserver sa hauteur et sa texture finales.
 Regroupe toutes les formes globales dans un seul appel à cet outil ; n'enchaîne jamais des change_terrain_height pour construire un layout complet et ne rappelle pas le layout uniquement pour retoucher ses textures.
@@ -405,7 +412,7 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
     std::map<int, float> min_liquid_depth_by_type;
     std::map<int, float> max_liquid_depth_by_type;
     std::set<std::uint32_t> known_instance_uids;
-    std::vector<glm::vec2> occupied_positions;
+    std::vector<std::pair<glm::vec2, float>> occupied_positions;
     std::size_t scatter_candidates = 0;
     std::size_t scatter_placed = 0;
     std::size_t scatter_rejected_outside = 0;
@@ -415,7 +422,6 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
     std::size_t scatter_rejected_spacing = 0;
     std::map<std::string, std::size_t> scatter_by_asset;
     std::map<std::string, std::size_t> scatter_by_region;
-    std::vector<TileIndex> scatter_changed_tiles;
   };
 
   AssistantDock::AssistantDock(MapView* map_view, QWidget* parent)
@@ -428,6 +434,7 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
     , _send_button(new QPushButton(tr("Envoyer"), this))
     , _reset_button(new QPushButton(tr("Nouvelle conversation"), this))
     , _approve_button(new QPushButton(tr("Approuver et exécuter"), this))
+    , _blueprint_lab_button(new QPushButton(tr("Lab blueprint MOBA"), this))
     , _status(new QLabel(this))
     , _input(nlohmann::json::array())
     , _pending_plan(nlohmann::json::object())
@@ -456,6 +463,7 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
 
     buttons->addWidget(_reset_button);
     buttons->addWidget(_approve_button);
+    buttons->addWidget(_blueprint_lab_button);
     buttons->addStretch();
     buttons->addWidget(_send_button);
     api_key_row->addWidget(new QLabel(tr("Clé API OpenAI :"), this));
@@ -481,6 +489,8 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
     });
     connect(_reset_button, &QPushButton::clicked, this, [this] { resetConversation(); });
     connect(_approve_button, &QPushButton::clicked, this, [this] { approvePlan(); });
+    connect(_blueprint_lab_button, &QPushButton::clicked, this,
+            [this] { openMobaBlueprintLab(); });
 
     appendTranscript(tr("Noggit"), tr("Décris la carte que tu veux. Pour une création globale, je proposerai d'abord un plan à approuver, puis je l'exécuterai sur la carte ouverte."));
     if (qEnvironmentVariableIsEmpty("OPENAI_API_KEY"))
@@ -494,6 +504,156 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
   }
 
   AssistantDock::~AssistantDock() = default;
+
+  void AssistantDock::openMobaBlueprintLab()
+  {
+    if (_busy || !_map_view || !_map_view->getWorld()) return;
+
+    static auto const default_specification = R"json({
+  "texture_paths": [
+    "tileset/6.0/nagrand/data/6ng_grass03_1024.blp",
+    "tileset/6.0/nagrand/data/6ng_dirt03_512.blp",
+    "tileset/6.0/tanaanjungle/data/6tj_mud_01_512.blp",
+    "tileset/6.0/nagrand/data/6ng_rock01a_512.blp"
+  ],
+  "liquid_type_id": 1,
+  "assets": [
+    {"path":"world/kalimdor/ashenvale/passivedoodads/ashenvaletrees/ashenvaletree01.m2","role":"canopy","weight":3,"min_scale":0.8,"max_scale":1.2,"spacing_multiplier":1.2},
+    {"path":"world/kalimdor/ashenvale/passivedoodads/ashenvaletrees/ashenvaletree03.m2","role":"canopy","weight":2,"min_scale":0.8,"max_scale":1.2,"spacing_multiplier":1.1},
+    {"path":"world/kalimdor/ashenvale/passivedoodads/ashenvaletrees/ashenvaletree05.m2","role":"canopy","weight":2,"min_scale":0.8,"max_scale":1.25,"spacing_multiplier":1.15},
+    {"path":"world/azeroth/elwynn/passivedoodads/bush/elwynnbush01.m2","role":"understory","weight":4,"min_scale":0.7,"max_scale":1.2,"spacing_multiplier":0.55},
+    {"path":"world/azeroth/duskwood/passivedoodads/bush/duskwoodbush03.m2","role":"understory","weight":4,"min_scale":0.7,"max_scale":1.15,"spacing_multiplier":0.5},
+    {"path":"world/expansion01/doodads/nagrand/rocks/nagrand_smallrock_01.m2","role":"rock","weight":1,"min_scale":0.8,"max_scale":1.25,"spacing_multiplier":0.9},
+    {"path":"world/expansion01/doodads/nagrand/rocks/nagrand_smallrock_03.m2","role":"rock","weight":1,"min_scale":0.7,"max_scale":1.2,"spacing_multiplier":0.8},
+    {"path":"world/azeroth/stranglethorn/passivedoodads/detail/stranglethornfern01.m2","role":"detail","weight":8,"min_scale":0.65,"max_scale":1.1,"spacing_multiplier":0.35}
+  ],
+  "seed": "moba-lab-1",
+  "base_height": 20,
+  "river_depth": 8,
+  "lane_width_ratio": 0.04,
+  "river_width_ratio": 0.03,
+  "lane_curvature": 0.6,
+  "river_curvature": 0.5,
+  "jungle_roughness": 5,
+  "vegetation_density_per_tile": 64
+})json";
+
+    QDialog dialog(this);
+    dialog.setWindowTitle(tr("MOBA Blueprint Lab — sans OpenAI"));
+    dialog.resize(760, 680);
+    auto* layout = new QVBoxLayout(&dialog);
+    auto* description = new QLabel(tr(
+      "Édite la spécification, compile les 26 formes, puis exécute exactement "
+      "terrain → eau → végétation. Carte carrée complète de 3×3 tuiles minimum."), &dialog);
+    description->setWordWrap(true);
+    auto* editor = new QPlainTextEdit(&dialog);
+    QSettings settings;
+    editor->setPlainText(settings.value("ai/mobaBlueprintLabSpecification",
+                                         QString::fromUtf8(default_specification)).toString());
+    auto* status = new QLabel(tr("Pas encore compilé."), &dialog);
+    status->setWordWrap(true);
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
+    auto* compile_button = buttons->addButton(tr("Compiler"), QDialogButtonBox::ActionRole);
+    auto* execute_button = buttons->addButton(tr("Compiler et exécuter"), QDialogButtonBox::AcceptRole);
+    layout->addWidget(description);
+    layout->addWidget(editor, 1);
+    layout->addWidget(status);
+    layout->addWidget(buttons);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+
+    auto compile = [this, editor, status]() -> std::optional<nlohmann::json>
+    {
+      try
+      {
+        std::vector<std::pair<std::size_t, std::size_t>> tiles;
+        auto* world = _map_view->getWorld();
+        for (std::size_t z = 0; z < 64; ++z)
+          for (std::size_t x = 0; x < 64; ++x)
+            if (world->mapIndex.hasTile(TileIndex(x, z))) tiles.emplace_back(x, z);
+        if (auto const error = validateMobaArenaFootprint(tiles))
+          throw std::invalid_argument(*error);
+        auto blueprint = compileMobaArenaBlueprint(
+          nlohmann::json::parse(editor->toPlainText().toStdString()));
+        auto const features = blueprint.at("next_calls").at(0).at("arguments")
+          .at("features").size();
+        status->setText(tr("Compilation valide : %1 formes, %2 appels exacts.")
+                          .arg(features).arg(blueprint.at("next_calls").size()));
+        return blueprint;
+      }
+      catch (std::exception const& exception)
+      {
+        status->setText(tr("Erreur : %1").arg(QString::fromUtf8(exception.what())));
+        return std::nullopt;
+      }
+    };
+    connect(compile_button, &QPushButton::clicked, &dialog, [compile] { compile(); });
+    connect(execute_button, &QPushButton::clicked, &dialog, [&, compile]
+    {
+      auto blueprint = compile();
+      if (!blueprint) return;
+      if (QMessageBox::warning(&dialog, tr("Exécuter le blueprint"),
+          tr("Les trois opérations enregistreront toute la carte et ne seront pas annulables avec Ctrl+Z."),
+          QMessageBox::Ok | QMessageBox::Cancel, QMessageBox::Cancel) != QMessageBox::Ok) return;
+      settings.setValue("ai/mobaBlueprintLabSpecification", editor->toPlainText());
+      _direct_blueprint_calls = blueprint->at("next_calls");
+      _direct_blueprint_calls.push_back({{"name", "validate_map"},
+                                         {"arguments", nlohmann::json::object()}});
+      _direct_blueprint_results = nlohmann::json::array();
+      _direct_blueprint_running = true;
+      _plan_checkpoint_saved = false;
+      dialog.accept();
+    });
+    if (dialog.exec() == QDialog::Accepted && _direct_blueprint_running)
+    {
+      appendTranscript(tr("Lab MOBA"), tr("Blueprint compilé localement ; exécution des 3 appels exacts puis validation."));
+      _tool_rounds = 0;
+      _cancel_requested = false;
+      setBusy(true);
+      startNextDirectBlueprintCall();
+    }
+  }
+
+  void AssistantDock::startNextDirectBlueprintCall()
+  {
+    if (!_direct_blueprint_running) return;
+    if (_cancel_requested || _direct_blueprint_calls.empty())
+    {
+      auto all_ok = !_direct_blueprint_results.empty();
+      QStringList operations;
+      for (auto const& result : _direct_blueprint_results)
+      {
+        auto const ok = result.value("ok", false);
+        all_ok = all_ok && ok;
+        operations.push_back(QString::fromStdString(result.value("operation", std::string{"?"}))
+          + (ok ? " ✓" : " ✗"));
+      }
+      appendTranscript(tr("Lab MOBA"), tr("Exécution %1 : %2")
+        .arg(all_ok ? tr("terminée") : tr("terminée avec erreurs"), operations.join(" — ")));
+      _direct_blueprint_running = false;
+      _cancel_requested = false;
+      setBusy(false);
+      return;
+    }
+
+    auto call_json = _direct_blueprint_calls.front();
+    _direct_blueprint_calls.erase(_direct_blueprint_calls.begin());
+    FunctionCall call{
+      "noggit-direct-" + QUuid::createUuid().toString(QUuid::WithoutBraces).toStdString(),
+      call_json.at("name").get<std::string>(),
+      call_json.at("arguments").dump()
+    };
+    _status->setText(tr("Lab MOBA : exécution de %1…").arg(QString::fromStdString(call.name)));
+    if (!startMapBatch(call))
+      finishDirectBlueprintCall(call, toolError("L'appel compilé n'est pas une opération globale."));
+  }
+
+  void AssistantDock::finishDirectBlueprintCall(
+    FunctionCall const&, nlohmann::json const& result)
+  {
+    _direct_blueprint_results.push_back(result);
+    ++_tool_rounds;
+    QTimer::singleShot(0, this, [this] { startNextDirectBlueprintCall(); });
+  }
 
   void AssistantDock::submitPrompt()
   {
@@ -627,7 +787,7 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
       {"input", std::move(request_input)},
       {"tools", toolDefinitions()},
       {"parallel_tool_calls", false},
-      {"max_output_tokens", 4096},
+      {"max_output_tokens", max_response_output_tokens},
       {"store", false},
       {"include", {"reasoning.encrypted_content"}}
     };
@@ -810,9 +970,18 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
           reason = field->get<std::string>();
         }
       }
-      failTurn(reason.empty()
-        ? tr("OpenAI n'a pas pu terminer la réponse.")
-        : tr("OpenAI n'a pas pu terminer la réponse : %1").arg(QString::fromStdString(reason)));
+      if (reason == "max_output_tokens")
+      {
+        failTurn(tr("OpenAI a atteint la limite de %1 tokens de raisonnement et de sortie. "
+                    "Réessayez dans une nouvelle conversation ou simplifiez la demande.")
+                   .arg(max_response_output_tokens));
+      }
+      else
+      {
+        failTurn(reason.empty()
+          ? tr("OpenAI n'a pas pu terminer la réponse.")
+          : tr("OpenAI n'a pas pu terminer la réponse : %1").arg(QString::fromStdString(reason)));
+      }
       return;
     }
 
@@ -921,7 +1090,10 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
 
     auto completeWith = [&](nlohmann::json const& result)
     {
-      continueAfterTool(call, result);
+      if (_direct_blueprint_running)
+        finishDirectBlueprintCall(call, result);
+      else
+        continueAfterTool(call, result);
       return true;
     };
 
@@ -930,7 +1102,7 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
       return completeWith(toolError("Aucune carte n'est ouverte."));
     }
     auto const mutates_map = !isValidation(*operation);
-    if (mutates_map && !_plan_approved)
+    if (mutates_map && !_plan_approved && !_direct_blueprint_running)
     {
       return completeWith(toolError(
         "Cette opération globale exige un plan approuvé avec le bouton « Approuver et exécuter »."));
@@ -1338,12 +1510,22 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
     if (batch->procedural_scatter)
     {
       auto requested = std::size_t{0};
-      for (auto const& region : batch->procedural_scatter->regions)
-        requested += region.density_per_tile * batch->tiles.size();
-      if (requested > 4096)
+      auto const tile_width = static_cast<float>(batch->max_tile_x - batch->min_tile_x + 1);
+      auto const tile_height = static_cast<float>(batch->max_tile_z - batch->min_tile_z + 1);
+      for (auto const& tile : batch->tiles)
+      {
+        auto const u_min = static_cast<float>(tile.x - batch->min_tile_x) / tile_width;
+        auto const u_max = static_cast<float>(tile.x - batch->min_tile_x + 1) / tile_width;
+        auto const v_min = static_cast<float>(tile.z - batch->min_tile_z) / tile_height;
+        auto const v_max = static_cast<float>(tile.z - batch->min_tile_z + 1) / tile_height;
+        for (auto const& region : batch->procedural_scatter->regions)
+          if (proceduralScatterRegionIntersects(region, u_min, u_max, v_min, v_max))
+            requested += region.density_per_tile;
+      }
+      if (requested > max_scatter_candidates)
       {
         return completeWith(toolError(
-          "Le scatter dépasse 4096 candidats. Réduis density_per_tile ou le nombre de régions."));
+          "Le scatter dépasse 16384 candidats. Réduis density_per_tile ou le nombre de régions."));
       }
     }
     if (batch->procedural_layout)
@@ -2365,7 +2547,8 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
         auto rememberInstance = [&](auto const& instance)
         {
           if (_map_batch->known_instance_uids.insert(instance.uid).second)
-            _map_batch->occupied_positions.emplace_back(instance.pos.x, instance.pos.z);
+            _map_batch->occupied_positions.emplace_back(
+              glm::vec2{instance.pos.x, instance.pos.z}, 0.0f);
         };
         world->getModelInstanceStorage().for_each_m2_instance(rememberInstance);
         world->getModelInstanceStorage().for_each_wmo_instance(rememberInstance);
@@ -2373,8 +2556,6 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
         for (std::size_t region_index = 0; region_index < scatter.regions.size(); ++region_index)
         {
           auto const& region = scatter.regions[region_index];
-          auto const spacing = region.min_spacing_ratio * short_side;
-          auto const spacing_squared = spacing * spacing;
           for (std::size_t candidate_index = 0;
                candidate_index < region.density_per_tile; ++candidate_index)
           {
@@ -2382,6 +2563,11 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
             auto const candidate = proceduralScatterCandidate(
               scatter, region_index, tile_index.x, tile_index.z, candidate_index,
               u_min, u_max, v_min, v_max);
+            if (!candidate.active)
+            {
+              ++_map_batch->scatter_rejected_outside;
+              continue;
+            }
             if (!proceduralScatterContains(region.points, candidate.u, candidate.v))
             {
               ++_map_batch->scatter_rejected_outside;
@@ -2430,15 +2616,20 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
               continue;
             }
 
+            auto const& asset = scatter.assets[candidate.asset_index];
+            auto const spacing = region.min_spacing_ratio * asset.spacing_multiplier
+              * std::max(candidate.scale, 0.5f) * short_side;
             auto const too_close = std::any_of(
               _map_batch->occupied_positions.begin(), _map_batch->occupied_positions.end(),
-              [&](glm::vec2 const& position)
+              [&](std::pair<glm::vec2, float> const& occupied)
               {
+                auto const& position = occupied.first;
                 auto const dx = position.x - world_x;
                 auto const dz = position.y - world_z;
-                return dx * dx + dz * dz < spacing_squared;
+                auto const required = std::max(spacing, occupied.second);
+                return dx * dx + dz * dz < required * required;
               });
-            // ponytail: bounded O(n²) scan (4096 candidates); use a spatial hash only
+            // ponytail: bounded O(n²) scan (16384 candidates); use a spatial hash only
             // if real maps make this batch measurably slow.
             if (too_close)
             {
@@ -2446,14 +2637,14 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
               continue;
             }
 
-            auto const& asset = scatter.assets[candidate.asset_index];
             auto const position = glm::vec3{world_x, terrain.height, world_z};
             auto const rotation = math::degrees::vec3{0.0f, candidate.yaw_degrees, 0.0f};
             if (asset.path.ends_with(".m2"))
               world->addM2(asset.path, position, candidate.scale, rotation, nullptr, false);
             else
               world->addWMO(asset.path, position, candidate.scale, rotation, nullptr, false);
-            _map_batch->occupied_positions.emplace_back(world_x, world_z);
+            _map_batch->occupied_positions.emplace_back(
+              glm::vec2{world_x, world_z}, spacing * 0.45f);
             ++_map_batch->scatter_placed;
             ++_map_batch->scatter_by_asset[asset.path];
             ++_map_batch->scatter_by_region[region.name];
@@ -2623,10 +2814,6 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
       else if (_map_batch->operation == MapBatchOperation::ScatterAssets)
       {
         _map_batch->tiles_changed += tile_was_modified ? 1 : 0;
-        if (tile_was_modified)
-        {
-          _map_batch->scatter_changed_tiles.push_back(tile_index);
-        }
       }
       else
       {
@@ -2682,22 +2869,15 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
     _map_batch.reset();
     if (_map_view && _map_view->getWorld())
     {
+      _map_view->makeCurrent();
+      OpenGL::context::scoped_setter const current_context(
+        ::gl, _map_view->context());
       auto* world = _map_view->getWorld();
       if (!isValidation(batch.operation))
       {
         if (batch.operation == MapBatchOperation::ScatterAssets)
         {
-          _map_view->makeCurrent();
-          OpenGL::context::scoped_setter const current_context(
-            ::gl, _map_view->context());
           world->mapIndex.saveChanged(world);
-          for (auto const& tile : batch.scatter_changed_tiles)
-          {
-            if (world->mapIndex.tileLoaded(tile))
-            {
-              world->reload_tile(tile);
-            }
-          }
         }
         world->horizon.save_wdl(world);
         _map_view->invalidate();
@@ -3091,7 +3271,10 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
     }
 
     _cancel_requested = false;
-    continueAfterTool(batch.call, result);
+    if (_direct_blueprint_running)
+      finishDirectBlueprintCall(batch.call, result);
+    else
+      continueAfterTool(batch.call, result);
   }
 
   void AssistantDock::setBusy(bool busy)
@@ -3100,6 +3283,7 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
     _send_button->setText(busy ? tr("Annuler") : tr("Envoyer"));
     _reset_button->setEnabled(!busy);
     _approve_button->setEnabled(!busy && !_pending_plan.empty() && !_plan_approved);
+    _blueprint_lab_button->setEnabled(!busy);
     _api_key->setEnabled(!busy);
     _prompt->setReadOnly(busy);
   }
@@ -3265,6 +3449,25 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
         {"editor_busy", NOGGIT_ACTION_MGR->getCurrentAction() != nullptr},
         {"coordinate_system", "WoW world units; terrain uses X and Z"}
       };
+    }
+
+    if (call.name == "create_moba_arena_blueprint")
+    {
+      try
+      {
+        std::vector<std::pair<std::size_t, std::size_t>> tiles;
+        auto* world = _map_view->getWorld();
+        for (std::size_t z = 0; z < 64; ++z)
+          for (std::size_t x = 0; x < 64; ++x)
+            if (world->mapIndex.hasTile(TileIndex(x, z))) tiles.emplace_back(x, z);
+        if (auto const error = validateMobaArenaFootprint(tiles))
+          return toolError(*error);
+        return compileMobaArenaBlueprint(arguments);
+      }
+      catch (std::exception const& exception)
+      {
+        return toolError(exception.what());
+      }
     }
 
     if (call.name == "inspect_map")

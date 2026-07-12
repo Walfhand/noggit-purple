@@ -7,6 +7,7 @@
 #include <noggit/Log.h>
 #include <noggit/MapChunk.h>
 #include <noggit/project/CurrentProject.hpp>
+#include <noggit/uid_storage.hpp>
 #include <noggit/ui/FontAwesome.hpp>
 #include <noggit/ui/minimap_widget.hpp>
 #include <noggit/ui/widgets/Vector3Widget.hpp>
@@ -14,6 +15,7 @@
 #include <noggit/World.h>
 
 #include <blizzard-database-library/include/BlizzardDatabase.h>
+#include <Listfile.hpp>
 
 #include <QApplication>
 #include <QButtonGroup>
@@ -37,6 +39,16 @@
 #include <filesystem>
 
 using namespace Noggit::Ui::Tools::MapCreationWizard::Ui;
+
+namespace
+{
+  bool validMapDirectoryName(std::string const& name)
+  {
+    return !name.empty() && name != "." && name != ".."
+      && name.find('/') == std::string::npos
+      && name.find('\\') == std::string::npos;
+  }
+}
 
 MapCreationWizard::MapCreationWizard(std::shared_ptr<Project::NoggitProject> project, QWidget* parent) : Noggit::Ui::widget(parent), _project(project)
 {
@@ -803,11 +815,19 @@ void MapCreationWizard::wheelEvent(QWheelEvent* event)
 
 void MapCreationWizard::saveCurrentEntry()
 {
+  auto const map_internal_name = _directory->text().trimmed().toStdString();
+  if (!validMapDirectoryName(map_internal_name))
+  {
+    QMessageBox::critical(this, "Save Map", "The map directory name is invalid.");
+    return;
+  }
+  auto const virtual_map_path = "World\\Maps\\" + map_internal_name + "\\";
+  auto const wdt_path = std::filesystem::path(_project->ClientData->getDiskPath(
+    BlizzardArchive::Listfile::FileKey(virtual_map_path + map_internal_name + ".wdt")));
+  auto const map_directory = wdt_path.parent_path();
 
   if (_is_new_record)
   {
-    auto map_internal_name = _directory->text().toStdString();
-
     // Check if map with that name already exists
     int id = gMapDB.findMapName(map_internal_name);
 
@@ -842,22 +862,6 @@ void MapCreationWizard::saveCurrentEntry()
         }
     }
 
-    // Create WDT empty file for new map
-    std::stringstream filename;
-    filename << "World\\Maps\\" << map_internal_name << "\\" << map_internal_name << ".wdt";
-
-    auto project_path = std::filesystem::path(Noggit::Project::CurrentProject::get()->ProjectPath.c_str());
-
-    QDir dir((project_path / "/world/maps/" / map_internal_name).string().c_str());
-
-    if (!dir.exists())
-      dir.mkpath(".");
-
-    auto filepath = project_path / BlizzardArchive::ClientData::normalizeFilenameInternal (filename.str());
-
-    QFile file(filepath.string().c_str());
-    file.open(QIODevice::WriteOnly);
-    file.close();
   }
 
   // Save ADTs and WDT to disk
@@ -875,6 +879,38 @@ void MapCreationWizard::saveCurrentEntry()
   }
   _world->mapIndex.saveChanged(_world.get(), true);
   _world->mapIndex.save(); // save wdt file
+  std::error_code map_file_error;
+  auto const wdt_exists = std::filesystem::is_regular_file(wdt_path, map_file_error);
+  auto const wdt_size = wdt_exists && !map_file_error
+    ? std::filesystem::file_size(wdt_path, map_file_error) : 0;
+  if (map_file_error || !wdt_exists || wdt_size < 64 * 64 * 8)
+  {
+    if (_is_new_record)
+      std::filesystem::remove_all(map_directory, map_file_error);
+    QMessageBox::critical(this, "Save Map", "The WDT file could not be created.");
+    return;
+  }
+  for (std::size_t z = 0; z < 64; ++z)
+  {
+    for (std::size_t x = 0; x < 64; ++x)
+    {
+      if (!_world->mapIndex.hasTile(TileIndex(x, z))) continue;
+      auto const adt_path = std::filesystem::path(_project->ClientData->getDiskPath(
+        BlizzardArchive::Listfile::FileKey(virtual_map_path + map_internal_name + "_"
+          + std::to_string(x) + "_" + std::to_string(z) + ".adt")));
+      map_file_error.clear();
+      auto const adt_exists = std::filesystem::is_regular_file(adt_path, map_file_error);
+      auto const adt_size = adt_exists && !map_file_error
+        ? std::filesystem::file_size(adt_path, map_file_error) : 0;
+      if (map_file_error || !adt_exists || adt_size == 0)
+      {
+        QMessageBox::critical(this, "Save Map",
+          QString("The ADT file %1_%2 could not be created.")
+            .arg(static_cast<qulonglong>(x)).arg(static_cast<qulonglong>(z)));
+        return;
+      }
+    }
+  }
   
   if (_is_new_record)
   {
@@ -934,6 +970,10 @@ void MapCreationWizard::saveCurrentEntry()
     record.write(MapDB::NumberOfPlayers, _max_players->value());
 
     gMapDB.save();
+    DBCFile saved_map_db("DBFilesClient\\Map.dbc");
+    saved_map_db.open(_project->ClientData);
+    if (!saved_map_db.CheckIfIdExists(static_cast<unsigned>(_cur_map_id)))
+      throw std::runtime_error("The new Map.dbc entry was not persisted.");
 
     // reloads map list, and selects the new map
     emit map_dbc_updated(_cur_map_id);
@@ -957,6 +997,10 @@ void MapCreationWizard::saveCurrentEntry()
           , QString("Map.dbc entry %1 was not found").arg(_cur_map_id)
           , QMessageBox::Ok
       );
+  }
+  catch (std::exception const& exception)
+  {
+    QMessageBox::critical(this, "Save Map", QString::fromUtf8(exception.what()));
   }
 }
 
@@ -1050,7 +1094,7 @@ void MapCreationWizard::removeMap()
   QMessageBox prompt;
   prompt.setIcon(QMessageBox::Warning);
   prompt.setWindowTitle("Remove Map");
-  prompt.setText(std::string("Are you sure you want to remove this map ?").c_str());
+  prompt.setText("Remove this map and all its project files permanently?");
   prompt.setStandardButtons(QMessageBox::StandardButton::Yes | QMessageBox::StandardButton::No);
   prompt.setDefaultButton(QMessageBox::No);
   prompt.setWindowFlags(Qt::CustomizeWindowHint | Qt::WindowTitleHint | Qt::WindowStaysOnTopHint);
@@ -1062,8 +1106,40 @@ void MapCreationWizard::removeMap()
 
   if (!_is_new_record && _cur_map_id >= 0)
   {
-    gMapDB.removeRecord(_cur_map_id);
-    gMapDB.save();
+    auto const internal_name = _directory->text().trimmed().toStdString();
+    if (!validMapDirectoryName(internal_name))
+    {
+      QMessageBox::critical(this, "Remove Map", "The map directory name is invalid.");
+      return;
+    }
+
+    try
+    {
+      gMapDB.removeRecord(_cur_map_id);
+      gMapDB.save();
+
+      auto const virtual_wdt = "World\\Maps\\" + internal_name + "\\"
+        + internal_name + ".wdt";
+      auto const map_directory = std::filesystem::path(_project->ClientData->getDiskPath(
+        BlizzardArchive::Listfile::FileKey(virtual_wdt))).parent_path();
+      std::error_code error;
+      std::filesystem::remove_all(map_directory, error);
+      if (error)
+      {
+        QMessageBox::warning(this, "Remove Map",
+          QString("The Map.dbc entry was removed, but the map files could not be deleted: %1")
+            .arg(QString::fromStdString(error.message())));
+      }
+      std::filesystem::remove_all(std::filesystem::path(_project->ProjectPath)
+        / "World" / "Maps" / internal_name, error);
+      _project->unpinMap(_cur_map_id);
+      uid_storage::remove_uid_for_map(static_cast<std::uint32_t>(_cur_map_id));
+    }
+    catch (std::exception const& exception)
+    {
+      QMessageBox::critical(this, "Remove Map", QString::fromUtf8(exception.what()));
+      return;
+    }
   }
 
   emit map_dbc_updated();
@@ -1245,6 +1321,3 @@ void LocaleDBCEntry::clear()
 
   _flags->setValue(0);
 }
-
-
-

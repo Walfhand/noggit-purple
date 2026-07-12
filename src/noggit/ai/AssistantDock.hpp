@@ -33,6 +33,9 @@ namespace Noggit::Ai
 
   private:
     void submitPrompt();
+    void openMobaBlueprintLab();
+    void startNextDirectBlueprintCall();
+    void finishDirectBlueprintCall(FunctionCall const& call, nlohmann::json const& result);
     void approvePlan();
     void resetConversation();
     void sendRequest();
@@ -58,14 +61,18 @@ namespace Noggit::Ai
     QPushButton* _send_button;
     QPushButton* _reset_button;
     QPushButton* _approve_button;
+    QPushButton* _blueprint_lab_button;
     QLabel* _status;
     nlohmann::json _input;
     nlohmann::json _pending_plan;
+    nlohmann::json _direct_blueprint_calls = nlohmann::json::array();
+    nlohmann::json _direct_blueprint_results = nlohmann::json::array();
     std::unique_ptr<MapBatchState> _map_batch;
     std::size_t _tool_rounds = 0;
     bool _busy = false;
     bool _cancel_requested = false;
     bool _plan_approved = false;
     bool _plan_checkpoint_saved = false;
+    bool _direct_blueprint_running = false;
   };
 }

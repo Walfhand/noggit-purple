@@ -39,6 +39,12 @@ Only Docker and the exported files are written on the host. To launch Noggit:
 (cd out && LD_LIBRARY_PATH="$PWD/lib" ./noggit)
 ```
 
+Pour tester le générateur MOBA sans appeler OpenAI, ouvre une carte carrée
+complète d'au moins 3×3 tuiles puis clique sur **Lab blueprint MOBA** dans le
+dock assistant. Le JSON prérempli peut être compilé sans modifier la carte ;
+**Compiler et exécuter** lance ensuite exactement terrain, eau, végétation et
+validation. La dernière spécification utilisée est conservée dans les réglages.
+
 Open a map, then use **Assist > AI Assistant** and paste a fresh key into the
 masked API key field. The key stays in process memory and is not saved;
 `OPENAI_API_KEY` remains available as a fallback. A read-only smoke test is:
@@ -84,11 +90,27 @@ legacy **MCLQ liquids export** setting must be disabled for this tool.
 Noggit also rejects a merge that would exceed the renderer limit of 14 active
 liquid IDs on one tile; a total replacement can use `replace_existing=true`.
 `scatter_assets_on_map` adds the vegetation and mineral decoration after terrain
-and water generation. It distributes a weighted M2/WMO palette deterministically
-inside polygonal regions, filters candidates by terrain height and slope, and
-rejects explicit corridor/area exclusions, visible MH2O cells, existing objects
-and placements that violate the requested spacing. A batch is capped at 4096
+and water generation. Assets are assigned a canopy, understory, rock or detail
+role. Low-frequency deterministic noise creates massifs and clearings, spatial
+patches keep species from being mixed uniformly, and scale-aware Poisson-style
+spacing simulates competition around large specimens. Height, slope, liquid and
+explicit gameplay exclusions form the habitat mask. A batch is capped at 16384
 candidates and reports every rejection reason plus counts per region and asset.
+For complete three-lane arenas, `create_moba_arena_blueprint` keeps gameplay
+topology out of the language model. The model chooses four reviewed textures,
+the liquid type, decorative assets and bounded style parameters; the blueprint
+returns exact arguments for the existing terrain, liquid and scatter tools. Its
+square-map template places fortified bases in opposite corners, side lanes along
+the perimeter, mid and river on opposing diagonals, four jungle sectors, twelve
+protected camp clearings, four discontinuous sight-blocking walls and two epic
+objective pits. Scatter preflight counts only regions that actually intersect a
+tile, so a 2x2 arena does not multiply candidates across unrelated tiles.
+Generic tools remain available unchanged for non-MOBA maps.
+The main viewport also approximates native texture GroundEffects with transient
+M2 instances (at most 16 per chunk) so ground cover can be reviewed without
+launching WoW. These preview instances are never saved into the ADT and follow
+the normal M2 visibility toggle; set `ground_effect_preview=false` in Noggit's
+Qt settings to disable them.
 The procedural blend follows the terrain height and slope, with continuous noise
 to avoid chunk-shaped borders, and reports how many pixels were actually mixed.
 The assistant validates every chunk afterward. It processes and saves one tile at

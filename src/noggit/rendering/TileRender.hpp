@@ -4,6 +4,7 @@
 #define NOGGIT_TILERENDER_HPP
 
 #include <noggit/rendering/BaseRender.hpp>
+#include <noggit/ModelInstance.h>
 #include <opengl/scoped.hpp>
 #include <array>
 
@@ -51,6 +52,7 @@ namespace Noggit::Rendering
     void setChunkDetaildoodadsExclusionData(MapChunk* chunk);
     void setChunkGroundEffectActiveData(MapChunk* chunk);
     void setActiveRenderGEffectTexture(std::string active_texture);
+    std::vector<ModelInstance> const& groundEffectPreviewInstances() const;
 
     [[nodiscard]]
     unsigned objectsFrustumCullTest() const;;
@@ -78,6 +80,7 @@ namespace Noggit::Rendering
 
     void uploadTextures();
     bool fillSamplers(MapChunk* chunk, unsigned chunk_index, unsigned draw_call_index);
+    void rebuildGroundEffectPreview();
 
     MapTile* _map_tile;
 
@@ -89,6 +92,7 @@ namespace Noggit::Rendering
     bool _requires_ground_effect_color_recalc = true;
     bool _texture_not_loaded = true;
     bool _require_geffect_active_texture_update = true;
+    std::vector<ModelInstance> _ground_effect_preview_instances;
 
     bool _uploaded_alphamap_last_frame = false;
     int _num_uploaded_chunk_alphamaps = 0; // last frame

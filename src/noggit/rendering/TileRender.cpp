@@ -1,6 +1,8 @@
 // This file is part of Noggit3, licensed under GNU General Public License (version 3).
 
 #include <noggit/rendering/TileRender.hpp>
+#include <noggit/rendering/GroundEffectPreview.hpp>
+#include <noggit/DBC.h>
 #include <noggit/MapTile.h>
 #include <noggit/MapChunk.h>
 #include <noggit/texture_set.hpp>
@@ -11,6 +13,8 @@
 #include <opengl/shader.hpp>
 
 #include <external/tracy/Tracy.hpp>
+
+#include <array>
 
 using namespace Noggit::Rendering;
 
@@ -92,6 +96,7 @@ void TileRender::draw (OpenGL::Scoped::use_program& mcnk_shader
 
   _uploaded_alphamap_last_frame = false;
   _num_uploaded_chunk_alphamaps = 0;
+  bool rebuild_ground_effect_preview = false;
 
 
   // iterate all textures to check if there's one that's not loaded yet
@@ -158,6 +163,9 @@ void TileRender::draw (OpenGL::Scoped::use_program& mcnk_shader
       _chunk_instance_data[i].ChunkXZ_TileXZ[3] = static_cast<int>(_map_tile->index.z);
 
       unsigned flags = chunk->getUpdateFlags();
+      rebuild_ground_effect_preview = rebuild_ground_effect_preview
+        || (flags & (ChunkUpdateFlags::ALPHAMAP | ChunkUpdateFlags::GROUND_EFFECT
+                     | ChunkUpdateFlags::DETAILDOODADS_EXCLUSION));
 
       if (!skip_upload_alphamap && (flags & ChunkUpdateFlags::ALPHAMAP || _requires_sampler_reset || _texture_not_loaded))
       {
@@ -279,6 +287,8 @@ void TileRender::draw (OpenGL::Scoped::use_program& mcnk_shader
     _requires_sampler_reset = false;
     _requires_ground_effect_color_recalc = false;
     _require_geffect_active_texture_update = false;
+    if (rebuild_ground_effect_preview)
+      rebuildGroundEffectPreview();
 
     if (_split_drawcall)
     {
@@ -404,6 +414,69 @@ void TileRender::draw (OpenGL::Scoped::use_program& mcnk_shader
                                draw_call.n_chunks);
     }
 
+  }
+}
+
+std::vector<ModelInstance> const& TileRender::groundEffectPreviewInstances() const
+{
+  return _ground_effect_preview_instances;
+}
+
+void TileRender::rebuildGroundEffectPreview()
+{
+  _ground_effect_preview_instances.clear();
+  constexpr auto cell_size = CHUNKSIZE / 8.0f;
+  for (unsigned chunk_z = 0; chunk_z < 16; ++chunk_z)
+  {
+    for (unsigned chunk_x = 0; chunk_x < 16; ++chunk_x)
+    {
+      auto* chunk = _map_tile->getChunk(chunk_x, chunk_z);
+      auto* textures = chunk ? chunk->getTextureSet() : nullptr;
+      if (!textures || !textures->num()) continue;
+      textures->updateDoodadMapping();
+      auto const seed = static_cast<std::uint32_t>(
+        ((_map_tile->index.x * 64u + _map_tile->index.z) * 256u)
+        + chunk_z * 16u + chunk_x);
+
+      for (unsigned layer = 0; layer < textures->num(); ++layer)
+      {
+        auto const effect_id = textures->getEffectForLayer(layer);
+        if (effect_id == 0xffffffffu || !gGroundEffectTextureDB.CheckIfIdExists(effect_id))
+          continue;
+        auto const record = gGroundEffectTextureDB.getByID(effect_id);
+        std::array<unsigned, 4> weights{};
+        for (std::size_t i = 0; i < weights.size(); ++i)
+          weights[i] = record.getUInt(GroundEffectTextureDB::Weights + i);
+        for (auto const& choice : groundEffectPreviewChoices(
+               record.getUInt(GroundEffectTextureDB::Amount), weights, seed + layer * 977u))
+        {
+          if (textures->getDoodadDisabledAt(choice.x, choice.z)
+              || textures->getDoodadActiveLayerIdAt(choice.x, choice.z) != layer)
+            continue;
+          auto const doodad_id = record.getUInt(GroundEffectTextureDB::Doodads + choice.doodad);
+          if (!doodad_id || !gGroundEffectDoodadDB.CheckIfIdExists(doodad_id)) continue;
+          auto path = std::string{"world/nodxt/detail/"}
+            + gGroundEffectDoodadDB.getByID(doodad_id).getString(GroundEffectDoodadDB::Filename);
+          auto const dot = path.find_last_of('.');
+          if (dot != std::string::npos) path.replace(dot, std::string::npos, ".m2");
+
+          auto const x = chunk->xbase
+            + (static_cast<float>(choice.x) + 0.5f + choice.jitter_x * 0.7f) * cell_size;
+          auto const z = chunk->zbase
+            + (static_cast<float>(choice.z) + 0.5f + choice.jitter_z * 0.7f) * cell_size;
+          glm::vec3 position;
+          chunk->getVertexInternal(x, z, &position);
+          position.x = x;
+          position.z = z;
+          auto& instance = _ground_effect_preview_instances.emplace_back(path, _map_tile->_context);
+          instance.uid = 0;
+          instance.pos = position;
+          instance.dir = {0.0f, choice.yaw_degrees, 0.0f};
+          instance.scale = 1.0f;
+          instance.updateTransformMatrix();
+        }
+      }
+    }
   }
 }
 

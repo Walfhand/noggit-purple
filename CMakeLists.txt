@@ -420,6 +420,13 @@ if(NOGGIT_BUILD_TESTS)
   target_include_directories(noggit-ground-effect-preview-test PRIVATE "${CMAKE_SOURCE_DIR}/src")
   add_test(NAME noggit-ground-effect-preview COMMAND noggit-ground-effect-preview-test)
 
+  add_executable(noggit-blueprint-snapshot-test
+    tests/BlueprintSnapshotTest.cpp
+    src/noggit/ai/BlueprintSnapshot.cpp
+  )
+  target_include_directories(noggit-blueprint-snapshot-test PRIVATE "${CMAKE_SOURCE_DIR}/src")
+  add_test(NAME noggit-blueprint-snapshot COMMAND noggit-blueprint-snapshot-test)
+
 endif()
 
 #add distribution themes

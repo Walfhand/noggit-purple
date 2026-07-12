@@ -72,6 +72,31 @@ namespace Noggit::Ai
               {"half_width_ratio", width}};
     }
 
+    nlohmann::json insetLoop(nlohmann::json const& polygon, double factor, double height)
+    {
+      auto center_u = 0.0;
+      auto center_v = 0.0;
+      for (auto const& p : polygon)
+      {
+        center_u += p.at("u").get<double>();
+        center_v += p.at("v").get<double>();
+      }
+      center_u /= polygon.size();
+      center_v /= polygon.size();
+      auto result = nlohmann::json::array();
+      for (std::size_t i = 0; i < polygon.size(); ++i)
+      {
+        if (polygon.size() == 6 && i == 1) continue;
+        auto const& p = polygon[i];
+        result.push_back(point(
+          center_u + (p.at("u").get<double>() - center_u) * factor,
+          center_v + (p.at("v").get<double>() - center_v) * factor,
+          height));
+      }
+      result.push_back(result.front());
+      return result;
+    }
+
   }
 
   std::optional<std::string> validateMobaArenaFootprint(
@@ -205,26 +230,18 @@ namespace Noggit::Ai
     auto const objective_north = hexArea(.34, .27, .055, base - 1);
     auto const objective_south = hexArea(.66, .73, .055, base - 1);
     auto const jungle_paths = std::array<nlohmann::json, 8>{
-      nlohmann::json::array({point(.13,.13,base), point(.31,.20,base),
-        point(.50,.22,base), point(.69,.20,base), point(.84,.13,base)}),
-      nlohmann::json::array({point(.34,.27,base), point(.41,.22,base),
-        point(.50,.22,base), point(.59,.25,base), point(.56,.45,base)}),
-      nlohmann::json::array({point(.87,.13,base), point(.80,.32,base),
-        point(.78,.50,base), point(.80,.68,base), point(.87,.84,base)}),
-      nlohmann::json::array({point(.66,.34,base), point(.76,.40,base),
-        point(.78,.50,base), point(.76,.59,base), point(.66,.66,base)}),
-      nlohmann::json::array({point(.87,.87,base), point(.69,.80,base),
-        point(.50,.78,base), point(.32,.80,base), point(.13,.87,base)}),
-      nlohmann::json::array({point(.66,.73,base), point(.59,.78,base),
-        point(.50,.78,base), point(.41,.75,base), point(.44,.55,base)}),
-      nlohmann::json::array({point(.13,.87,base), point(.20,.68,base),
-        point(.22,.50,base), point(.20,.32,base), point(.13,.16,base)}),
-      nlohmann::json::array({point(.34,.66,base), point(.24,.60,base),
-        point(.22,.50,base), point(.24,.41,base), point(.34,.34,base)})
+      nlohmann::json::array({point(.13,.13,base), point(.50,.22,base), point(.84,.13,base)}),
+      nlohmann::json::array({point(.34,.27,base), point(.50,.22,base), point(.56,.45,base)}),
+      nlohmann::json::array({point(.87,.13,base), point(.78,.50,base), point(.87,.84,base)}),
+      nlohmann::json::array({point(.66,.34,base), point(.78,.50,base), point(.66,.66,base)}),
+      nlohmann::json::array({point(.87,.87,base), point(.50,.78,base), point(.13,.87,base)}),
+      nlohmann::json::array({point(.66,.73,base), point(.50,.78,base), point(.44,.55,base)}),
+      nlohmann::json::array({point(.13,.87,base), point(.22,.50,base), point(.13,.16,base)}),
+      nlohmann::json::array({point(.34,.66,base), point(.22,.50,base), point(.34,.34,base)})
     };
-    auto const left_base_outer = nlohmann::json::array({point(.01,.70,base + 12),
-      point(.10,.68,base + 12), point(.24,.76,base + 12), point(.30,.90,base + 12),
-      point(.20,.99,base + 12), point(.01,.99,base + 12)});
+    auto const left_base_outer = nlohmann::json::array({point(.01,.70,base + 30),
+      point(.10,.68,base + 30), point(.24,.76,base + 30), point(.30,.90,base + 30),
+      point(.20,.99,base + 30), point(.01,.99,base + 30)});
     auto const left_base_inner = nlohmann::json::array({point(.025,.78,base),
       point(.09,.75,base), point(.18,.81,base), point(.21,.90,base),
       point(.15,.96,base), point(.025,.96,base)});
@@ -244,7 +261,11 @@ namespace Noggit::Ai
     auto terrain_features = nlohmann::json::array();
     for (std::size_t i = 0; i < jungle_polygons.size(); ++i)
       terrain_features.push_back(feature("jungle_" + std::to_string(i + 1) + "_mass", "area",
-        jungle_polygons[i], .005, .035, 0, 20, "absolute", roughness * .35, .55));
+        jungle_polygons[i], .005, .035, 0, 20, "absolute", roughness, .55));
+    for (std::size_t i = 0; i < jungle_polygons.size(); ++i)
+      terrain_features.push_back(feature("jungle_" + std::to_string(i + 1) + "_ridge", "corridor",
+        insetLoop(jungle_polygons[i], .78, base + 30), .012, .012, 3, 45,
+        "absolute", 1.2, .9, .12));
     for (std::size_t i = 0; i < jungle_paths.size(); ++i)
       terrain_features.push_back(feature("jungle_" + std::to_string(i / 2 + 1)
         + (i % 2 == 0 ? "_main_path" : "_branch_path"), "corridor",
@@ -256,9 +277,9 @@ namespace Noggit::Ai
     terrain_features.push_back(feature("objective_south", "area",
       objective_south, .005, .025, 2, 65));
     terrain_features.push_back(feature("team_left_outer_wall", "area", left_base_outer,
-      .005, .025, 3, 40, "absolute", .8, .8));
+      .005, .018, 3, 40, "absolute", .8, .9));
     terrain_features.push_back(feature("team_right_outer_wall", "area", right_base_outer,
-      .005, .025, 3, 40, "absolute", .8, .8));
+      .005, .018, 3, 40, "absolute", .8, .9));
     terrain_features.push_back(feature("team_left_inner_court", "area", left_base_inner,
       .005, .014, 1, 70));
     terrain_features.push_back(feature("team_right_inner_court", "area", right_base_inner,
@@ -266,13 +287,13 @@ namespace Noggit::Ai
     auto addGate = [&](std::string name, double u0, double v0, double u1, double v1)
     {
       terrain_features.push_back(feature(std::move(name), "corridor",
-        nlohmann::json::array({point(u0, v0, base + 6), point(u1, v1, base + 6)}),
+        nlohmann::json::array({point(u0, v0, base + 30), point(u1, v1, base + 30)}),
         .014, .008, 3, 95, "absolute", 0, 1));
     };
     addGate("team_left_upper_defender_gate", .105, .765, .135, .790);
-    addGate("team_left_lower_defender_gate", .185, .845, .215, .870);
+    addGate("team_left_lower_defender_gate", .200, .865, .220, .885);
     addGate("team_right_upper_defender_gate", .895, .235, .865, .210);
-    addGate("team_right_lower_defender_gate", .815, .155, .785, .130);
+    addGate("team_right_lower_defender_gate", .800, .135, .780, .115);
     terrain_features.push_back(feature("top_lane", "corridor", top,
       lane_width, .03, 1, 90, "absolute", 0, 1, .18));
     terrain_features.push_back(feature("middle_lane", "corridor", middle,
@@ -293,7 +314,7 @@ namespace Noggit::Ai
     auto const role_scatter = std::array{
       RoleScatter{"canopy", 1.0, .018, 3.0, .68, 0, 34},
       RoleScatter{"understory", 3.0, .006, 5.0, .72, 0, 42},
-      RoleScatter{"rock", .5, .014, 2.5, .58, 6, 52},
+      RoleScatter{"rock", 1.5, .014, 2.5, .62, 18, 70},
       RoleScatter{"detail", 5.0, .003, 7.0, .75, 0, 30}
     };
     auto total_factor = 0.0;
@@ -343,8 +364,8 @@ namespace Noggit::Ai
 
     nlohmann::json terrain = {{"texture_paths", textures}, {"steep_texture_layer", 3},
       {"slope_start_degrees", 18}, {"slope_full_degrees", 34},
-      {"edge_noise_ratio", .006}, {"max_slope_degrees", 32},
-      {"smoothing_strength", .45}, {"features", std::move(terrain_features)}};
+      {"edge_noise_ratio", .006}, {"max_slope_degrees", 60},
+      {"smoothing_strength", .25}, {"features", std::move(terrain_features)}};
     nlohmann::json liquid = {{"replace_existing", true}, {"edge_noise_ratio", .004},
       {"features", nlohmann::json::array({{{"name", "central_river"}, {"shape", "corridor"},
         {"points", withoutHeight(river)}, {"half_width_ratio", river_width * .78},
@@ -360,6 +381,7 @@ namespace Noggit::Ai
       {"topology", {{"lanes", 3}, {"bases", 2}, {"river", 1},
                     {"objective_pits", 2}, {"jungle_regions", 4},
                     {"jungle_camps", 12}, {"jungle_masses", 4},
+                    {"jungle_ridges", 4},
                     {"jungle_paths", 8}, {"fortified_bases", 2},
                     {"public_entrances_per_base", 3},
                     {"decorative_defender_gates_per_base", 2}}},

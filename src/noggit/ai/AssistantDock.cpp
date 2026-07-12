@@ -1,6 +1,7 @@
 // This file is part of Noggit3, licensed under GNU General Public License (version 3).
 
 #include <noggit/ai/AssistantDock.hpp>
+#include <noggit/ai/BlueprintSnapshot.hpp>
 #include <noggit/ai/MobaArenaBlueprint.hpp>
 #include <noggit/ai/ProceduralLiquidLayout.hpp>
 #include <noggit/ai/ProceduralLayout.hpp>
@@ -20,6 +21,7 @@
 #include <noggit/TextureManager.h>
 #include <noggit/World.h>
 #include <noggit/application/NoggitApplication.hpp>
+#include <noggit/project/CurrentProject.hpp>
 #include <noggit/scoped_blp_texture_reference.hpp>
 #include <noggit/texture_set.hpp>
 #include <noggit/tool_enums.hpp>
@@ -65,6 +67,7 @@
 #include <cmath>
 #include <cstdint>
 #include <exception>
+#include <filesystem>
 #include <functional>
 #include <limits>
 #include <map>
@@ -98,6 +101,7 @@ Pour une création, une refonte ou une opération portant sur toute la carte :
 Après generate_terrain_on_map, utilise blend_terrain_textures_on_map pour répartir les textures selon la hauteur et la pente. apply_terrain_layout_on_map produit déjà sa texturation finale par zone : ne l'écrase ensuite ni avec blend_terrain_textures_on_map ni avec set_base_texture_on_map. Réserve paint_texture aux retouches locales.
 Pour créer des routes, rivières, voies, plateformes ou autres formes continues, utilise apply_terrain_layout_on_map afin d'appliquer ensemble leur hauteur et leurs textures sémantiques.
 Pour toute arène MOBA complète, utilise create_moba_arena_blueprint après avoir choisi quatre textures dans l'ordre herbe, voie, sol humide, roche et plusieurs assets de jungle. Après approbation du plan, exécute dans l'ordre et sans les modifier les trois next_calls retournés. Le blueprint utilise une topologie en X : bases fortifiées au sud-ouest et au nord-est avec trois entrées, voies latérales longeant les bords, voie médiane et rivière sur deux diagonales opposées, quatre jungles, douze camps et deux fosses d'objectif. N'essaie pas de redessiner ces coordonnées toi-même. Les outils génériques restent destinés aux cartes qui ne sont pas des arènes MOBA.
+Pour les choix par défaut d'une arène MOBA, préfère des textures et modèles d'extensions récentes réellement retournés par les recherches du client ouvert. La texture de voie doit être une vraie route (road/path/trail), pas une terre générique, et lane_width_ratio vaut 0.032 sauf demande contraire.
 Avant une texturation globale, explore plusieurs termes anglais de noms de fichiers et plusieurs pages avec search_textures : grass, dirt, leaf, moss, mud, root et rock. Appelle ensuite preview_textures sur les candidates sérieuses et choisis la palette d'après l'image obtenue, pas seulement d'après leurs noms. Évite de reprendre systématiquement la même famille. Un layout peut référencer jusqu'à 16 textures sur la carte, mais jamais plus de quatre textures actives dans un même chunk ; réserve les variantes aux zones éloignées. Pour casser une grande surface uniforme, ajoute quelques petites areas de texture avec height_mode=offset, height=0 et roughness_amplitude=0 plutôt que de modifier de nouveau tout le relief.
 Une texture de boue n'est pas de l'eau. Pour une rivière, un lac ou un océan visible en jeu, crée d'abord son lit avec apply_terrain_layout_on_map puis appelle apply_liquid_layout_on_map avec les mêmes points. Choisis uniquement un liquid_type_id eau ou océan retourné par inspect_map. Place la surface au-dessus du fond et sous les berges. depth est une profondeur/opacité MH2O normalisée : environ 0.2 à 0.6 pour une eau peu profonde, 0.7 à 1 pour une eau profonde. Utilise replace_existing=true seulement lors d'une refonte totale.
 Pour rendre une jungle, forêt ou zone rocheuse vivante, recherche plusieurs arbres, buissons, petites plantes, bois mort et rochers avec search_assets puis utilise scatter_assets_on_map après le relief et l'eau. Classe chaque asset dans canopy, understory, rock ou detail. Utilise au moins deux espèces de canopée, du sous-bois et des rochers pour une arène MOBA ; spacing_multiplier doit être plus grand pour les grands arbres et plus petit pour les détails. Décris les zones par des polygones, exclue explicitement les voies et plateformes avec des corridors, et laisse aussi l'outil éviter l'eau MH2O. cluster_scale et cluster_strength créent des massifs et des trouées à basse fréquence ; ne distribue pas toutes les espèces uniformément. N'utilise pas le scatter pour les bâtiments uniques ou les objectifs placés précisément.
@@ -509,28 +513,39 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
   {
     if (_busy || !_map_view || !_map_view->getWorld()) return;
 
+    auto* world = _map_view->getWorld();
+    auto const project_path = std::filesystem::path(
+      Noggit::Project::CurrentProject::get()->ProjectPath);
+    auto const map_relative_path = std::filesystem::path(
+      BlizzardArchive::ClientData::normalizeFilenameInternal(
+        "world/maps/" + world->basename));
+    auto const map_path = project_path / map_relative_path;
+    auto const snapshot_path = project_path / ".noggit" / "moba-blueprint-snapshots"
+      / BlizzardArchive::ClientData::normalizeFilenameInternal(world->basename);
+    auto const can_regenerate = std::filesystem::is_directory(snapshot_path);
+
     static auto const default_specification = R"json({
   "texture_paths": [
-    "tileset/6.0/nagrand/data/6ng_grass03_1024.blp",
-    "tileset/6.0/nagrand/data/6ng_dirt03_512.blp",
+    "tileset/6.0/tanaanjungle/data/6tj_junglegrass02_512.blp",
+    "tileset/6.0/tanaanjungle/data/6tj_road_02_512.blp",
     "tileset/6.0/tanaanjungle/data/6tj_mud_01_512.blp",
-    "tileset/6.0/nagrand/data/6ng_rock01a_512.blp"
+    "tileset/6.0/tanaanjungle/data/6tj_rock_02_1024.blp"
   ],
   "liquid_type_id": 1,
   "assets": [
-    {"path":"world/kalimdor/ashenvale/passivedoodads/ashenvaletrees/ashenvaletree01.m2","role":"canopy","weight":3,"min_scale":0.8,"max_scale":1.2,"spacing_multiplier":1.2},
-    {"path":"world/kalimdor/ashenvale/passivedoodads/ashenvaletrees/ashenvaletree03.m2","role":"canopy","weight":2,"min_scale":0.8,"max_scale":1.2,"spacing_multiplier":1.1},
-    {"path":"world/kalimdor/ashenvale/passivedoodads/ashenvaletrees/ashenvaletree05.m2","role":"canopy","weight":2,"min_scale":0.8,"max_scale":1.25,"spacing_multiplier":1.15},
-    {"path":"world/azeroth/elwynn/passivedoodads/bush/elwynnbush01.m2","role":"understory","weight":4,"min_scale":0.7,"max_scale":1.2,"spacing_multiplier":0.55},
-    {"path":"world/azeroth/duskwood/passivedoodads/bush/duskwoodbush03.m2","role":"understory","weight":4,"min_scale":0.7,"max_scale":1.15,"spacing_multiplier":0.5},
-    {"path":"world/expansion01/doodads/nagrand/rocks/nagrand_smallrock_01.m2","role":"rock","weight":1,"min_scale":0.8,"max_scale":1.25,"spacing_multiplier":0.9},
-    {"path":"world/expansion01/doodads/nagrand/rocks/nagrand_smallrock_03.m2","role":"rock","weight":1,"min_scale":0.7,"max_scale":1.2,"spacing_multiplier":0.8},
-    {"path":"world/azeroth/stranglethorn/passivedoodads/detail/stranglethornfern01.m2","role":"detail","weight":8,"min_scale":0.65,"max_scale":1.1,"spacing_multiplier":0.35}
+    {"path":"world/expansion05/doodads/tanaanjungle/doodads/6tj_patchtree_bigcanopy_c01.m2","role":"canopy","weight":3,"min_scale":0.8,"max_scale":1.15,"spacing_multiplier":1.25},
+    {"path":"world/expansion05/doodads/tanaanjungle/doodads/6tj_patchtree_bigcanopy_c02.m2","role":"canopy","weight":2,"min_scale":0.8,"max_scale":1.15,"spacing_multiplier":1.2},
+    {"path":"world/expansion05/doodads/tanaanjungle/doodads/6tj_patchtree_bigcanopy_c03.m2","role":"canopy","weight":2,"min_scale":0.8,"max_scale":1.2,"spacing_multiplier":1.2},
+    {"path":"world/expansion05/doodads/tanaanjungle/doodads/6tj_patchswamp_bush_b01.m2","role":"understory","weight":4,"min_scale":0.7,"max_scale":1.15,"spacing_multiplier":0.55},
+    {"path":"world/expansion05/doodads/tanaanjungle/doodads/6tj_patchbushtall_b02.m2","role":"understory","weight":4,"min_scale":0.7,"max_scale":1.15,"spacing_multiplier":0.5},
+    {"path":"world/expansion05/doodads/tanaanjungle/doodads/6tj_rocksmall_a01.m2","role":"rock","weight":1,"min_scale":0.8,"max_scale":1.25,"spacing_multiplier":0.9},
+    {"path":"world/expansion05/doodads/tanaanjungle/doodads/6tj_rocksmall_a03.m2","role":"rock","weight":1,"min_scale":0.75,"max_scale":1.2,"spacing_multiplier":0.8},
+    {"path":"world/expansion05/doodads/tanaanjungle/doodads/6tj_patchfernleaf_01.m2","role":"detail","weight":8,"min_scale":0.65,"max_scale":1.1,"spacing_multiplier":0.35}
   ],
   "seed": "moba-lab-1",
   "base_height": 20,
   "river_depth": 8,
-  "lane_width_ratio": 0.04,
+  "lane_width_ratio": 0.032,
   "river_width_ratio": 0.03,
   "lane_curvature": 0.6,
   "river_curvature": 0.5,
@@ -543,18 +558,23 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
     dialog.resize(760, 680);
     auto* layout = new QVBoxLayout(&dialog);
     auto* description = new QLabel(tr(
-      "Édite la spécification, compile les 26 formes, puis exécute exactement "
-      "terrain → eau → végétation. Carte carrée complète de 3×3 tuiles minimum."), &dialog);
+      "Édite la spécification, compile les formes, puis exécute exactement "
+      "terrain → eau → végétation. Carte carrée complète de 3×3 tuiles minimum. "
+      "%1").arg(can_regenerate
+        ? tr("Une baseline existe : la carte sera restaurée avant la régénération.")
+        : tr("La première exécution enregistrera la carte actuelle comme baseline.")), &dialog);
     description->setWordWrap(true);
     auto* editor = new QPlainTextEdit(&dialog);
     QSettings settings;
-    editor->setPlainText(settings.value("ai/mobaBlueprintLabSpecification",
+    editor->setPlainText(settings.value("ai/mobaBlueprintLabSpecificationV2",
                                          QString::fromUtf8(default_specification)).toString());
     auto* status = new QLabel(tr("Pas encore compilé."), &dialog);
     status->setWordWrap(true);
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
     auto* compile_button = buttons->addButton(tr("Compiler"), QDialogButtonBox::ActionRole);
-    auto* execute_button = buttons->addButton(tr("Compiler et exécuter"), QDialogButtonBox::AcceptRole);
+    auto* execute_button = buttons->addButton(
+      can_regenerate ? tr("Régénérer") : tr("Compiler et exécuter"),
+      QDialogButtonBox::AcceptRole);
     layout->addWidget(description);
     layout->addWidget(editor, 1);
     layout->addWidget(status);
@@ -592,15 +612,60 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
       auto blueprint = compile();
       if (!blueprint) return;
       if (QMessageBox::warning(&dialog, tr("Exécuter le blueprint"),
-          tr("Les trois opérations enregistreront toute la carte et ne seront pas annulables avec Ctrl+Z."),
+          can_regenerate
+            ? tr("La carte actuelle sera remplacée par la baseline, puis régénérée. "
+                 "L'opération n'est pas annulable avec Ctrl+Z.")
+            : tr("La carte actuelle deviendra la baseline des prochaines régénérations. "
+                 "Les opérations ne seront pas annulables avec Ctrl+Z."),
           QMessageBox::Ok | QMessageBox::Cancel, QMessageBox::Cancel) != QMessageBox::Ok) return;
-      settings.setValue("ai/mobaBlueprintLabSpecification", editor->toPlainText());
+
+      std::vector<TileIndex> loaded_tiles;
+      for (std::size_t z = 0; z < 64; ++z)
+        for (std::size_t x = 0; x < 64; ++x)
+          if (world->mapIndex.tileLoaded(TileIndex(x, z)))
+            loaded_tiles.emplace_back(x, z);
+
+      _map_view->makeCurrent();
+      OpenGL::context::scoped_setter const current_context(::gl, _map_view->context());
+      if (can_regenerate)
+      {
+        if (auto const error = restoreBlueprintSnapshot(snapshot_path, map_path))
+        {
+          status->setText(tr("Erreur de restauration : %1")
+                            .arg(QString::fromStdString(*error)));
+          return;
+        }
+        NOGGIT_ACTION_MGR->purge();
+        for (auto const& tile : loaded_tiles) world->reload_tile(tile);
+      }
+      else
+      {
+        world->mapIndex.saveChanged(world);
+        world->horizon.save_wdl(world);
+        for (auto const& tile : loaded_tiles)
+        {
+          if (world->mapIndex.has_unsaved_changes(tile))
+          {
+            status->setText(tr("Impossible de créer la baseline : la carte contient "
+                               "encore des changements non sauvegardés."));
+            return;
+          }
+        }
+        if (auto const error = captureBlueprintSnapshot(map_path, snapshot_path))
+        {
+          status->setText(tr("Erreur de création de la baseline : %1")
+                            .arg(QString::fromStdString(*error)));
+          return;
+        }
+        NOGGIT_ACTION_MGR->purge();
+      }
+      settings.setValue("ai/mobaBlueprintLabSpecificationV2", editor->toPlainText());
       _direct_blueprint_calls = blueprint->at("next_calls");
       _direct_blueprint_calls.push_back({{"name", "validate_map"},
                                          {"arguments", nlohmann::json::object()}});
       _direct_blueprint_results = nlohmann::json::array();
       _direct_blueprint_running = true;
-      _plan_checkpoint_saved = false;
+      _plan_checkpoint_saved = true;
       dialog.accept();
     });
     if (dialog.exec() == QDialog::Accepted && _direct_blueprint_running)

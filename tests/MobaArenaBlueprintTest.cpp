@@ -82,6 +82,7 @@ int main()
           && first.at("topology").at("fortified_bases") == 2
           && first.at("topology").at("jungle_camps") == 12
           && first.at("topology").at("jungle_masses") == 4
+          && first.at("topology").at("jungle_ridges") == 4
           && first.at("topology").at("jungle_paths") == 8
           && first.at("topology").at("public_entrances_per_base") == 3
           && first.at("topology").at("decorative_defender_gates_per_base") == 2,
@@ -96,19 +97,23 @@ int main()
   auto const terrain = Noggit::Ai::parseProceduralLayout(calls[0].at("arguments"));
   auto const liquid = Noggit::Ai::parseProceduralLiquidLayout(calls[1].at("arguments"));
   auto const scatter = Noggit::Ai::parseProceduralScatter(calls[2].at("arguments"));
+  if (!terrain.layout) throw std::runtime_error("terrain: " + terrain.error);
+  if (!liquid.layout) throw std::runtime_error("liquid: " + liquid.error);
+  if (!scatter.scatter) throw std::runtime_error("scatter: " + scatter.error);
   require(terrain.layout && liquid.layout && scatter.scatter,
           "blueprint must compile to valid generic tool arguments");
 
   std::size_t lanes = 0;
   for (auto const& feature : terrain.layout->features)
     if (feature.name.ends_with("_lane")) ++lanes;
-  require(lanes == 3 && terrain.layout->features.size() == 26,
+  require(lanes == 3 && terrain.layout->features.size() == 30,
           "terrain topology is incomplete");
   std::size_t base_outer_walls = 0;
   std::size_t base_inner_courts = 0;
   std::size_t defender_gates = 0;
   std::size_t jungle_masses = 0;
   std::size_t jungle_paths = 0;
+  std::size_t jungle_ridges = 0;
   for (auto const& feature : terrain.layout->features)
   {
     if (feature.name.ends_with("_outer_wall")) ++base_outer_walls;
@@ -116,11 +121,12 @@ int main()
     if (feature.name.ends_with("_defender_gate")) ++defender_gates;
     if (feature.name.starts_with("jungle_") && feature.name.ends_with("_mass")) ++jungle_masses;
     if (feature.name.starts_with("jungle_") && feature.name.ends_with("_path")) ++jungle_paths;
+    if (feature.name.starts_with("jungle_") && feature.name.ends_with("_ridge")) ++jungle_ridges;
   }
   require(base_outer_walls == 2 && base_inner_courts == 2 && defender_gates == 4,
           "fortified base topology is incomplete");
-  require(jungle_masses == 4 && jungle_paths == 8,
-          "jungle masses or paths are incomplete");
+  require(jungle_masses == 4 && jungle_paths == 8 && jungle_ridges == 4,
+          "jungle floors, ridges or paths are incomplete");
   std::vector<std::size_t> feature_cores(terrain.layout->features.size());
   for (int z = 0; z < 256; ++z)
     for (int x = 0; x < 256; ++x)
@@ -139,19 +145,20 @@ int main()
     return Noggit::Ai::sampleProceduralLayout(
       *terrain.layout, u, v, 0.0f, 0.0f, 1600.0f, 1600.0f).height;
   };
-  require(sampleHeight(.50f, .10f) > 24.0f,
-          "jungle mass does not create a meaningful barrier");
-  require(sampleHeight(.50f, .14f) > 24.0f,
-          "jungle is not concealed from the adjacent lane");
+  require(sampleHeight(.50f, .12f) > 42.0f,
+          "jungle ridge is not high enough to block passage");
   require(sampleHeight(.50f, .22f) < 22.0f,
           "jungle main path was not carved back to playable height");
-  require(sampleHeight(.02f, .98f) > 24.0f,
+  require(sampleHeight(.02f, .98f) > 42.0f,
           "base rear wall is not protected");
-  require(sampleHeight(.09f, .73f) < 22.0f
-          && sampleHeight(.18f, .82f) < 22.0f
-          && sampleHeight(.23f, .93f) < 22.0f,
-          "the three public base entrances are not open");
-  require(sampleHeight(.12f, .78f) > 22.0f,
+  auto const gate_a = sampleHeight(.09f, .73f);
+  auto const gate_b = sampleHeight(.18f, .82f);
+  auto const gate_c = sampleHeight(.23f, .93f);
+  if (!(gate_a < 22.0f && gate_b < 22.0f && gate_c < 22.0f))
+    throw std::runtime_error("the three public base entrances are not open: "
+      + std::to_string(gate_a) + "," + std::to_string(gate_b) + ","
+      + std::to_string(gate_c));
+  require(sampleHeight(.12f, .78f) > 42.0f,
           "decorative defender gate became a public entrance");
   require(Noggit::Ai::proceduralScatterExcluded(
             *scatter.scatter, .50f, .50f, 1066.0f, 1066.0f),

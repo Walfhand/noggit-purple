@@ -22,6 +22,7 @@
 #include <noggit/World.h>
 #include <noggit/application/NoggitApplication.hpp>
 #include <noggit/project/CurrentProject.hpp>
+#include <noggit/rendering/GroundEffectPreview.hpp>
 #include <noggit/scoped_blp_texture_reference.hpp>
 #include <noggit/texture_set.hpp>
 #include <noggit/tool_enums.hpp>
@@ -100,11 +101,12 @@ Pour une création, une refonte ou une opération portant sur toute la carte :
 5. appelle validate_map après les opérations globales, puis inspect_map_view une fois avant d'annoncer leur réussite ; utilise la capture pour signaler honnêtement les défauts visibles mais ne relance jamais automatiquement une autre modification globale.
 Après generate_terrain_on_map, utilise blend_terrain_textures_on_map pour répartir les textures selon la hauteur et la pente. apply_terrain_layout_on_map produit déjà sa texturation finale par zone : ne l'écrase ensuite ni avec blend_terrain_textures_on_map ni avec set_base_texture_on_map. Réserve paint_texture aux retouches locales.
 Pour créer des routes, rivières, voies, plateformes ou autres formes continues, utilise apply_terrain_layout_on_map afin d'appliquer ensemble leur hauteur et leurs textures sémantiques.
-Pour toute arène MOBA complète, utilise create_moba_arena_blueprint après avoir choisi quatre textures dans l'ordre herbe, voie, sol humide, roche et plusieurs assets de jungle. Après approbation du plan, exécute dans l'ordre et sans les modifier les trois next_calls retournés. Le blueprint utilise une topologie en X : bases fortifiées au sud-ouest et au nord-est avec trois entrées, voies latérales longeant les bords, voie médiane et rivière sur deux diagonales opposées, quatre jungles, douze camps et deux fosses d'objectif. N'essaie pas de redessiner ces coordonnées toi-même. Les outils génériques restent destinés aux cartes qui ne sont pas des arènes MOBA.
+Pour toute arène MOBA complète, utilise create_moba_arena_blueprint après avoir choisi quatre textures dans l'ordre herbe, voie, sol humide, roche, plusieurs assets de jungle et un GroundEffectTexture avec search_ground_effects. Après approbation du plan, exécute dans l'ordre et sans les modifier les quatre next_calls retournés. Le blueprint utilise une topologie en X : bases fortifiées au sud-ouest et au nord-est avec trois entrées, voies latérales longeant les bords, voie médiane et rivière sur deux diagonales opposées, quatre jungles, douze camps et deux fosses d'objectif. N'essaie pas de redessiner ces coordonnées toi-même. Les outils génériques restent destinés aux cartes qui ne sont pas des arènes MOBA.
 Pour les choix par défaut d'une arène MOBA, préfère des textures et modèles d'extensions récentes réellement retournés par les recherches du client ouvert. La texture de voie doit être une vraie route (road/path/trail), pas une terre générique, et lane_width_ratio vaut 0.032 sauf demande contraire.
 Avant une texturation globale, explore plusieurs termes anglais de noms de fichiers et plusieurs pages avec search_textures : grass, dirt, leaf, moss, mud, root et rock. Appelle ensuite preview_textures sur les candidates sérieuses et choisis la palette d'après l'image obtenue, pas seulement d'après leurs noms. Évite de reprendre systématiquement la même famille. Un layout peut référencer jusqu'à 16 textures sur la carte, mais jamais plus de quatre textures actives dans un même chunk ; réserve les variantes aux zones éloignées. Pour casser une grande surface uniforme, ajoute quelques petites areas de texture avec height_mode=offset, height=0 et roughness_amplitude=0 plutôt que de modifier de nouveau tout le relief.
 Une texture de boue n'est pas de l'eau. Pour une rivière, un lac ou un océan visible en jeu, crée d'abord son lit avec apply_terrain_layout_on_map puis appelle apply_liquid_layout_on_map avec les mêmes points. Choisis uniquement un liquid_type_id eau ou océan retourné par inspect_map. Place la surface au-dessus du fond et sous les berges. depth est une profondeur/opacité MH2O normalisée : environ 0.2 à 0.6 pour une eau peu profonde, 0.7 à 1 pour une eau profonde. Utilise replace_existing=true seulement lors d'une refonte totale.
 Pour rendre une jungle, forêt ou zone rocheuse vivante, recherche plusieurs arbres, buissons, petites plantes, bois mort et rochers avec search_assets puis utilise scatter_assets_on_map après le relief et l'eau. Classe chaque asset dans canopy, understory, rock ou detail. Utilise au moins deux espèces de canopée, du sous-bois et des rochers pour une arène MOBA ; spacing_multiplier doit être plus grand pour les grands arbres et plus petit pour les détails. Décris les zones par des polygones, exclue explicitement les voies et plateformes avec des corridors, et laisse aussi l'outil éviter l'eau MH2O. cluster_scale et cluster_strength créent des massifs et des trouées à basse fréquence ; ne distribue pas toutes les espèces uniformément. N'utilise pas le scatter pour les bâtiments uniques ou les objectifs placés précisément.
+Pour l'herbe fine et les fleurs au sol, utilise search_ground_effects puis apply_ground_effect_on_map sur la texture d'herbe. Pour une herbe verte dense par défaut, passe effect_id=0 : Noggit installe dans le projet un set Battle for Azeroth dense si ses assets sont disponibles. N'utilise pas scatter_assets_on_map pour simuler des milliers de brins : les GroundEffects suivent déjà les alphamaps, sont sauvegardés dans MCLY et restent absents des couches de voie, roche et eau.
 Pour un rendu naturel, trace les corridors avec 5 à 10 points non colinéaires et width_variation_ratio entre 0.1 et 0.3 ; utilise 0 uniquement pour une construction volontairement régulière. Une jungle n'est pas un plateau : utilise shape=area avec height_mode=offset, un delta proche de 0, roughness_amplitude entre 3 et 8 et texture_strength entre 0.35 et 0.75 pour éviter les aplats colorés ; garde roughness_amplitude=0 et texture_strength proche de 1 sur les voies, rivières et plateformes. Utilise des corridors étroits séparés pour les crêtes ou murs. Un étang ou une clairière organique doit être une area à plusieurs points, jamais un corridor à un seul point qui produirait un cercle. Choisis edge_noise_ratio entre 0.003 et 0.012, max_slope_degrees entre 25 et 35 et smoothing_strength entre 0.3 et 0.6. Réserve height_mode=absolute aux formes qui exigent une altitude précise.
 Aux croisements, donne la priorité la plus élevée à la forme qui doit conserver sa hauteur et sa texture finales.
 Regroupe toutes les formes globales dans un seul appel à cet outil ; n'enchaîne jamais des change_terrain_height pour construire un layout complet et ne rappelle pas le layout uniquement pour retoucher ses textures.
@@ -238,6 +240,7 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
       GenerateTerrain,
       ApplyTerrainLayout,
       ApplyLiquidLayout,
+      ApplyGroundEffect,
       ScatterAssets,
       BlendTerrainTextures,
       SetBaseTexture,
@@ -249,6 +252,7 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
       if (name == "generate_terrain_on_map") return MapBatchOperation::GenerateTerrain;
       if (name == "apply_terrain_layout_on_map") return MapBatchOperation::ApplyTerrainLayout;
       if (name == "apply_liquid_layout_on_map") return MapBatchOperation::ApplyLiquidLayout;
+      if (name == "apply_ground_effect_on_map") return MapBatchOperation::ApplyGroundEffect;
       if (name == "scatter_assets_on_map") return MapBatchOperation::ScatterAssets;
       if (name == "blend_terrain_textures_on_map") return MapBatchOperation::BlendTerrainTextures;
       if (name == "set_base_texture_on_map") return MapBatchOperation::SetBaseTexture;
@@ -265,6 +269,178 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
     {
       return operation == MapBatchOperation::GenerateTerrain
         || operation == MapBatchOperation::ApplyTerrainLayout;
+    }
+
+    std::string lowerAscii(std::string value)
+    {
+      std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c)
+      {
+        return static_cast<char>(std::tolower(c));
+      });
+      return value;
+    }
+
+    constexpr auto lush_ground_effect_id = 134532u;
+    constexpr std::array<unsigned, 4> lush_ground_doodad_ids{1846u, 1847u, 1848u, 1849u};
+    constexpr std::array<std::string_view, 4> lush_ground_doodad_names{
+      "8kulgrass01.mdl", "8kulgrass02.mdl", "8kulgrass03.mdl", "8kulgrass04.mdl"
+    };
+    constexpr std::array<std::string_view, 4> previous_lush_ground_doodad_names{
+      "8rivgrass01.mdl", "8rivgrass02.mdl", "8rivgrass03.mdl", "8rivgrass04.mdl"
+    };
+    constexpr std::array<std::string_view, 4> legacy_lush_ground_doodad_names{
+      "8zulgrass01.mdl", "8zulgrass01.mdl", "8kulgrass01.mdl", "8kulgrass04.mdl"
+    };
+    constexpr std::array<unsigned, 4> lush_ground_doodad_flags{0u, 1u, 1u, 1u};
+    constexpr std::array<unsigned, 4> lush_ground_doodad_weights{6u, 39u, 43u, 12u};
+    constexpr std::array<unsigned, 4> previous_lush_ground_doodad_weights{40u, 30u, 20u, 10u};
+    constexpr std::array<unsigned, 4> legacy_lush_ground_doodad_weights{80u, 10u, 7u, 3u};
+
+    bool hasLushGroundEffectAssets()
+    {
+      auto* application = Noggit::Application::NoggitApplication::instance();
+      if (!application->hasClientData()) return false;
+      return std::all_of(lush_ground_doodad_names.begin(), lush_ground_doodad_names.end(),
+        [&](std::string_view name)
+        {
+          auto path = std::string{"world/nodxt/detail/"} + std::string{name};
+          path.replace(path.size() - 4, 4, ".m2");
+          return application->clientData()->exists(path);
+        });
+    }
+
+    std::optional<unsigned> installLushGroundEffect()
+    {
+      if (!hasLushGroundEffectAssets()) return std::nullopt;
+
+      for (std::size_t i = 0; i < lush_ground_doodad_ids.size(); ++i)
+      {
+        auto const id = lush_ground_doodad_ids[i];
+        if (!gGroundEffectDoodadDB.CheckIfIdExists(id)) continue;
+        auto const existing = lowerAscii(
+          gGroundEffectDoodadDB.getByID(id).getString(GroundEffectDoodadDB::Filename));
+        if (existing != lush_ground_doodad_names[i]
+            && existing != previous_lush_ground_doodad_names[i]
+            && existing != legacy_lush_ground_doodad_names[i])
+          throw std::runtime_error("GroundEffectDoodad ID " + std::to_string(id)
+            + " est déjà utilisé par " + existing + '.');
+      }
+
+      auto texture_needs_migration = !gGroundEffectTextureDB.CheckIfIdExists(
+        lush_ground_effect_id);
+      if (!texture_needs_migration)
+      {
+        auto const record = gGroundEffectTextureDB.getByID(lush_ground_effect_id);
+        auto is_legacy = record.getUInt(GroundEffectTextureDB::Amount) == 24u
+          && record.getUInt(GroundEffectTextureDB::TerrainType) == 5u;
+        auto is_previous = record.getUInt(GroundEffectTextureDB::Amount) == 24u
+          && record.getUInt(GroundEffectTextureDB::TerrainType) == 5u;
+        auto is_expected = record.getUInt(GroundEffectTextureDB::Amount) == 12u
+          && record.getUInt(GroundEffectTextureDB::TerrainType) == 5u;
+        for (std::size_t i = 0; i < lush_ground_doodad_ids.size(); ++i)
+        {
+          auto const uses_doodad = record.getUInt(GroundEffectTextureDB::Doodads + i)
+            == lush_ground_doodad_ids[i];
+          is_legacy = is_legacy && uses_doodad
+            && record.getUInt(GroundEffectTextureDB::Weights + i)
+              == legacy_lush_ground_doodad_weights[i];
+          is_previous = is_previous && uses_doodad
+            && record.getUInt(GroundEffectTextureDB::Weights + i)
+              == previous_lush_ground_doodad_weights[i];
+          is_expected = is_expected && uses_doodad
+            && record.getUInt(GroundEffectTextureDB::Weights + i)
+              == lush_ground_doodad_weights[i];
+        }
+        if (!is_legacy && !is_previous && !is_expected)
+          throw std::runtime_error("GroundEffectTexture ID 134532 existe avec un contenu différent.");
+        texture_needs_migration = !is_expected;
+      }
+
+      auto doodads_changed = false;
+      for (std::size_t i = 0; i < lush_ground_doodad_ids.size(); ++i)
+      {
+        auto const id = lush_ground_doodad_ids[i];
+        if (gGroundEffectDoodadDB.CheckIfIdExists(id))
+        {
+          auto record = gGroundEffectDoodadDB.getByID(id);
+          auto const existing = lowerAscii(record.getString(GroundEffectDoodadDB::Filename));
+          if (existing != lush_ground_doodad_names[i]
+              || record.getUInt(GroundEffectDoodadDB::Flags) != lush_ground_doodad_flags[i])
+          {
+            record.writeString(GroundEffectDoodadDB::Filename,
+                               std::string{lush_ground_doodad_names[i]});
+            record.write(GroundEffectDoodadDB::Flags, lush_ground_doodad_flags[i]);
+            doodads_changed = true;
+          }
+          continue;
+        }
+        auto record = gGroundEffectDoodadDB.addRecord(id);
+        record.writeString(GroundEffectDoodadDB::Filename,
+                           std::string{lush_ground_doodad_names[i]});
+        record.write(GroundEffectDoodadDB::Flags, lush_ground_doodad_flags[i]);
+        doodads_changed = true;
+      }
+
+      auto texture_changed = false;
+      if (texture_needs_migration
+          && gGroundEffectTextureDB.CheckIfIdExists(lush_ground_effect_id))
+      {
+        auto record = gGroundEffectTextureDB.getByID(lush_ground_effect_id);
+        for (std::size_t i = 0; i < lush_ground_doodad_ids.size(); ++i)
+        {
+          record.write(GroundEffectTextureDB::Doodads + i, lush_ground_doodad_ids[i]);
+          record.write(GroundEffectTextureDB::Weights + i, lush_ground_doodad_weights[i]);
+        }
+        record.write(GroundEffectTextureDB::Amount, 12u);
+        record.write(GroundEffectTextureDB::TerrainType, 5u);
+        texture_changed = true;
+      }
+      else if (texture_needs_migration)
+      {
+        auto record = gGroundEffectTextureDB.addRecord(lush_ground_effect_id);
+        for (std::size_t i = 0; i < lush_ground_doodad_ids.size(); ++i)
+        {
+          record.write(GroundEffectTextureDB::Doodads + i, lush_ground_doodad_ids[i]);
+          record.write(GroundEffectTextureDB::Weights + i, lush_ground_doodad_weights[i]);
+        }
+        record.write(GroundEffectTextureDB::Amount, 12u);
+        record.write(GroundEffectTextureDB::TerrainType, 5u);
+        texture_changed = true;
+      }
+
+      if (doodads_changed) gGroundEffectDoodadDB.save();
+      if (texture_changed) gGroundEffectTextureDB.save();
+      return lush_ground_effect_id;
+    }
+
+    std::optional<unsigned> automaticGroundEffectId()
+    {
+      unsigned best_id = 0;
+      auto best_score = -1;
+      for (auto it = gGroundEffectTextureDB.begin(); it != gGroundEffectTextureDB.end(); ++it)
+      {
+        auto const id = it->getUInt(GroundEffectTextureDB::ID);
+        auto score = static_cast<int>(it->getUInt(GroundEffectTextureDB::Amount)) * 1000;
+        auto valid_doodads = 0;
+        for (std::size_t slot = 0; slot < 4; ++slot)
+        {
+          auto const doodad_id = it->getUInt(GroundEffectTextureDB::Doodads + slot);
+          auto const weight = it->getUInt(GroundEffectTextureDB::Weights + slot);
+          if (!doodad_id || !weight || !gGroundEffectDoodadDB.CheckIfIdExists(doodad_id))
+            continue;
+          ++valid_doodads;
+          auto const path = lowerAscii(
+            gGroundEffectDoodadDB.getByID(doodad_id).getString(
+              GroundEffectDoodadDB::Filename));
+          score += Noggit::Rendering::groundEffectAssetScore(path);
+        }
+        if (valid_doodads && score > best_score)
+        {
+          best_score = score;
+          best_id = id;
+        }
+      }
+      return best_id ? std::optional<unsigned>{best_id} : std::nullopt;
     }
 
     std::int32_t stableSeed(std::string_view value)
@@ -378,6 +554,9 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
     std::map<std::string, std::size_t> visible_texture_pixels_by_path;
     std::map<std::string, std::size_t> strong_texture_pixels_by_path;
     std::map<std::string, std::uint8_t> max_texture_alpha_by_path;
+    std::map<unsigned, std::size_t> ground_effect_layers_by_id;
+    std::map<std::string, std::size_t> ground_effect_layers_by_texture;
+    std::size_t ground_effect_layers_matched = 0;
     float min_height = std::numeric_limits<float>::max();
     float max_height = std::numeric_limits<float>::lowest();
     float min_slope = std::numeric_limits<float>::max();
@@ -532,6 +711,7 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
     "tileset/6.0/tanaanjungle/data/6tj_rock_02_1024.blp"
   ],
   "liquid_type_id": 1,
+  "ground_effect_texture_id": 0,
   "assets": [
     {"path":"world/expansion05/doodads/tanaanjungle/doodads/6tj_patchtree_bigcanopy_c01.m2","role":"canopy","weight":3,"min_scale":0.8,"max_scale":1.15,"spacing_multiplier":1.25},
     {"path":"world/expansion05/doodads/tanaanjungle/doodads/6tj_patchtree_bigcanopy_c02.m2","role":"canopy","weight":2,"min_scale":0.8,"max_scale":1.15,"spacing_multiplier":1.2},
@@ -559,14 +739,14 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
     auto* layout = new QVBoxLayout(&dialog);
     auto* description = new QLabel(tr(
       "Édite la spécification, compile les formes, puis exécute exactement "
-      "terrain → eau → végétation. Carte carrée complète de 3×3 tuiles minimum. "
+      "terrain → eau → herbe au sol → végétation. Carte carrée complète de 3×3 tuiles minimum. "
       "%1").arg(can_regenerate
         ? tr("Une baseline existe : la carte sera restaurée avant la régénération.")
         : tr("La première exécution enregistrera la carte actuelle comme baseline.")), &dialog);
     description->setWordWrap(true);
     auto* editor = new QPlainTextEdit(&dialog);
     QSettings settings;
-    editor->setPlainText(settings.value("ai/mobaBlueprintLabSpecificationV2",
+    editor->setPlainText(settings.value("ai/mobaBlueprintLabSpecificationV3",
                                          QString::fromUtf8(default_specification)).toString());
     auto* status = new QLabel(tr("Pas encore compilé."), &dialog);
     status->setWordWrap(true);
@@ -659,7 +839,7 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
         }
         NOGGIT_ACTION_MGR->purge();
       }
-      settings.setValue("ai/mobaBlueprintLabSpecificationV2", editor->toPlainText());
+      settings.setValue("ai/mobaBlueprintLabSpecificationV3", editor->toPlainText());
       _direct_blueprint_calls = blueprint->at("next_calls");
       _direct_blueprint_calls.push_back({{"name", "validate_map"},
                                          {"arguments", nlohmann::json::object()}});
@@ -670,7 +850,7 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
     });
     if (dialog.exec() == QDialog::Accepted && _direct_blueprint_running)
     {
-      appendTranscript(tr("Lab MOBA"), tr("Blueprint compilé localement ; exécution des 3 appels exacts puis validation."));
+      appendTranscript(tr("Lab MOBA"), tr("Blueprint compilé localement ; exécution des 4 appels exacts puis validation."));
       _tool_rounds = 0;
       _cancel_requested = false;
       setBusy(true);
@@ -1343,6 +1523,72 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
       }
       procedural_liquid_layout = std::move(*parsed.layout);
     }
+    else if (*operation == MapBatchOperation::ApplyGroundEffect)
+    {
+      static auto const fields = std::set<std::string>{
+        "texture_path", "effect_id", "overwrite"
+      };
+      if (arguments.size() != fields.size()
+          || !arguments.contains("texture_path")
+          || !arguments.contains("effect_id")
+          || !arguments.contains("overwrite")
+          || !arguments.at("texture_path").is_string()
+          || !arguments.at("effect_id").is_number_integer()
+          || !arguments.at("overwrite").is_boolean())
+      {
+        return completeWith(toolError(
+          "apply_ground_effect_on_map exige exactement texture_path, effect_id et overwrite."));
+      }
+      for (auto const& [name, value] : arguments.items())
+      {
+        static_cast<void>(value);
+        if (!fields.contains(name))
+          return completeWith(toolError("Argument non autorisé : " + name));
+      }
+      auto* application = Noggit::Application::NoggitApplication::instance();
+      auto texture_path = BlizzardArchive::ClientData::normalizeFilenameInternal(
+        arguments.at("texture_path").get<std::string>());
+      if (!application->hasClientData() || !texture_path.starts_with("tileset/")
+          || !texture_path.ends_with(".blp") || texture_path.find("..") != std::string::npos
+          || !application->clientData()->exists(texture_path))
+      {
+        return completeWith(toolError(
+          "La texture cible du GroundEffect n'existe pas dans le client : " + texture_path));
+      }
+      auto effect_id = arguments.at("effect_id").get<long long>();
+      if (effect_id < 0 || effect_id > std::numeric_limits<unsigned>::max())
+        return completeWith(toolError("effect_id est hors limites."));
+      if (effect_id == 0 || effect_id == lush_ground_effect_id)
+      {
+        try
+        {
+          auto const lush = installLushGroundEffect();
+          if (lush)
+            effect_id = *lush;
+          else if (effect_id == lush_ground_effect_id)
+            return completeWith(toolError(
+              "Les modèles 8kulgrass01 à 8kulgrass04 requis ne sont pas disponibles dans le client."));
+        }
+        catch (std::exception const& error)
+        {
+          return completeWith(toolError(
+            "Impossible d'installer le GroundEffect dense Battle for Azeroth dans le projet : "
+            + std::string{error.what()}));
+        }
+      }
+      if (effect_id == 0)
+      {
+        auto const fallback = automaticGroundEffectId();
+        if (!fallback)
+          return completeWith(toolError("Aucun GroundEffectTexture valide n'est disponible."));
+        effect_id = *fallback;
+      }
+      if (!gGroundEffectTextureDB.CheckIfIdExists(static_cast<unsigned>(effect_id)))
+        return completeWith(toolError(
+          "GroundEffectTexture.dbc ne contient pas l'ID " + std::to_string(effect_id)));
+      arguments["texture_path"] = std::move(texture_path);
+      arguments["effect_id"] = effect_id;
+    }
     else if (*operation == MapBatchOperation::ScatterAssets)
     {
       auto parsed = parseProceduralScatter(arguments);
@@ -1980,6 +2226,7 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
     bool tile_was_modified = !isValidation(_map_batch->operation)
       && _map_batch->operation != MapBatchOperation::ApplyLiquidLayout
       && _map_batch->operation != MapBatchOperation::ApplyTerrainLayout
+      && _map_batch->operation != MapBatchOperation::ApplyGroundEffect
       && _map_batch->operation != MapBatchOperation::ScatterAssets;
     std::size_t tile_liquid_chunks_changed = 0;
     try
@@ -2013,7 +2260,14 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
               }
               for (std::size_t layer = 0; layer < layer_count; ++layer)
               {
-                ++_map_batch->texture_chunks_by_path[texture_set->filename(layer)];
+                auto const& path = texture_set->filename(layer);
+                ++_map_batch->texture_chunks_by_path[path];
+                auto const effect_id = texture_set->effect(layer);
+                if (effect_id != 0xffffffffu && effect_id != 0)
+                {
+                  ++_map_batch->ground_effect_layers_by_id[effect_id];
+                  ++_map_batch->ground_effect_layers_by_texture[path];
+                }
               }
 
               auto const& temporary = texture_set->getTempAlphamaps();
@@ -2717,6 +2971,36 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
           }
         }
       }
+      else if (_map_batch->operation == MapBatchOperation::ApplyGroundEffect)
+      {
+        auto const texture_path = _map_batch->arguments.at("texture_path").get<std::string>();
+        auto const effect_id = _map_batch->arguments.at("effect_id").get<unsigned>();
+        auto const overwrite = _map_batch->arguments.at("overwrite").get<bool>();
+        for (unsigned z = 0; z < 16; ++z)
+        {
+          for (unsigned x = 0; x < 16; ++x)
+          {
+            auto* chunk = tile->getChunk(x, z);
+            if (chunk->setGroundEffectForTexture(texture_path, effect_id, overwrite))
+            {
+              if (!tile_was_modified) world->mapIndex.setChanged(tile);
+              tile_was_modified = true;
+              ++_map_batch->chunks_changed;
+            }
+            auto* textures = chunk->getTextureSet();
+            if (!textures) continue;
+            for (std::size_t layer = 0; layer < textures->num(); ++layer)
+            {
+              if (textures->filename(layer) == texture_path
+                  && textures->getEffectForLayer(layer) == effect_id)
+                ++_map_batch->ground_effect_layers_matched;
+            }
+          }
+        }
+        // The reserved default can migrate to new doodad models while keeping
+        // the same effect ID, so rebuilding cannot depend only on MCLY changes.
+        tile->renderer()->invalidateGroundEffectPreview();
+      }
       else if (_map_batch->operation == MapBatchOperation::BlendTerrainTextures)
       {
         constexpr int alpha_tile_size = 16 * 64;
@@ -2880,6 +3164,10 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
       {
         _map_batch->tiles_changed += tile_was_modified ? 1 : 0;
       }
+      else if (_map_batch->operation == MapBatchOperation::ApplyGroundEffect)
+      {
+        _map_batch->tiles_changed += tile_was_modified ? 1 : 0;
+      }
       else
       {
         ++_map_batch->tiles_changed;
@@ -3034,12 +3322,16 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
         }
         auto const scatter_is_valid = batch.operation != MapBatchOperation::ScatterAssets
           || batch.scatter_placed > 0;
+        auto const ground_effect_is_valid
+          = batch.operation != MapBatchOperation::ApplyGroundEffect
+            || batch.ground_effect_layers_matched > 0;
         auto const normals_are_current = !changesHeight(batch.operation)
           || batch.normals_recalculated == batch.normal_tiles.size();
         result = {
           {"ok", batch.failures == 0
             && normals_are_current && blend_is_visible && layout_is_valid
-            && liquid_layout_is_valid && scatter_is_valid},
+            && liquid_layout_is_valid && scatter_is_valid
+            && ground_effect_is_valid},
           {"operation", batch.call.name},
           {"tiles_total", batch.tiles.size()},
           {"tiles_changed", batch.tiles_changed},
@@ -3077,6 +3369,11 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
       {
         result["error"] = "Aucun asset n'a été placé. Vérifie les régions, exclusions, pentes, hauteurs et l'espacement.";
       }
+      else if (batch.operation == MapBatchOperation::ApplyGroundEffect
+               && !result.at("ok").get<bool>())
+      {
+        result["error"] = "La texture cible n'est utilisée par aucun chunk ; aucun GroundEffect n'a été appliqué.";
+      }
       if (batch.operation == MapBatchOperation::GenerateTerrain)
       {
         result["preset"] = batch.arguments.at("preset");
@@ -3086,6 +3383,14 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
       else if (batch.operation == MapBatchOperation::SetBaseTexture)
       {
         result["texture_path"] = batch.arguments.at("texture_path");
+      }
+      else if (batch.operation == MapBatchOperation::ApplyGroundEffect)
+      {
+        result["texture_path"] = batch.arguments.at("texture_path");
+        result["effect_id"] = batch.arguments.at("effect_id");
+        result["overwrite"] = batch.arguments.at("overwrite");
+        result["matching_layers"] = batch.ground_effect_layers_matched;
+        result["noggit_preview_supported"] = true;
       }
     }
     else
@@ -3311,6 +3616,13 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
         });
       }
       result["textures_by_path"] = std::move(textures);
+      auto ground_effects = nlohmann::json::array();
+      for (auto const& [id, layers] : batch.ground_effect_layers_by_id)
+      {
+        ground_effects.push_back({{"effect_id", id}, {"layers", layers}});
+      }
+      result["ground_effects"] = std::move(ground_effects);
+      result["ground_effect_layers_by_texture"] = batch.ground_effect_layers_by_texture;
       result["visible_alpha_threshold"] = 8;
       result["strong_alpha_threshold"] = 64;
 
@@ -3912,6 +4224,69 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
         {"height", screenshot.height()},
         {"instruction", "Inspection visuelle uniquement ; ne pas remodifier automatiquement la carte."},
         {preview_image_key, data_url.toStdString()}
+      };
+    }
+
+    if (call.name == "search_ground_effects")
+    {
+      static auto const fields = std::set<std::string>{"query", "limit"};
+      if (arguments.size() != fields.size() || !arguments.contains("query")
+          || !arguments.contains("limit") || !arguments.at("query").is_string()
+          || !arguments.at("limit").is_number_integer())
+        return toolError("search_ground_effects exige exactement query et limit.");
+      for (auto const& [name, value] : arguments.items())
+      {
+        static_cast<void>(value);
+        if (!fields.contains(name)) return toolError("Argument non autorisé : " + name);
+      }
+      auto query = lowerAscii(arguments.at("query").get<std::string>());
+      auto const limit = arguments.at("limit").get<int>();
+      if (query.size() > 128 || limit < 1 || limit > 50
+          || std::any_of(query.begin(), query.end(), [](unsigned char c)
+             { return c < 32 || c > 126; }))
+        return toolError("query doit être ASCII imprimable et limit compris entre 1 et 50.");
+
+      auto matches = nlohmann::json::array();
+      auto total_matches = std::size_t{0};
+      for (auto it = gGroundEffectTextureDB.begin(); it != gGroundEffectTextureDB.end(); ++it)
+      {
+        auto doodads = nlohmann::json::array();
+        std::string searchable;
+        for (std::size_t slot = 0; slot < 4; ++slot)
+        {
+          auto const doodad_id = it->getUInt(GroundEffectTextureDB::Doodads + slot);
+          auto const weight = it->getUInt(GroundEffectTextureDB::Weights + slot);
+          if (!doodad_id || !weight || !gGroundEffectDoodadDB.CheckIfIdExists(doodad_id))
+            continue;
+          auto path = std::string{"world/nodxt/detail/"}
+            + gGroundEffectDoodadDB.getByID(doodad_id).getString(
+              GroundEffectDoodadDB::Filename);
+          auto const dot = path.find_last_of('.');
+          if (dot != std::string::npos) path.replace(dot, std::string::npos, ".m2");
+          path = BlizzardArchive::ClientData::normalizeFilenameInternal(std::move(path));
+          searchable += path + ' ';
+          doodads.push_back({{"path", path}, {"weight", weight}});
+        }
+        if (doodads.empty() || (!query.empty() && searchable.find(query) == std::string::npos))
+          continue;
+        ++total_matches;
+        if (matches.size() < static_cast<std::size_t>(limit))
+        {
+          matches.push_back({
+            {"effect_id", it->getUInt(GroundEffectTextureDB::ID)},
+            {"amount", it->getUInt(GroundEffectTextureDB::Amount)},
+            {"terrain_type", it->getUInt(GroundEffectTextureDB::TerrainType)},
+            {"doodads", std::move(doodads)}
+          });
+        }
+      }
+      auto const returned = matches.size();
+      return {
+        {"ok", true}, {"operation", "search_ground_effects"}, {"query", query},
+        {"effects", std::move(matches)}, {"returned", returned},
+        {"total_matches", total_matches}, {"truncated", total_matches > returned},
+        {"automatic_effect_id", hasLushGroundEffectAssets()
+          ? lush_ground_effect_id : automaticGroundEffectId().value_or(0)}
       };
     }
 

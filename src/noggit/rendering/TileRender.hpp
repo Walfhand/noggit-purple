@@ -7,6 +7,7 @@
 #include <noggit/ModelInstance.h>
 #include <opengl/scoped.hpp>
 #include <array>
+#include <unordered_map>
 
 namespace OpenGL::Scoped
 {
@@ -23,6 +24,12 @@ namespace Noggit::Rendering
     std::array<int, 11> samplers;
     unsigned start_chunk;
     unsigned n_chunks;
+  };
+
+  struct GroundEffectPreviewInstance
+  {
+    Model* model = nullptr;
+    glm::mat4x4 transform{1.0f};
   };
 
   class TileRender : public BaseRender
@@ -46,13 +53,14 @@ namespace Noggit::Rendering
     void discardTileOcclusionQuery();
     void notifyTileRendererOnSelectedTextureChange();;
     void setChunkGroundEffectColor(unsigned int chunkid, glm::vec3 color);
+    void invalidateGroundEffectPreview();
 
     void initChunkData(MapChunk* chunk);
 
     void setChunkDetaildoodadsExclusionData(MapChunk* chunk);
     void setChunkGroundEffectActiveData(MapChunk* chunk);
     void setActiveRenderGEffectTexture(std::string active_texture);
-    std::vector<ModelInstance> const& groundEffectPreviewInstances() const;
+    std::vector<GroundEffectPreviewInstance> const& groundEffectPreviewInstances() const;
 
     [[nodiscard]]
     unsigned objectsFrustumCullTest() const;;
@@ -90,9 +98,11 @@ namespace Noggit::Rendering
     bool _requires_sampler_reset = false;
     bool _requires_paintability_recalc = true;
     bool _requires_ground_effect_color_recalc = true;
+    bool _requires_ground_effect_preview_rebuild = true;
     bool _texture_not_loaded = true;
     bool _require_geffect_active_texture_update = true;
-    std::vector<ModelInstance> _ground_effect_preview_instances;
+    std::unordered_map<std::string, ModelInstance> _ground_effect_preview_models;
+    std::vector<GroundEffectPreviewInstance> _ground_effect_preview_instances;
 
     bool _uploaded_alphamap_last_frame = false;
     int _num_uploaded_chunk_alphamaps = 0; // last frame

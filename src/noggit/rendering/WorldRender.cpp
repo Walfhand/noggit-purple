@@ -722,13 +722,20 @@ void WorldRender::draw (glm::mat4x4 const& model_view
   if (render_settings.draw_models
       && QSettings{}.value("ground_effect_preview", true).toBool())
   {
+    constexpr auto preview_distance = 140.0f;
     for (auto* tile : _world->mapIndex.loaded_tiles())
     {
       if (!tile || !tile->_was_rendered_last_frame) continue;
+      if (misc::getShortestDist(camera_pos.x, camera_pos.z,
+                                tile->xbase, tile->zbase, TILESIZE) > preview_distance)
+        continue;
       for (auto const& instance : tile->renderer()->groundEffectPreviewInstances())
       {
+        auto const dx = instance.transform[3].x - camera_pos.x;
+        auto const dz = instance.transform[3].z - camera_pos.z;
+        if (dx * dx + dz * dz > preview_distance * preview_distance) continue;
         if (instance.model->finishedLoading())
-          models_to_draw[instance.model.get()].push_back(instance.transformMatrix());
+          models_to_draw[instance.model].push_back(instance.transform);
       }
     }
   }

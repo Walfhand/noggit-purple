@@ -96,7 +96,7 @@ void TileRender::draw (OpenGL::Scoped::use_program& mcnk_shader
 
   _uploaded_alphamap_last_frame = false;
   _num_uploaded_chunk_alphamaps = 0;
-  bool rebuild_ground_effect_preview = false;
+  bool rebuild_ground_effect_preview = _requires_ground_effect_preview_rebuild;
 
 
   // iterate all textures to check if there's one that's not loaded yet
@@ -133,7 +133,8 @@ void TileRender::draw (OpenGL::Scoped::use_program& mcnk_shader
 
   // run chunk updates. running this when splitdraw call detected unused sampler configuration as well.
   if (!skip_upload_alphamap && (_map_tile->_chunk_update_flags || is_selected != _selected || need_paintability_update || _requires_sampler_reset || _texture_not_loaded
-    || _requires_ground_effect_color_recalc || _require_geffect_active_texture_update))
+    || _requires_ground_effect_color_recalc || _requires_ground_effect_preview_rebuild
+    || _require_geffect_active_texture_update))
   {
 
     gl.bindBuffer(GL_UNIFORM_BUFFER, _chunk_instance_data_ubo);
@@ -286,6 +287,7 @@ void TileRender::draw (OpenGL::Scoped::use_program& mcnk_shader
 
     _requires_sampler_reset = false;
     _requires_ground_effect_color_recalc = false;
+    _requires_ground_effect_preview_rebuild = false;
     _require_geffect_active_texture_update = false;
     if (rebuild_ground_effect_preview)
       rebuildGroundEffectPreview();
@@ -417,7 +419,7 @@ void TileRender::draw (OpenGL::Scoped::use_program& mcnk_shader
   }
 }
 
-std::vector<ModelInstance> const& TileRender::groundEffectPreviewInstances() const
+std::vector<GroundEffectPreviewInstance> const& TileRender::groundEffectPreviewInstances() const
 {
   return _ground_effect_preview_instances;
 }
@@ -426,6 +428,7 @@ void TileRender::rebuildGroundEffectPreview()
 {
   _ground_effect_preview_instances.clear();
   constexpr auto cell_size = CHUNKSIZE / 8.0f;
+  constexpr auto varied_scale_effect_id = 134532u;
   for (unsigned chunk_z = 0; chunk_z < 16; ++chunk_z)
   {
     for (unsigned chunk_x = 0; chunk_x < 16; ++chunk_x)
@@ -445,35 +448,43 @@ void TileRender::rebuildGroundEffectPreview()
           continue;
         auto const record = gGroundEffectTextureDB.getByID(effect_id);
         std::array<unsigned, 4> weights{};
+        std::array<ModelInstance*, 4> models{};
         for (std::size_t i = 0; i < weights.size(); ++i)
+        {
           weights[i] = record.getUInt(GroundEffectTextureDB::Weights + i);
+          auto const doodad_id = record.getUInt(GroundEffectTextureDB::Doodads + i);
+          if (!doodad_id || !gGroundEffectDoodadDB.CheckIfIdExists(doodad_id)) continue;
+          auto path = std::string{"world/nodxt/detail/"}
+            + gGroundEffectDoodadDB.getByID(doodad_id).getString(GroundEffectDoodadDB::Filename);
+          auto const dot = path.find_last_of('.');
+          if (dot != std::string::npos) path.replace(dot, std::string::npos, ".m2");
+          models[i] = &_ground_effect_preview_models.try_emplace(
+            path, path, _map_tile->_context).first->second;
+        }
         for (auto const& choice : groundEffectPreviewChoices(
                record.getUInt(GroundEffectTextureDB::Amount), weights, seed + layer * 977u))
         {
           if (textures->getDoodadDisabledAt(choice.x, choice.z)
               || textures->getDoodadActiveLayerIdAt(choice.x, choice.z) != layer)
             continue;
-          auto const doodad_id = record.getUInt(GroundEffectTextureDB::Doodads + choice.doodad);
-          if (!doodad_id || !gGroundEffectDoodadDB.CheckIfIdExists(doodad_id)) continue;
-          auto path = std::string{"world/nodxt/detail/"}
-            + gGroundEffectDoodadDB.getByID(doodad_id).getString(GroundEffectDoodadDB::Filename);
-          auto const dot = path.find_last_of('.');
-          if (dot != std::string::npos) path.replace(dot, std::string::npos, ".m2");
+          auto* model = models[choice.doodad];
+          if (!model) continue;
 
           auto const x = chunk->xbase
-            + (static_cast<float>(choice.x) + 0.5f + choice.jitter_x * 0.7f) * cell_size;
+            + (static_cast<float>(choice.x) + 0.5f + choice.jitter_x) * cell_size;
           auto const z = chunk->zbase
-            + (static_cast<float>(choice.z) + 0.5f + choice.jitter_z * 0.7f) * cell_size;
+            + (static_cast<float>(choice.z) + 0.5f + choice.jitter_z) * cell_size;
           glm::vec3 position;
           chunk->getVertexInternal(x, z, &position);
           position.x = x;
           position.z = z;
-          auto& instance = _ground_effect_preview_instances.emplace_back(path, _map_tile->_context);
-          instance.uid = 0;
-          instance.pos = position;
-          instance.dir = {0.0f, choice.yaw_degrees, 0.0f};
-          instance.scale = 1.0f;
-          instance.updateTransformMatrix();
+          model->uid = 0;
+          model->pos = position;
+          model->dir = {0.0f, choice.yaw_degrees, 0.0f};
+          model->scale = effect_id == varied_scale_effect_id ? choice.scale : 1.0f;
+          model->updateTransformMatrix();
+          _ground_effect_preview_instances.push_back(
+            {model->model.get(), model->transformMatrix()});
         }
       }
     }
@@ -735,6 +746,11 @@ void Noggit::Rendering::TileRender::setChunkGroundEffectColor(unsigned int chunk
     _chunk_instance_data[chunkid].ChunkGroundEffectColor[1] = color.g;
     _chunk_instance_data[chunkid].ChunkGroundEffectColor[2] = color.b;
     _chunk_instance_data[chunkid].ChunkGroundEffectColor[3] = 0.0; // not used
+}
+
+void Noggit::Rendering::TileRender::invalidateGroundEffectPreview()
+{
+    _requires_ground_effect_preview_rebuild = true;
 }
 
 void TileRender::initChunkData(MapChunk* chunk)

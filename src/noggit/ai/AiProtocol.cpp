@@ -593,13 +593,40 @@ namespace Noggit::Ai
         {"lane_curvature", {{"type", "number"}, {"minimum", 0.0}, {"maximum", 1.0}}},
         {"river_curvature", {{"type", "number"}, {"minimum", 0.0}, {"maximum", 1.0}}},
         {"jungle_roughness", {{"type", "number"}, {"minimum", 1.0}, {"maximum", 12.0}}},
-        {"vegetation_density_per_tile", {{"type", "integer"}, {"minimum", 1}, {"maximum", 256}}}
+        {"vegetation_density_per_tile", {{"type", "integer"}, {"minimum", 1}, {"maximum", 256}}},
+        {"ground_effect_texture_id", {
+          {"type", "integer"}, {"minimum", 0},
+          {"description", "ID GroundEffectTexture.dbc choisi avec search_ground_effects ; 0 installe et sélectionne l'herbe dense Battle for Azeroth si elle est disponible."}
+        }}
       }},
       {"required", {
         "texture_paths", "liquid_type_id", "assets", "seed", "base_height",
         "river_depth", "lane_width_ratio", "river_width_ratio", "lane_curvature",
-        "river_curvature", "jungle_roughness", "vegetation_density_per_tile"
+        "river_curvature", "jungle_roughness", "vegetation_density_per_tile",
+        "ground_effect_texture_id"
       }},
+      {"additionalProperties", false}
+    };
+
+    auto ground_effect_apply_parameters = nlohmann::json{
+      {"type", "object"},
+      {"properties", {
+        {"texture_path", {{"type", "string"}, {"minLength", 1}, {"maxLength", 260}}},
+        {"effect_id", {{"type", "integer"}, {"minimum", 0},
+          {"description", "ID GroundEffectTexture.dbc ; 0 installe et sélectionne l'herbe dense Battle for Azeroth si elle est disponible."}}},
+        {"overwrite", {{"type", "boolean"}}}
+      }},
+      {"required", {"texture_path", "effect_id", "overwrite"}},
+      {"additionalProperties", false}
+    };
+
+    auto ground_effect_search_parameters = nlohmann::json{
+      {"type", "object"},
+      {"properties", {
+        {"query", {{"type", "string"}, {"maxLength", 128}}},
+        {"limit", {{"type", "integer"}, {"minimum", 1}, {"maximum", 50}}}
+      }},
+      {"required", {"query", "limit"}},
       {"additionalProperties", false}
     };
 
@@ -676,8 +703,15 @@ namespace Noggit::Ai
       },
       {
         {"type", "function"},
+        {"name", "apply_ground_effect_on_map"},
+        {"description", "Affecte un GroundEffectTexture.dbc à toutes les couches utilisant une texture de terrain donnée. Avec effect_id=0, crée dans le projet un set dense Battle for Azeroth requis par les assets Patch-N. Le rendu suit les alphamaps, est sauvegardé dans MCLY et prévisualisé dans Noggit."},
+        {"parameters", std::move(ground_effect_apply_parameters)},
+        {"strict", true}
+      },
+      {
+        {"type", "function"},
         {"name", "create_moba_arena_blueprint"},
-        {"description", "Compile les choix esthétiques de l'IA en une topologie MOBA fixe et cohérente : exactement trois voies, deux bases fortifiées à trois entrées, une rivière, quatre jungles et deux clairières d'objectif. Retourne trois appels génériques à exécuter sans modifier leurs arguments."},
+        {"description", "Compile les choix esthétiques de l'IA en une topologie MOBA fixe et cohérente : exactement trois voies, deux bases fortifiées à trois entrées, une rivière, quatre jungles et deux clairières d'objectif. Retourne quatre appels génériques à exécuter sans modifier leurs arguments."},
         {"parameters", std::move(moba_parameters)},
         {"strict", true}
       },
@@ -728,6 +762,13 @@ namespace Noggit::Ai
         {"name", "search_assets"},
         {"description", "Cherche les modèles M2 et bâtiments WMO disponibles dans la listfile du client afin de préparer les placements d'un plan."},
         {"parameters", std::move(asset_search_parameters)},
+        {"strict", true}
+      },
+      {
+        {"type", "function"},
+        {"name", "search_ground_effects"},
+        {"description", "Cherche dans GroundEffectTexture.dbc les ensembles d'herbes, fleurs et petits détails disponibles, avec leurs modèles et densités réels."},
+        {"parameters", std::move(ground_effect_search_parameters)},
         {"strict", true}
       }
     });

@@ -135,10 +135,10 @@ namespace Noggit::Ai
       "texture_paths", "liquid_type_id", "assets", "seed", "base_height",
       "river_depth", "lane_width_ratio", "river_width_ratio",
       "lane_curvature", "river_curvature", "jungle_roughness",
-      "vegetation_density_per_tile"
+      "vegetation_density_per_tile", "ground_effect_texture_id"
     };
     if (!arguments.is_object() || arguments.size() != fields.size())
-      throw std::invalid_argument("Le blueprint MOBA exige exactement ses 12 paramètres.");
+      throw std::invalid_argument("Le blueprint MOBA exige exactement ses 13 paramètres.");
     for (auto const& [name, value] : arguments.items())
     {
       static_cast<void>(value);
@@ -178,6 +178,10 @@ namespace Noggit::Ai
     if (!density_value.is_number_integer() || density_value.get<int>() < 1
         || density_value.get<int>() > 256)
       throw std::invalid_argument("vegetation_density_per_tile doit être dans [1,256].");
+    auto const& ground_effect_value = arguments.at("ground_effect_texture_id");
+    if (!ground_effect_value.is_number_integer()
+        || ground_effect_value.get<int>() < 0)
+      throw std::invalid_argument("ground_effect_texture_id doit être positif ou nul pour auto.");
 
     auto const base = finiteNumber(arguments, "base_height", -450.0, 4950.0);
     auto const river_depth = finiteNumber(arguments, "river_depth", 2.0, 30.0);
@@ -388,6 +392,9 @@ namespace Noggit::Ai
       {"next_calls", nlohmann::json::array({
         {{"name", "apply_terrain_layout_on_map"}, {"arguments", std::move(terrain)}},
         {{"name", "apply_liquid_layout_on_map"}, {"arguments", std::move(liquid)}},
+        {{"name", "apply_ground_effect_on_map"}, {"arguments", {
+          {"texture_path", textures.at(0)},
+          {"effect_id", ground_effect_value}, {"overwrite", true}}}},
         {{"name", "scatter_assets_on_map"}, {"arguments", std::move(scatter)}}
       })}};
   }

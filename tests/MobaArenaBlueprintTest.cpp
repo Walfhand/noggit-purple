@@ -46,7 +46,8 @@ namespace
       {"seed", "moba-test"}, {"base_height", 20}, {"river_depth", 8},
       {"lane_width_ratio", .04}, {"river_width_ratio", .03},
       {"lane_curvature", .6}, {"river_curvature", .5},
-      {"jungle_roughness", 5}, {"vegetation_density_per_tile", 64}
+      {"jungle_roughness", 5}, {"vegetation_density_per_tile", 64},
+      {"ground_effect_texture_id", 17}
     };
   }
 }
@@ -89,14 +90,17 @@ int main()
           "fixed MOBA topology changed");
 
   auto const& calls = first.at("next_calls");
-  require(calls.size() == 3
+  require(calls.size() == 4
           && calls[0].at("name") == "apply_terrain_layout_on_map"
           && calls[1].at("name") == "apply_liquid_layout_on_map"
-          && calls[2].at("name") == "scatter_assets_on_map",
+          && calls[2].at("name") == "apply_ground_effect_on_map"
+          && calls[2].at("arguments").at("texture_path") == "tileset/grass.blp"
+          && calls[2].at("arguments").at("effect_id") == 17
+          && calls[3].at("name") == "scatter_assets_on_map",
           "generic execution pipeline changed");
   auto const terrain = Noggit::Ai::parseProceduralLayout(calls[0].at("arguments"));
   auto const liquid = Noggit::Ai::parseProceduralLiquidLayout(calls[1].at("arguments"));
-  auto const scatter = Noggit::Ai::parseProceduralScatter(calls[2].at("arguments"));
+  auto const scatter = Noggit::Ai::parseProceduralScatter(calls[3].at("arguments"));
   if (!terrain.layout) throw std::runtime_error("terrain: " + terrain.error);
   if (!liquid.layout) throw std::runtime_error("liquid: " + liquid.error);
   if (!scatter.scatter) throw std::runtime_error("scatter: " + scatter.error);

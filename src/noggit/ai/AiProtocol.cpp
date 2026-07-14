@@ -711,7 +711,7 @@ namespace Noggit::Ai
       {
         {"type", "function"},
         {"name", "create_moba_arena_blueprint"},
-        {"description", "Compile les choix esthétiques de l'IA en une topologie MOBA fixe et cohérente : exactement trois voies, deux bases fortifiées à trois entrées, une rivière, quatre jungles et deux clairières d'objectif. Retourne quatre appels génériques à exécuter sans modifier leurs arguments."},
+        {"description", "Compile les choix esthétiques de l'IA en une topologie MOBA fixe et cohérente sur une carte carrée de 3x3 ou 4x4 tuiles : exactement trois voies, deux bases fortifiées à trois entrées, une rivière, quatre jungles ceinturées de chaînes rocheuses collidables, des murs sur les deux côtés des chemins de jungle et deux clairières d'objectif. Les assets rock doivent être des M2 possédant un maillage de collision. Retourne six appels génériques à exécuter sans modifier leurs arguments."},
         {"parameters", std::move(moba_parameters)},
         {"strict", true}
       },

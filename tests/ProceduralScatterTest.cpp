@@ -62,6 +62,38 @@ int main()
   }
   require(first_species && second_species && clearing,
           "species patches or low-frequency clearings disappeared");
+  auto wall_specification = specification;
+  wall_specification["regions"].push_back({
+    {"name", "jungle_1_wall"}, {"role", "rock"},
+    {"points", nlohmann::json::array({{{"u", .1}, {"v", .1}},
+      {{"u", .9}, {"v", .1}}, {{"u", .9}, {"v", .9}}, {{"u", .1}, {"v", .9}}})},
+    {"density_per_tile", 64}, {"min_spacing_ratio", .004},
+    {"min_height", -100}, {"max_height", 100},
+    {"min_slope_degrees", 0}, {"max_slope_degrees", 90},
+    {"cluster_scale", 2}, {"cluster_strength", 0}
+  });
+  auto const wall_scatter = Noggit::Ai::parseProceduralScatter(wall_specification);
+  require(wall_scatter.scatter.has_value(), "valid wall scatter rejected");
+  auto previous_wall_candidate = Noggit::Ai::ProceduralScatterCandidate{};
+  for (std::size_t index = 0; index < 64; ++index)
+  {
+    auto const candidate = Noggit::Ai::proceduralScatterCandidate(
+      *wall_scatter.scatter, 1, 26, 26, index, 0.0f, 1.0f, 0.0f, 1.0f);
+    auto const on_wall = std::abs(candidate.u - .1f) < .001f
+      || std::abs(candidate.u - .9f) < .001f
+      || std::abs(candidate.v - .1f) < .001f
+      || std::abs(candidate.v - .9f) < .001f;
+    require(candidate.active && on_wall,
+            "wall candidates must form a deterministic perimeter chain");
+    if (index > 0)
+      require(std::hypot(candidate.u - previous_wall_candidate.u,
+                         candidate.v - previous_wall_candidate.v) <= .051f,
+              "wall chain contains an unbounded gap");
+    previous_wall_candidate = candidate;
+    auto const axis_offset = std::fmod(std::abs(candidate.yaw_degrees), 90.0f);
+    require(axis_offset < .001f || 90.0f - axis_offset < .001f,
+            "wall pieces must align with their nearest polygon edge");
+  }
   require(Noggit::Ai::proceduralScatterContains(parsed.scatter->regions[0].points, 0.2f, 0.2f)
           && !Noggit::Ai::proceduralScatterContains(parsed.scatter->regions[0].points, 0.05f, 0.2f),
           "polygon containment changed");

@@ -13,6 +13,7 @@
 #include <noggit/ChunkWater.hpp>
 #include <noggit/DBC.h>
 #include <noggit/MapHeaders.h>
+#include <noggit/ModelHeaders.h>
 #include <noggit/MapChunk.h>
 #include <noggit/MapTile.h>
 #include <noggit/MapView.h>
@@ -29,6 +30,7 @@
 #include <noggit/ui/TexturingGUI.h>
 
 #include <ClientData.hpp>
+#include <ClientFile.hpp>
 #include <FastNoise/FastNoise.h>
 
 #include <QtCore/QByteArray>
@@ -67,6 +69,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <exception>
 #include <filesystem>
 #include <functional>
@@ -101,7 +104,7 @@ Pour une création, une refonte ou une opération portant sur toute la carte :
 5. appelle validate_map après les opérations globales, puis inspect_map_view une fois avant d'annoncer leur réussite ; utilise la capture pour signaler honnêtement les défauts visibles mais ne relance jamais automatiquement une autre modification globale.
 Après generate_terrain_on_map, utilise blend_terrain_textures_on_map pour répartir les textures selon la hauteur et la pente. apply_terrain_layout_on_map produit déjà sa texturation finale par zone : ne l'écrase ensuite ni avec blend_terrain_textures_on_map ni avec set_base_texture_on_map. Réserve paint_texture aux retouches locales.
 Pour créer des routes, rivières, voies, plateformes ou autres formes continues, utilise apply_terrain_layout_on_map afin d'appliquer ensemble leur hauteur et leurs textures sémantiques.
-Pour toute arène MOBA complète, utilise create_moba_arena_blueprint après avoir choisi quatre textures dans l'ordre herbe, voie, sol humide, roche, plusieurs assets de jungle et un GroundEffectTexture avec search_ground_effects. Après approbation du plan, exécute dans l'ordre et sans les modifier les quatre next_calls retournés. Le blueprint utilise une topologie en X : bases fortifiées au sud-ouest et au nord-est avec trois entrées, voies latérales longeant les bords, voie médiane et rivière sur deux diagonales opposées, quatre jungles, douze camps et deux fosses d'objectif. N'essaie pas de redessiner ces coordonnées toi-même. Les outils génériques restent destinés aux cartes qui ne sont pas des arènes MOBA.
+Pour toute arène MOBA complète de 3x3 ou 4x4 tuiles, utilise create_moba_arena_blueprint après avoir choisi quatre textures dans l'ordre herbe, voie, sol humide, roche, plusieurs assets de jungle et un GroundEffectTexture avec search_ground_effects. Après approbation du plan, exécute dans l'ordre et sans les modifier les six next_calls retournés. Le blueprint utilise une topologie en X : bases fortifiées au sud-ouest et au nord-est avec trois entrées, voies latérales longeant les bords, voie médiane et rivière sur deux diagonales opposées, quatre jungles ceinturées de murs rocheux et des murs sur les deux côtés de leurs chemins, douze camps et deux fosses d'objectif. Les assets du rôle rock doivent posséder un maillage de collision M2 : ils habillent les crêtes infranchissables tout en laissant le centre des voies et chemins ouvert. N'essaie pas de redessiner ces coordonnées toi-même. Les outils génériques restent destinés aux cartes qui ne sont pas des arènes MOBA.
 Pour les choix par défaut d'une arène MOBA, préfère des textures et modèles d'extensions récentes réellement retournés par les recherches du client ouvert. La texture de voie doit être une vraie route (road/path/trail), pas une terre générique, et lane_width_ratio vaut 0.032 sauf demande contraire.
 Avant une texturation globale, explore plusieurs termes anglais de noms de fichiers et plusieurs pages avec search_textures : grass, dirt, leaf, moss, mud, root et rock. Appelle ensuite preview_textures sur les candidates sérieuses et choisis la palette d'après l'image obtenue, pas seulement d'après leurs noms. Évite de reprendre systématiquement la même famille. Un layout peut référencer jusqu'à 16 textures sur la carte, mais jamais plus de quatre textures actives dans un même chunk ; réserve les variantes aux zones éloignées. Pour casser une grande surface uniforme, ajoute quelques petites areas de texture avec height_mode=offset, height=0 et roughness_amplitude=0 plutôt que de modifier de nouveau tout le relief.
 Une texture de boue n'est pas de l'eau. Pour une rivière, un lac ou un océan visible en jeu, crée d'abord son lit avec apply_terrain_layout_on_map puis appelle apply_liquid_layout_on_map avec les mêmes points. Choisis uniquement un liquid_type_id eau ou océan retourné par inspect_map. Place la surface au-dessus du fond et sous les berges. depth est une profondeur/opacité MH2O normalisée : environ 0.2 à 0.6 pour une eau peu profonde, 0.7 à 1 pour une eau profonde. Utilise replace_existing=true seulement lors d'une refonte totale.
@@ -111,6 +114,91 @@ Pour un rendu naturel, trace les corridors avec 5 à 10 points non colinéaires 
 Aux croisements, donne la priorité la plus élevée à la forme qui doit conserver sa hauteur et sa texture finales.
 Regroupe toutes les formes globales dans un seul appel à cet outil ; n'enchaîne jamais des change_terrain_height pour construire un layout complet et ne rappelle pas le layout uniquement pour retoucher ses textures.
 Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulables avec Ctrl+Z. Rapporte uniquement leurs compteurs réels. Ne prétends jamais qu'une action a réussi sans résultat ok=true. Si un outil échoue partiellement, indique précisément ce qui a été fait et ce qui reste. Une question n'est permise que si une information indispensable ne peut pas être choisie raisonnablement.)";
+
+    std::optional<std::string> validateScatterAssets(
+      ProceduralScatter& scatter, nlohmann::json& arguments,
+      BlizzardArchive::ClientData* client_data)
+    {
+      auto const requires_collision = std::any_of(
+        scatter.regions.begin(), scatter.regions.end(),
+        [](ProceduralScatterRegion const& region)
+        {
+          return region.role == "rock" && region.name.ends_with("_wall");
+        });
+      for (std::size_t index = 0; index < scatter.assets.size(); ++index)
+      {
+        auto path = BlizzardArchive::ClientData::normalizeFilenameInternal(
+          scatter.assets[index].path);
+        auto const is_m2 = path.ends_with(".m2");
+        auto const is_wmo = path.ends_with(".wmo");
+        auto const is_wmo_group = is_wmo && path.size() >= 8
+          && path[path.size() - 8] == '_'
+          && std::isdigit(static_cast<unsigned char>(path[path.size() - 7]))
+          && std::isdigit(static_cast<unsigned char>(path[path.size() - 6]))
+          && std::isdigit(static_cast<unsigned char>(path[path.size() - 5]));
+        if ((!is_m2 && !is_wmo) || is_wmo_group
+            || path.find("..") != std::string::npos || !client_data->exists(path))
+          return "Asset M2/WMO racine introuvable dans les données client : " + path;
+
+        if (requires_collision && scatter.assets[index].role == "rock")
+        {
+          if (!is_m2)
+            return "Les bandes de mur du blueprint exigent des M2 avec collision : " + path;
+
+          BlizzardArchive::ClientFile file(path, client_data);
+          ModelHeader header{};
+          if (file.isEof() || file.getSize() < sizeof(header))
+            return "Header M2 de mur illisible : " + path;
+          std::memcpy(&header, file.getBuffer(), sizeof(header));
+          auto const rangeFits = [&](std::uint32_t offset, std::uint32_t count,
+                                     std::size_t element_size)
+          {
+            return offset <= file.getSize()
+              && count <= (file.getSize() - offset) / element_size;
+          };
+          auto has_collision = std::memcmp(header.id, "MD20", 4) == 0
+            && header.nBoundingTriangles >= 3
+            && header.nBoundingTriangles % 3 == 0
+            && header.nBoundingVertices >= 3
+            && rangeFits(header.ofsBoundingTriangles,
+                         header.nBoundingTriangles, sizeof(std::uint16_t))
+            && rangeFits(header.ofsBoundingVertices,
+                         header.nBoundingVertices, sizeof(float) * 3);
+          for (std::uint32_t triangle = 0;
+               has_collision && triangle < header.nBoundingTriangles; ++triangle)
+          {
+            std::uint16_t vertex = 0;
+            std::memcpy(&vertex,
+              file.getBuffer() + header.ofsBoundingTriangles
+                + triangle * sizeof(vertex),
+              sizeof(vertex));
+            has_collision = vertex < header.nBoundingVertices;
+          }
+          file.close();
+          if (!has_collision)
+            return "Asset de mur sans maillage de collision M2 valide : " + path;
+        }
+        scatter.assets[index].path = path;
+        arguments["assets"][index]["path"] = std::move(path);
+      }
+      return std::nullopt;
+    }
+
+    std::optional<std::string> validateBlueprintScatterAssets(
+      nlohmann::json& blueprint, BlizzardArchive::ClientData* client_data)
+    {
+      for (auto& call : blueprint.at("next_calls"))
+      {
+        if (call.at("name") != "scatter_assets_on_map") continue;
+        auto& arguments = call.at("arguments");
+        auto parsed = parseProceduralScatter(arguments);
+        if (!parsed.scatter) return parsed.error;
+        if (auto const error = validateScatterAssets(
+              *parsed.scatter, arguments, client_data))
+          return error;
+      }
+      return std::nullopt;
+    }
 
     class PromptEdit final : public QPlainTextEdit
     {
@@ -718,8 +806,8 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
     {"path":"world/expansion05/doodads/tanaanjungle/doodads/6tj_patchtree_bigcanopy_c03.m2","role":"canopy","weight":2,"min_scale":0.8,"max_scale":1.2,"spacing_multiplier":1.2},
     {"path":"world/expansion05/doodads/tanaanjungle/doodads/6tj_patchswamp_bush_b01.m2","role":"understory","weight":4,"min_scale":0.7,"max_scale":1.15,"spacing_multiplier":0.55},
     {"path":"world/expansion05/doodads/tanaanjungle/doodads/6tj_patchbushtall_b02.m2","role":"understory","weight":4,"min_scale":0.7,"max_scale":1.15,"spacing_multiplier":0.5},
-    {"path":"world/expansion05/doodads/tanaanjungle/doodads/6tj_rocksmall_a01.m2","role":"rock","weight":1,"min_scale":0.8,"max_scale":1.25,"spacing_multiplier":0.9},
-    {"path":"world/expansion05/doodads/tanaanjungle/doodads/6tj_rocksmall_a03.m2","role":"rock","weight":1,"min_scale":0.75,"max_scale":1.2,"spacing_multiplier":0.8},
+    {"path":"world/expansion07/doodads/riverzone/8riv_rockwall_tall_01.m2","role":"rock","weight":3,"min_scale":2.0,"max_scale":2.4,"spacing_multiplier":0.9},
+    {"path":"world/expansion07/doodads/riverzone/8riv_rockwall_tall_03.m2","role":"rock","weight":3,"min_scale":2.0,"max_scale":2.4,"spacing_multiplier":0.9},
     {"path":"world/expansion05/doodads/tanaanjungle/doodads/6tj_patchfernleaf_01.m2","role":"detail","weight":8,"min_scale":0.65,"max_scale":1.1,"spacing_multiplier":0.35}
   ],
   "seed": "moba-lab-1",
@@ -739,15 +827,70 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
     auto* layout = new QVBoxLayout(&dialog);
     auto* description = new QLabel(tr(
       "Édite la spécification, compile les formes, puis exécute exactement "
-      "terrain → eau → herbe au sol → végétation. Carte carrée complète de 3×3 tuiles minimum. "
+      "terrain → eau → herbe au sol → murs de crête → murs de chemin → végétation. Carte carrée complète de 3×3 ou 4×4 tuiles. "
       "%1").arg(can_regenerate
         ? tr("Une baseline existe : la carte sera restaurée avant la régénération.")
         : tr("La première exécution enregistrera la carte actuelle comme baseline.")), &dialog);
     description->setWordWrap(true);
     auto* editor = new QPlainTextEdit(&dialog);
     QSettings settings;
-    editor->setPlainText(settings.value("ai/mobaBlueprintLabSpecificationV3",
-                                         QString::fromUtf8(default_specification)).toString());
+    auto saved_specification = settings.value("ai/mobaBlueprintLabSpecificationV6");
+    if (!saved_specification.isValid())
+    {
+      saved_specification = settings.value("ai/mobaBlueprintLabSpecificationV5");
+      if (!saved_specification.isValid())
+      {
+        saved_specification = settings.value("ai/mobaBlueprintLabSpecificationV4");
+        if (!saved_specification.isValid())
+          saved_specification = settings.value(
+            "ai/mobaBlueprintLabSpecificationV3", QString::fromUtf8(default_specification));
+      }
+      auto migrated = saved_specification.toString();
+      migrated.replace(
+        "world/expansion05/doodads/tanaanjungle/doodads/6tj_rocksmall_a01.m2",
+        "world/expansion07/doodads/riverzone/8riv_rockwall_tall_01.m2");
+      migrated.replace(
+        "world/expansion05/doodads/tanaanjungle/doodads/6tj_rocksmall_a03.m2",
+        "world/expansion07/doodads/riverzone/8riv_rockwall_tall_03.m2");
+      migrated.replace(
+        "world/expansion07/doodads/riverzone/8riv_rockwall_01.m2",
+        "world/expansion07/doodads/riverzone/8riv_rockwall_tall_01.m2");
+      migrated.replace(
+        "world/expansion07/doodads/riverzone/8riv_rockwall_03.m2",
+        "world/expansion07/doodads/riverzone/8riv_rockwall_tall_03.m2");
+      try
+      {
+        auto specification = nlohmann::json::parse(migrated.toStdString());
+        auto unique_assets = nlohmann::json::array();
+        std::set<std::string> paths;
+        for (auto asset : specification.at("assets"))
+        {
+          if (asset.at("path")
+              == "world/expansion07/doodads/riverzone/8riv_rockwall_02.m2")
+            asset["path"] =
+              "world/expansion07/doodads/riverzone/8riv_rockwall_tall_03.m2";
+          if (asset.value("role", std::string{}) == "rock"
+              && asset.at("min_scale").is_number()
+              && asset.at("max_scale").is_number())
+          {
+            auto const min_scale = std::max(2.0, asset.at("min_scale").get<double>());
+            asset["min_scale"] = min_scale;
+            asset["max_scale"] = std::max(
+              {2.4, min_scale, asset.at("max_scale").get<double>()});
+          }
+          if (paths.insert(asset.at("path").get<std::string>()).second)
+            unique_assets.push_back(std::move(asset));
+        }
+        specification["assets"] = std::move(unique_assets);
+        migrated = QString::fromStdString(specification.dump(2));
+      }
+      catch (std::exception const&)
+      {
+        // Keep the user's text editable; compilation will report malformed JSON.
+      }
+      saved_specification = migrated;
+    }
+    editor->setPlainText(saved_specification.toString());
     auto* status = new QLabel(tr("Pas encore compilé."), &dialog);
     status->setWordWrap(true);
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
@@ -774,6 +917,12 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
           throw std::invalid_argument(*error);
         auto blueprint = compileMobaArenaBlueprint(
           nlohmann::json::parse(editor->toPlainText().toStdString()));
+        auto* application = Noggit::Application::NoggitApplication::instance();
+        if (!application->hasClientData())
+          throw std::invalid_argument("Aucune donnée client n'est chargée.");
+        if (auto const error = validateBlueprintScatterAssets(
+              blueprint, application->clientData()))
+          throw std::invalid_argument(*error);
         auto const features = blueprint.at("next_calls").at(0).at("arguments")
           .at("features").size();
         status->setText(tr("Compilation valide : %1 formes, %2 appels exacts.")
@@ -839,7 +988,7 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
         }
         NOGGIT_ACTION_MGR->purge();
       }
-      settings.setValue("ai/mobaBlueprintLabSpecificationV3", editor->toPlainText());
+      settings.setValue("ai/mobaBlueprintLabSpecificationV6", editor->toPlainText());
       _direct_blueprint_calls = blueprint->at("next_calls");
       _direct_blueprint_calls.push_back({{"name", "validate_map"},
                                          {"arguments", nlohmann::json::object()}});
@@ -850,7 +999,7 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
     });
     if (dialog.exec() == QDialog::Accepted && _direct_blueprint_running)
     {
-      appendTranscript(tr("Lab MOBA"), tr("Blueprint compilé localement ; exécution des 4 appels exacts puis validation."));
+      appendTranscript(tr("Lab MOBA"), tr("Blueprint compilé localement ; exécution des 6 appels exacts puis validation."));
       _tool_rounds = 0;
       _cancel_requested = false;
       setBusy(true);
@@ -896,6 +1045,7 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
     FunctionCall const&, nlohmann::json const& result)
   {
     _direct_blueprint_results.push_back(result);
+    if (!result.value("ok", false)) _direct_blueprint_calls.clear();
     ++_tool_rounds;
     QTimer::singleShot(0, this, [this] { startNextDirectBlueprintCall(); });
   }
@@ -1602,26 +1752,9 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
       {
         return completeWith(toolError("Aucune donnée client n'est chargée."));
       }
-      for (std::size_t index = 0; index < parsed.scatter->assets.size(); ++index)
-      {
-        auto path = BlizzardArchive::ClientData::normalizeFilenameInternal(
-          parsed.scatter->assets[index].path);
-        auto const is_m2 = path.ends_with(".m2");
-        auto const is_wmo = path.ends_with(".wmo");
-        auto const is_wmo_group = is_wmo && path.size() >= 8
-          && path[path.size() - 8] == '_'
-          && std::isdigit(static_cast<unsigned char>(path[path.size() - 7]))
-          && std::isdigit(static_cast<unsigned char>(path[path.size() - 6]))
-          && std::isdigit(static_cast<unsigned char>(path[path.size() - 5]));
-        if ((!is_m2 && !is_wmo) || is_wmo_group || path.find("..") != std::string::npos
-            || !application->clientData()->exists(path))
-        {
-          return completeWith(toolError(
-            "Asset M2/WMO racine introuvable dans les données client : " + path));
-        }
-        parsed.scatter->assets[index].path = path;
-        arguments["assets"][index]["path"] = std::move(path);
-      }
+      if (auto const error = validateScatterAssets(
+            *parsed.scatter, arguments, application->clientData()))
+        return completeWith(toolError(*error));
       procedural_scatter = std::move(*parsed.scatter);
     }
     else if (*operation == MapBatchOperation::BlendTerrainTextures)
@@ -2869,8 +3002,17 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
             _map_batch->occupied_positions.emplace_back(
               glm::vec2{instance.pos.x, instance.pos.z}, 0.0f);
         };
-        world->getModelInstanceStorage().for_each_m2_instance(rememberInstance);
-        world->getModelInstanceStorage().for_each_wmo_instance(rememberInstance);
+        auto const wall_batch = std::all_of(
+          scatter.regions.begin(), scatter.regions.end(),
+          [](ProceduralScatterRegion const& region)
+          {
+            return region.role == "rock" && region.name.ends_with("_wall");
+          });
+        if (!wall_batch)
+        {
+          world->getModelInstanceStorage().for_each_m2_instance(rememberInstance);
+          world->getModelInstanceStorage().for_each_wmo_instance(rememberInstance);
+        }
 
         for (std::size_t region_index = 0; region_index < scatter.regions.size(); ++region_index)
         {
@@ -2887,7 +3029,8 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
               ++_map_batch->scatter_rejected_outside;
               continue;
             }
-            if (!proceduralScatterContains(region.points, candidate.u, candidate.v))
+            if (!region.name.ends_with("_wall")
+                && !proceduralScatterContains(region.points, candidate.u, candidate.v))
             {
               ++_map_batch->scatter_rejected_outside;
               continue;
@@ -3839,7 +3982,14 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
             if (world->mapIndex.hasTile(TileIndex(x, z))) tiles.emplace_back(x, z);
         if (auto const error = validateMobaArenaFootprint(tiles))
           return toolError(*error);
-        return compileMobaArenaBlueprint(arguments);
+        auto blueprint = compileMobaArenaBlueprint(arguments);
+        auto* application = Noggit::Application::NoggitApplication::instance();
+        if (!application->hasClientData())
+          return toolError("Aucune donnée client n'est chargée.");
+        if (auto const error = validateBlueprintScatterAssets(
+              blueprint, application->clientData()))
+          return toolError(*error);
+        return blueprint;
       }
       catch (std::exception const& exception)
       {

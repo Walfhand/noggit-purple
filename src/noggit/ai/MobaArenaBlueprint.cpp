@@ -40,6 +40,14 @@ namespace Noggit::Ai
       return {{"u", u}, {"v", v}};
     }
 
+    nlohmann::json withoutHeight(nlohmann::json const& points)
+    {
+      auto result = nlohmann::json::array();
+      for (auto const& p : points)
+        result.push_back(scatterPoint(p.at("u"), p.at("v")));
+      return result;
+    }
+
     nlohmann::json hexArea(double u, double v, double radius, double height)
     {
       return nlohmann::json::array({
@@ -97,6 +105,34 @@ namespace Noggit::Ai
       return result;
     }
 
+    nlohmann::json corridorLoop(
+      nlohmann::json const& path, double half_width, double height)
+    {
+      auto result = nlohmann::json::array();
+      auto normals = std::vector<std::pair<double, double>>{};
+      normals.reserve(path.size());
+      for (std::size_t i = 0; i < path.size(); ++i)
+      {
+        auto const& previous = path[i == 0 ? i : i - 1];
+        auto const& next = path[i + 1 < path.size() ? i + 1 : i];
+        auto const du = next.at("u").get<double>() - previous.at("u").get<double>();
+        auto const dv = next.at("v").get<double>() - previous.at("v").get<double>();
+        auto const length = std::hypot(du, dv);
+        normals.emplace_back(-dv / length, du / length);
+      }
+      for (std::size_t i = 0; i < path.size(); ++i)
+        result.push_back(point(
+          path[i].at("u").get<double>() + normals[i].first * half_width,
+          path[i].at("v").get<double>() + normals[i].second * half_width,
+          height));
+      for (std::size_t i = path.size(); i-- > 0;)
+        result.push_back(point(
+          path[i].at("u").get<double>() - normals[i].first * half_width,
+          path[i].at("v").get<double>() - normals[i].second * half_width,
+          height));
+      return result;
+    }
+
   }
 
   std::optional<std::string> validateMobaArenaFootprint(
@@ -121,6 +157,8 @@ namespace Noggit::Ai
     auto const height = max_z - min_z + 1;
     if (width < 3 || height < 3)
       return "Le blueprint MOBA exige une empreinte d'au moins 3x3 tuiles.";
+    if (width > 4 || height > 4)
+      return "Le blueprint MOBA accepte une empreinte maximale de 4x4 tuiles.";
     if (unique.size() != width * height)
       return "Le blueprint MOBA exige un rectangle plein sans tuile manquante.";
     auto const ratio = static_cast<double>(width) / static_cast<double>(height);
@@ -318,26 +356,59 @@ namespace Noggit::Ai
     auto const role_scatter = std::array{
       RoleScatter{"canopy", 1.0, .018, 3.0, .68, 0, 34},
       RoleScatter{"understory", 3.0, .006, 5.0, .72, 0, 42},
-      RoleScatter{"rock", 1.5, .014, 2.5, .62, 18, 70},
       RoleScatter{"detail", 5.0, .003, 7.0, .75, 0, 30}
     };
-    auto total_factor = 0.0;
+    auto total_factor = 1.5; // Preserve the previous rock share for vegetation density.
     for (auto const& role : role_scatter)
       if (role_counts[role.role] > 0) total_factor += role.density_factor;
     auto const density_scale = std::min(1.0,
       512.0 / (density_value.get<double>() * total_factor));
 
-    nlohmann::json scatter_regions = nlohmann::json::array();
+    nlohmann::json wall_assets = nlohmann::json::array();
+    nlohmann::json vegetation_assets = nlohmann::json::array();
+    for (auto const& asset : assets)
+    {
+      if (asset.is_object() && asset.contains("role") && asset.at("role") == "rock")
+      {
+        auto wall_asset = asset;
+        if (wall_asset.contains("min_scale") && wall_asset.at("min_scale").is_number()
+            && wall_asset.contains("max_scale") && wall_asset.at("max_scale").is_number())
+        {
+          auto const min_scale = std::max(2.0, wall_asset.at("min_scale").get<double>());
+          wall_asset["min_scale"] = min_scale;
+          wall_asset["max_scale"] = std::max(
+            {2.4, min_scale, wall_asset.at("max_scale").get<double>()});
+        }
+        wall_assets.push_back(std::move(wall_asset));
+      }
+      else
+        vegetation_assets.push_back(asset);
+    }
+
+    nlohmann::json wall_regions = nlohmann::json::array();
+    nlohmann::json path_wall_regions = nlohmann::json::array();
+    nlohmann::json vegetation_regions = nlohmann::json::array();
+    constexpr auto wall_density = 256;
     for (std::size_t i = 0; i < jungle_polygons.size(); ++i)
     {
       auto points = nlohmann::json::array();
       for (auto const& p : jungle_polygons[i]) points.push_back(scatterPoint(p.at("u"), p.at("v")));
+      auto wall_loop = insetLoop(jungle_polygons[i], .78, base + 30);
+      wall_loop.erase(wall_loop.end() - 1);
+      wall_regions.push_back({
+        {"name", "jungle_" + std::to_string(i + 1) + "_wall"},
+        {"role", "rock"}, {"points", withoutHeight(wall_loop)},
+        {"density_per_tile", wall_density},
+        {"min_spacing_ratio", .002}, {"min_height", base + 18},
+        {"max_height", base + 60}, {"min_slope_degrees", 0},
+        {"max_slope_degrees", 70}, {"cluster_scale", 2.5},
+        {"cluster_strength", 0.0}});
       for (auto const& role : role_scatter)
       {
         if (role_counts[role.role] == 0) continue;
         auto const density = std::max(1, static_cast<int>(std::lround(
           density_value.get<double>() * role.density_factor * density_scale)));
-        scatter_regions.push_back({
+        vegetation_regions.push_back({
           {"name", "jungle_" + std::to_string(i + 1) + "_" + role.role},
           {"role", role.role}, {"points", points}, {"density_per_tile", density},
           {"min_spacing_ratio", role.spacing}, {"min_height", base - 40},
@@ -346,13 +417,31 @@ namespace Noggit::Ai
           {"cluster_strength", role.strength}});
       }
     }
-    auto withoutHeight = [](nlohmann::json const& points)
+    for (std::size_t i = 0; i < jungle_paths.size(); ++i)
     {
-      auto result = nlohmann::json::array();
-      for (auto const& p : points) result.push_back(scatterPoint(p.at("u"), p.at("v")));
-      return result;
-    };
-    auto exclusions = nlohmann::json::array({
+      path_wall_regions.push_back({
+        {"name", "jungle_" + std::to_string(i / 2 + 1)
+          + (i % 2 == 0 ? "_main_path_wall" : "_branch_path_wall")},
+        {"role", "rock"},
+        {"points", withoutHeight(corridorLoop(jungle_paths[i], .035, base + 8))},
+        {"density_per_tile", wall_density},
+        {"min_spacing_ratio", .002}, {"min_height", base - 10},
+        {"max_height", base + 40}, {"min_slope_degrees", 0},
+        {"max_slope_degrees", 70}, {"cluster_scale", 2.5},
+        {"cluster_strength", 0.0}});
+    }
+    auto wall_exclusions = nlohmann::json::array({
+      exclusion("corridor", withoutHeight(top), lane_width),
+      exclusion("corridor", withoutHeight(middle), lane_width),
+      exclusion("corridor", withoutHeight(bottom), lane_width),
+      exclusion("corridor", withoutHeight(river), river_width),
+      exclusion("area", withoutHeight(left_base_outer), .005),
+      exclusion("area", withoutHeight(right_base_outer), .005),
+      exclusion("area", withoutHeight(objective_north), .005),
+      exclusion("area", withoutHeight(objective_south), .005)
+    });
+    auto path_wall_exclusions = wall_exclusions;
+    auto vegetation_exclusions = nlohmann::json::array({
       exclusion("corridor", withoutHeight(top), lane_width + .025),
       exclusion("corridor", withoutHeight(middle), lane_width + .025),
       exclusion("corridor", withoutHeight(bottom), lane_width + .025),
@@ -362,9 +451,19 @@ namespace Noggit::Ai
       exclusion("area", withoutHeight(objective_north), .025),
       exclusion("area", withoutHeight(objective_south), .025)
     });
+    for (auto const& path : jungle_paths)
+    {
+      wall_exclusions.push_back(exclusion("corridor", withoutHeight(path), .012));
+      path_wall_exclusions.push_back(exclusion("corridor", withoutHeight(path), .027));
+      vegetation_exclusions.push_back(exclusion("corridor", withoutHeight(path), .025));
+    }
     for (auto const& camp : camps)
-      exclusions.push_back(exclusion(
-        "area", withoutHeight(hexArea(camp.u, camp.v, .035, base)), .012));
+    {
+      auto const clearing = withoutHeight(hexArea(camp.u, camp.v, .035, base));
+      wall_exclusions.push_back(exclusion("area", clearing, .004));
+      path_wall_exclusions.push_back(exclusion("area", clearing, .006));
+      vegetation_exclusions.push_back(exclusion("area", clearing, .012));
+    }
 
     nlohmann::json terrain = {{"texture_paths", textures}, {"steep_texture_layer", 3},
       {"slope_start_degrees", 18}, {"slope_full_degrees", 34},
@@ -376,16 +475,30 @@ namespace Noggit::Ai
         {"transition_width_ratio", .012}, {"liquid_type_id", liquid_value},
         {"depth", .65}, {"priority", 50}}})}};
     for (auto& p : liquid["features"][0]["points"]) p["height"] = water_height;
-    nlohmann::json scatter = {{"seed", seed_value}, {"assets", assets},
-      {"regions", std::move(scatter_regions)}, {"exclusions", std::move(exclusions)}};
-    if (auto const parsed = parseProceduralScatter(scatter); !parsed.scatter)
+    auto path_wall_assets = wall_assets;
+    nlohmann::json walls = {{"seed", seed_value}, {"assets", std::move(wall_assets)},
+      {"regions", std::move(wall_regions)}, {"exclusions", std::move(wall_exclusions)}};
+    nlohmann::json path_walls = {{"seed", seed_value},
+      {"assets", std::move(path_wall_assets)},
+      {"regions", std::move(path_wall_regions)},
+      {"exclusions", std::move(path_wall_exclusions)}};
+    nlohmann::json vegetation = {{"seed", seed_value},
+      {"assets", std::move(vegetation_assets)},
+      {"regions", std::move(vegetation_regions)},
+      {"exclusions", std::move(vegetation_exclusions)}};
+    if (auto const parsed = parseProceduralScatter(walls); !parsed.scatter)
+      throw std::invalid_argument(parsed.error);
+    if (auto const parsed = parseProceduralScatter(path_walls); !parsed.scatter)
+      throw std::invalid_argument(parsed.error);
+    if (auto const parsed = parseProceduralScatter(vegetation); !parsed.scatter)
       throw std::invalid_argument(parsed.error);
 
     return {{"ok", true}, {"operation", "create_moba_arena_blueprint"},
       {"topology", {{"lanes", 3}, {"bases", 2}, {"river", 1},
                     {"objective_pits", 2}, {"jungle_regions", 4},
                     {"jungle_camps", 12}, {"jungle_masses", 4},
-                    {"jungle_ridges", 4},
+                    {"jungle_ridges", 4}, {"jungle_wall_bands", 4},
+                    {"jungle_path_wall_bands", 8},
                     {"jungle_paths", 8}, {"fortified_bases", 2},
                     {"public_entrances_per_base", 3},
                     {"decorative_defender_gates_per_base", 2}}},
@@ -395,7 +508,9 @@ namespace Noggit::Ai
         {{"name", "apply_ground_effect_on_map"}, {"arguments", {
           {"texture_path", textures.at(0)},
           {"effect_id", ground_effect_value}, {"overwrite", true}}}},
-        {{"name", "scatter_assets_on_map"}, {"arguments", std::move(scatter)}}
+        {{"name", "scatter_assets_on_map"}, {"arguments", std::move(walls)}},
+        {{"name", "scatter_assets_on_map"}, {"arguments", std::move(path_walls)}},
+        {{"name", "scatter_assets_on_map"}, {"arguments", std::move(vegetation)}}
       })}};
   }
 }

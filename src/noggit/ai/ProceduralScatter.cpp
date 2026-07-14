@@ -92,6 +92,48 @@ namespace Noggit::Ai
           || role == "rock" || role == "detail";
     }
 
+    struct WallSample
+    {
+      float u = 0.0f;
+      float v = 0.0f;
+      float yaw_degrees = 0.0f;
+    };
+
+    WallSample wallSample(std::vector<ProceduralLayoutPoint> const& points,
+                          std::size_t index, std::size_t count)
+    {
+      auto perimeter = 0.0f;
+      for (std::size_t index = 0; index < points.size(); ++index)
+      {
+        auto const& first = points[index];
+        auto const& second = points[(index + 1) % points.size()];
+        perimeter += std::hypot(second.u - first.u, second.v - first.v);
+      }
+      if (perimeter <= 0.0f || count == 0) return {};
+
+      auto remaining = (static_cast<float>(index % count) + 0.5f)
+        / static_cast<float>(count) * perimeter;
+      for (std::size_t edge = 0; edge < points.size(); ++edge)
+      {
+        auto const& first = points[edge];
+        auto const& second = points[(edge + 1) % points.size()];
+        auto const du = second.u - first.u;
+        auto const dv = second.v - first.v;
+        auto const length = std::hypot(du, dv);
+        if (remaining > length && edge + 1 < points.size())
+        {
+          remaining -= length;
+          continue;
+        }
+        auto const progress = length > 0.0f
+          ? std::clamp(remaining / length, 0.0f, 1.0f) : 0.0f;
+        auto yaw = std::atan2(dv, -du) * 57.29577951308232f;
+        if (yaw < 0.0f) yaw += 360.0f;
+        return {first.u + du * progress, first.v + dv * progress, yaw};
+      }
+      return {points.front().u, points.front().v, 0.0f};
+    }
+
     bool parsePoints(nlohmann::json const& values,
                      std::vector<ProceduralLayoutPoint>& points,
                      std::size_t minimum)
@@ -240,6 +282,21 @@ namespace Noggit::Ai
     auto const base = hash(scatter.seed, {region_index, tile_x, tile_z, candidate_index});
     ProceduralScatterCandidate candidate;
     auto const& region = scatter.regions[region_index];
+    auto const is_wall = region.name.ends_with("_wall");
+    if (is_wall)
+    {
+      auto const sample = wallSample(
+        region.points, candidate_index, region.density_per_tile);
+      candidate.u = sample.u;
+      candidate.v = sample.v;
+      candidate.yaw_degrees = sample.yaw_degrees;
+      if (candidate.u < u_min || candidate.u >= u_max
+          || candidate.v < v_min || candidate.v >= v_max)
+      {
+        candidate.active = false;
+        return candidate;
+      }
+    }
     auto region_u_min = 1.0f;
     auto region_u_max = 0.0f;
     auto region_v_min = 1.0f;
@@ -251,17 +308,20 @@ namespace Noggit::Ai
       region_v_min = std::min(region_v_min, point.v);
       region_v_max = std::max(region_v_max, point.v);
     }
-    u_min = std::max(u_min, region_u_min);
-    u_max = std::min(u_max, region_u_max);
-    v_min = std::max(v_min, region_v_min);
-    v_max = std::min(v_max, region_v_max);
-    if (u_min >= u_max || v_min >= v_max)
+    if (!is_wall)
     {
-      candidate.active = false;
-      return candidate;
+      u_min = std::max(u_min, region_u_min);
+      u_max = std::min(u_max, region_u_max);
+      v_min = std::max(v_min, region_v_min);
+      v_max = std::min(v_max, region_v_max);
+      if (u_min >= u_max || v_min >= v_max)
+      {
+        candidate.active = false;
+        return candidate;
+      }
+      candidate.u = u_min + unit(hash(scatter.seed, {base, 1})) * (u_max - u_min);
+      candidate.v = v_min + unit(hash(scatter.seed, {base, 2})) * (v_max - v_min);
     }
-    candidate.u = u_min + unit(hash(scatter.seed, {base, 1})) * (u_max - u_min);
-    candidate.v = v_min + unit(hash(scatter.seed, {base, 2})) * (v_max - v_min);
     auto const massif = smoothNoise(scatter.seed, candidate.u, candidate.v,
                                     region.cluster_scale, region_index + 101);
     auto const clustered_density = std::clamp((massif - 0.25f) / 0.55f, 0.0f, 1.0f);
@@ -287,7 +347,8 @@ namespace Noggit::Ai
     auto const& asset = scatter.assets[candidate.asset_index];
     candidate.scale = asset.min_scale
       + unit(hash(scatter.seed, {base, 4})) * (asset.max_scale - asset.min_scale);
-    candidate.yaw_degrees = unit(hash(scatter.seed, {base, 5})) * 360.0f;
+    if (!is_wall)
+      candidate.yaw_degrees = unit(hash(scatter.seed, {base, 5})) * 360.0f;
     return candidate;
   }
 

@@ -1,6 +1,7 @@
 // This file is part of Noggit3, licensed under GNU General Public License (version 3).
 
 #include <noggit/ai/MobaArenaBlueprint.hpp>
+#include <noggit/ai/ProceduralProps.hpp>
 #include <noggit/ai/ProceduralScatter.hpp>
 
 #include <nlohmann/json.hpp>
@@ -105,6 +106,53 @@ namespace Noggit::Ai
       return result;
     }
 
+    // Shrinks a polygon by a fixed inward distance (mitered edge offset), so a
+    // wall chain can run parallel to the border at a controlled clearance.
+    nlohmann::json offsetLoopInward(
+      nlohmann::json const& polygon, double distance, double height)
+    {
+      auto const size = polygon.size();
+      auto coordinate = [&](std::size_t index, char const* axis)
+      {
+        return polygon[index % size].at(axis).get<double>();
+      };
+      auto buildLoop = [&](double sign)
+      {
+        auto result = nlohmann::json::array();
+        for (std::size_t i = 0; i < size; ++i)
+        {
+          auto normal = [&](std::size_t from, std::size_t to)
+          {
+            auto const du = coordinate(to, "u") - coordinate(from, "u");
+            auto const dv = coordinate(to, "v") - coordinate(from, "v");
+            auto const length = std::hypot(du, dv);
+            return std::pair{sign * dv / length, -sign * du / length};
+          };
+          auto const [nx1, ny1] = normal(i + size - 1, i);
+          auto const [nx2, ny2] = normal(i, i + 1);
+          auto mx = nx1 + nx2;
+          auto my = ny1 + ny2;
+          auto const norm = std::hypot(mx, my);
+          auto const cosine = std::max(.5, norm * .5);
+          result.push_back(point(
+            coordinate(i, "u") + mx / norm * distance / cosine,
+            coordinate(i, "v") + my / norm * distance / cosine,
+            height));
+        }
+        return result;
+      };
+      std::vector<ProceduralLayoutPoint> outline;
+      for (std::size_t i = 0; i < size; ++i)
+        outline.push_back({static_cast<float>(coordinate(i, "u")),
+                           static_cast<float>(coordinate(i, "v")), 0.0f});
+      auto loop = buildLoop(1.0);
+      if (!proceduralScatterContains(
+            outline, static_cast<float>(loop[0].at("u").get<double>()),
+            static_cast<float>(loop[0].at("v").get<double>())))
+        loop = buildLoop(-1.0);
+      return loop;
+    }
+
     nlohmann::json corridorLoop(
       nlohmann::json const& path, double half_width, double height)
     {
@@ -133,6 +181,27 @@ namespace Noggit::Ai
       return result;
     }
 
+    std::size_t wallDensity(
+      nlohmann::json const& points, std::size_t footprint_side_tiles)
+    {
+      constexpr auto tile_size = 1600.0 / 3.0;
+      constexpr auto target_spacing = 32.0;
+      auto density = std::size_t{0};
+      for (std::size_t index = 0; index < points.size(); ++index)
+      {
+        auto const& current = points[index];
+        auto const& next = points[(index + 1) % points.size()];
+        auto const length = std::hypot(
+          current.at("u").get<double>() - next.at("u").get<double>(),
+          current.at("v").get<double>() - next.at("v").get<double>());
+        if (length > 0.0)
+          density += static_cast<std::size_t>(std::ceil(
+            length * static_cast<double>(footprint_side_tiles)
+            * tile_size / target_spacing));
+      }
+      return std::clamp<std::size_t>(density, 1, 512);
+    }
+
   }
 
   std::optional<std::string> validateMobaArenaFootprint(
@@ -155,8 +224,8 @@ namespace Noggit::Ai
     }
     auto const width = max_x - min_x + 1;
     auto const height = max_z - min_z + 1;
-    if (width < 3 || height < 3)
-      return "Le blueprint MOBA exige une empreinte d'au moins 3x3 tuiles.";
+    if (width < 2 || height < 2)
+      return "Le blueprint MOBA exige une empreinte d'au moins 2x2 tuiles.";
     if (width > 4 || height > 4)
       return "Le blueprint MOBA accepte une empreinte maximale de 4x4 tuiles.";
     if (unique.size() != width * height)
@@ -167,16 +236,21 @@ namespace Noggit::Ai
     return std::nullopt;
   }
 
-  nlohmann::json compileMobaArenaBlueprint(nlohmann::json const& arguments)
+  nlohmann::json compileMobaArenaBlueprint(
+    nlohmann::json const& arguments, std::size_t footprint_side_tiles)
   {
+    if (footprint_side_tiles < 2 || footprint_side_tiles > 4)
+      throw std::invalid_argument(
+        "Le blueprint MOBA exige un côté de carte entre 2 et 4 tuiles.");
     static auto const fields = std::set<std::string>{
       "texture_paths", "liquid_type_id", "assets", "seed", "base_height",
       "river_depth", "lane_width_ratio", "river_width_ratio",
       "lane_curvature", "river_curvature", "jungle_roughness",
-      "vegetation_density_per_tile", "ground_effect_texture_id"
+      "vegetation_density_per_tile", "ground_effect_texture_id", "prop_paths",
+      "skybox_path", "skybox_flags"
     };
     if (!arguments.is_object() || arguments.size() != fields.size())
-      throw std::invalid_argument("Le blueprint MOBA exige exactement ses 13 paramètres.");
+      throw std::invalid_argument("Le blueprint MOBA exige exactement ses 16 paramètres.");
     for (auto const& [name, value] : arguments.items())
     {
       static_cast<void>(value);
@@ -204,9 +278,9 @@ namespace Noggit::Ai
       if (asset.is_object() && asset.contains("role") && asset.at("role").is_string())
         ++role_counts[asset.at("role").get<std::string>()];
     if (role_counts["canopy"] < 3 || role_counts["understory"] < 2
-        || role_counts["rock"] < 2 || role_counts["detail"] < 1)
+        || role_counts["wall"] < 2 || role_counts["detail"] < 1)
       throw std::invalid_argument(
-        "Une arène MOBA exige au moins trois canopées, deux sous-bois, deux rochers et un détail au sol.");
+        "Une arène MOBA exige au moins trois canopées, deux sous-bois, deux segments de mur collidables et un détail au sol.");
     if (!seed_value.is_string() || seed_value.get_ref<std::string const&>().empty()
         || seed_value.get_ref<std::string const&>().size() > 64)
       throw std::invalid_argument("seed doit contenir entre un et 64 caractères.");
@@ -220,6 +294,36 @@ namespace Noggit::Ai
     if (!ground_effect_value.is_number_integer()
         || ground_effect_value.get<int>() < 0)
       throw std::invalid_argument("ground_effect_texture_id doit être positif ou nul pour auto.");
+    auto const& skybox_path = arguments.at("skybox_path");
+    auto const& skybox_flags = arguments.at("skybox_flags");
+    if (!skybox_path.is_string() || skybox_path.get_ref<std::string const&>().empty()
+        || skybox_path.get_ref<std::string const&>().size() > 260)
+      throw std::invalid_argument("skybox_path doit être un chemin M2 non vide.");
+    if (!skybox_flags.is_number_integer()
+        || skybox_flags.get<int>() < 0 || skybox_flags.get<int>() > 3)
+      throw std::invalid_argument("skybox_flags doit être compris entre 0 et 3.");
+    static auto const prop_roles = std::set<std::string>{
+      "base_landmark", "objective_landmark", "camp_marker", "lane_lamp",
+      "team_left_light", "team_right_light", "river_light", "flame_light",
+      "lamp_light"
+    };
+    auto const& prop_paths = arguments.at("prop_paths");
+    if (!prop_paths.is_object() || prop_paths.size() != prop_roles.size())
+      throw std::invalid_argument(
+        "prop_paths exige exactement base_landmark, objective_landmark, camp_marker, "
+        "lane_lamp, team_left_light, team_right_light, river_light, flame_light et lamp_light.");
+    for (auto const& [name, value] : prop_paths.items())
+    {
+      if (!prop_roles.contains(name))
+        throw std::invalid_argument("Rôle de prop non autorisé : " + name);
+      if (!value.is_string() || value.get_ref<std::string const&>().empty()
+          || value.get_ref<std::string const&>().size() > 260)
+        throw std::invalid_argument("Chemin de prop invalide pour : " + name);
+    }
+    auto const propPath = [&](char const* role)
+    {
+      return prop_paths.at(role).get<std::string>();
+    };
 
     auto const base = finiteNumber(arguments, "base_height", -450.0, 4950.0);
     auto const river_depth = finiteNumber(arguments, "river_depth", 2.0, 30.0);
@@ -249,18 +353,18 @@ namespace Noggit::Ai
       point(.74, .70 - river_bend, river_height), point(.96, .86 + river_bend, river_height)});
 
     auto const jungle_polygons = std::array<nlohmann::json, 4>{
-      nlohmann::json::array({point(.12,.16,base + 8), point(.24,.075,base + 8),
-        point(.76,.075,base + 8), point(.88,.16,base + 8), point(.56,.45,base + 8),
-        point(.44,.45,base + 8)}),
-      nlohmann::json::array({point(.56,.45,base + 8), point(.88,.16,base + 8),
-        point(.94,.28,base + 8), point(.94,.72,base + 8), point(.86,.84,base + 8),
-        point(.56,.55,base + 8)}),
-      nlohmann::json::array({point(.56,.55,base + 8), point(.88,.84,base + 8),
-        point(.76,.925,base + 8), point(.24,.925,base + 8), point(.12,.84,base + 8),
-        point(.44,.55,base + 8)}),
-      nlohmann::json::array({point(.44,.55,base + 8), point(.12,.84,base + 8),
-        point(.06,.72,base + 8), point(.06,.28,base + 8), point(.14,.16,base + 8),
-        point(.44,.45,base + 8)})
+      nlohmann::json::array({point(.12,.16,base), point(.24,.075,base),
+        point(.76,.075,base), point(.88,.16,base), point(.56,.45,base),
+        point(.44,.45,base)}),
+      nlohmann::json::array({point(.56,.45,base), point(.88,.16,base),
+        point(.94,.28,base), point(.94,.72,base), point(.86,.84,base),
+        point(.56,.55,base)}),
+      nlohmann::json::array({point(.56,.55,base), point(.88,.84,base),
+        point(.76,.925,base), point(.24,.925,base), point(.12,.84,base),
+        point(.44,.55,base)}),
+      nlohmann::json::array({point(.44,.55,base), point(.12,.84,base),
+        point(.06,.72,base), point(.06,.28,base), point(.14,.16,base),
+        point(.44,.45,base)})
     };
     struct Camp { char const* name; double u; double v; };
     auto const camps = std::array{
@@ -281,9 +385,9 @@ namespace Noggit::Ai
       nlohmann::json::array({point(.13,.87,base), point(.22,.50,base), point(.13,.16,base)}),
       nlohmann::json::array({point(.34,.66,base), point(.22,.50,base), point(.34,.34,base)})
     };
-    auto const left_base_outer = nlohmann::json::array({point(.01,.70,base + 30),
-      point(.10,.68,base + 30), point(.24,.76,base + 30), point(.30,.90,base + 30),
-      point(.20,.99,base + 30), point(.01,.99,base + 30)});
+    auto const left_base_outer = nlohmann::json::array({point(.01,.70,base),
+      point(.10,.68,base), point(.24,.76,base), point(.30,.90,base),
+      point(.20,.99,base), point(.01,.99,base)});
     auto const left_base_inner = nlohmann::json::array({point(.025,.78,base),
       point(.09,.75,base), point(.18,.81,base), point(.21,.90,base),
       point(.15,.96,base), point(.025,.96,base)});
@@ -301,13 +405,13 @@ namespace Noggit::Ai
     auto const right_base_inner = mirror(left_base_inner);
 
     auto terrain_features = nlohmann::json::array();
+    terrain_features.push_back(feature("arena_ground", "area",
+      nlohmann::json::array({point(0, 0, base), point(1, 0, base),
+        point(1, 1, base), point(0, 1, base)}),
+      .005, .02, 0, 5, "absolute", 2.0, .85));
     for (std::size_t i = 0; i < jungle_polygons.size(); ++i)
       terrain_features.push_back(feature("jungle_" + std::to_string(i + 1) + "_mass", "area",
         jungle_polygons[i], .005, .035, 0, 20, "absolute", roughness, .55));
-    for (std::size_t i = 0; i < jungle_polygons.size(); ++i)
-      terrain_features.push_back(feature("jungle_" + std::to_string(i + 1) + "_ridge", "corridor",
-        insetLoop(jungle_polygons[i], .78, base + 30), .012, .012, 3, 45,
-        "absolute", 1.2, .9, .12));
     for (std::size_t i = 0; i < jungle_paths.size(); ++i)
       terrain_features.push_back(feature("jungle_" + std::to_string(i / 2 + 1)
         + (i % 2 == 0 ? "_main_path" : "_branch_path"), "corridor",
@@ -318,24 +422,14 @@ namespace Noggit::Ai
       objective_north, .005, .025, 2, 65));
     terrain_features.push_back(feature("objective_south", "area",
       objective_south, .005, .025, 2, 65));
-    terrain_features.push_back(feature("team_left_outer_wall", "area", left_base_outer,
-      .005, .018, 3, 40, "absolute", .8, .9));
-    terrain_features.push_back(feature("team_right_outer_wall", "area", right_base_outer,
-      .005, .018, 3, 40, "absolute", .8, .9));
+    terrain_features.push_back(feature("team_left_base_apron", "area", left_base_outer,
+      .005, .018, 3, 40, "absolute", .4, .9));
+    terrain_features.push_back(feature("team_right_base_apron", "area", right_base_outer,
+      .005, .018, 3, 40, "absolute", .4, .9));
     terrain_features.push_back(feature("team_left_inner_court", "area", left_base_inner,
       .005, .014, 1, 70));
     terrain_features.push_back(feature("team_right_inner_court", "area", right_base_inner,
       .005, .014, 1, 70));
-    auto addGate = [&](std::string name, double u0, double v0, double u1, double v1)
-    {
-      terrain_features.push_back(feature(std::move(name), "corridor",
-        nlohmann::json::array({point(u0, v0, base + 30), point(u1, v1, base + 30)}),
-        .014, .008, 3, 95, "absolute", 0, 1));
-    };
-    addGate("team_left_upper_defender_gate", .105, .765, .135, .790);
-    addGate("team_left_lower_defender_gate", .200, .865, .220, .885);
-    addGate("team_right_upper_defender_gate", .895, .235, .865, .210);
-    addGate("team_right_lower_defender_gate", .800, .135, .780, .115);
     terrain_features.push_back(feature("top_lane", "corridor", top,
       lane_width, .03, 1, 90, "absolute", 0, 1, .18));
     terrain_features.push_back(feature("middle_lane", "corridor", middle,
@@ -356,9 +450,10 @@ namespace Noggit::Ai
     auto const role_scatter = std::array{
       RoleScatter{"canopy", 1.0, .018, 3.0, .68, 0, 34},
       RoleScatter{"understory", 3.0, .006, 5.0, .72, 0, 42},
+      RoleScatter{"rock", 1.5, .008, 4.0, .6, 0, 45},
       RoleScatter{"detail", 5.0, .003, 7.0, .75, 0, 30}
     };
-    auto total_factor = 1.5; // Preserve the previous rock share for vegetation density.
+    auto total_factor = 0.0;
     for (auto const& role : role_scatter)
       if (role_counts[role.role] > 0) total_factor += role.density_factor;
     auto const density_scale = std::min(1.0,
@@ -368,19 +463,8 @@ namespace Noggit::Ai
     nlohmann::json vegetation_assets = nlohmann::json::array();
     for (auto const& asset : assets)
     {
-      if (asset.is_object() && asset.contains("role") && asset.at("role") == "rock")
-      {
-        auto wall_asset = asset;
-        if (wall_asset.contains("min_scale") && wall_asset.at("min_scale").is_number()
-            && wall_asset.contains("max_scale") && wall_asset.at("max_scale").is_number())
-        {
-          auto const min_scale = std::max(2.0, wall_asset.at("min_scale").get<double>());
-          wall_asset["min_scale"] = min_scale;
-          wall_asset["max_scale"] = std::max(
-            {2.4, min_scale, wall_asset.at("max_scale").get<double>()});
-        }
-        wall_assets.push_back(std::move(wall_asset));
-      }
+      if (asset.is_object() && asset.contains("role") && asset.at("role") == "wall")
+        wall_assets.push_back(asset);
       else
         vegetation_assets.push_back(asset);
     }
@@ -388,20 +472,20 @@ namespace Noggit::Ai
     nlohmann::json wall_regions = nlohmann::json::array();
     nlohmann::json path_wall_regions = nlohmann::json::array();
     nlohmann::json vegetation_regions = nlohmann::json::array();
-    constexpr auto wall_density = 256;
     for (std::size_t i = 0; i < jungle_polygons.size(); ++i)
     {
       auto points = nlohmann::json::array();
       for (auto const& p : jungle_polygons[i]) points.push_back(scatterPoint(p.at("u"), p.at("v")));
-      auto wall_loop = insetLoop(jungle_polygons[i], .78, base + 30);
-      wall_loop.erase(wall_loop.end() - 1);
+      auto const wall_loop = offsetLoopInward(
+        jungle_polygons[i], lane_width + .015, base);
+      auto wall_points = withoutHeight(wall_loop);
       wall_regions.push_back({
         {"name", "jungle_" + std::to_string(i + 1) + "_wall"},
-        {"role", "rock"}, {"points", withoutHeight(wall_loop)},
-        {"density_per_tile", wall_density},
-        {"min_spacing_ratio", .002}, {"min_height", base + 18},
-        {"max_height", base + 60}, {"min_slope_degrees", 0},
-        {"max_slope_degrees", 70}, {"cluster_scale", 2.5},
+        {"role", "wall"}, {"points", wall_points},
+        {"density_per_tile", wallDensity(wall_points, footprint_side_tiles)},
+        {"min_spacing_ratio", .002}, {"min_height", base - 15},
+        {"max_height", base + 25}, {"min_slope_degrees", 0},
+        {"max_slope_degrees", 75}, {"cluster_scale", 2.5},
         {"cluster_strength", 0.0}});
       for (auto const& role : role_scatter)
       {
@@ -417,20 +501,52 @@ namespace Noggit::Ai
           {"cluster_strength", role.strength}});
       }
     }
-    for (std::size_t i = 0; i < jungle_paths.size(); ++i)
+    // Only the four main paths get wall corridors; walling the branch paths as
+    // well buries the small footprints under a lattice of criss-crossing fences.
+    for (std::size_t i = 0; i < jungle_paths.size(); i += 2)
     {
+      auto wall_points = withoutHeight(corridorLoop(jungle_paths[i], .035, base));
       path_wall_regions.push_back({
-        {"name", "jungle_" + std::to_string(i / 2 + 1)
-          + (i % 2 == 0 ? "_main_path_wall" : "_branch_path_wall")},
-        {"role", "rock"},
-        {"points", withoutHeight(corridorLoop(jungle_paths[i], .035, base + 8))},
-        {"density_per_tile", wall_density},
-        {"min_spacing_ratio", .002}, {"min_height", base - 10},
-        {"max_height", base + 40}, {"min_slope_degrees", 0},
-        {"max_slope_degrees", 70}, {"cluster_scale", 2.5},
+        {"name", "jungle_" + std::to_string(i / 2 + 1) + "_main_path_wall"},
+        {"role", "wall"},
+        {"points", wall_points},
+        {"density_per_tile", wallDensity(wall_points, footprint_side_tiles)},
+        {"min_spacing_ratio", .002}, {"min_height", base - 15},
+        {"max_height", base + 25}, {"min_slope_degrees", 0},
+        {"max_slope_degrees", 75}, {"cluster_scale", 2.5},
         {"cluster_strength", 0.0}});
     }
+    auto addBaseWall = [&](std::string name, nlohmann::json const& polygon)
+    {
+      auto wall_points = withoutHeight(polygon);
+      wall_regions.push_back({
+        {"name", std::move(name)}, {"role", "wall"},
+        {"points", wall_points},
+        {"density_per_tile", wallDensity(wall_points, footprint_side_tiles)},
+        {"min_spacing_ratio", .002}, {"min_height", base - 15},
+        {"max_height", base + 25}, {"min_slope_degrees", 0},
+        {"max_slope_degrees", 75}, {"cluster_scale", 2.5},
+        {"cluster_strength", 0.0}});
+    };
+    addBaseWall("team_left_base_wall", left_base_outer);
+    addBaseWall("team_right_base_wall", right_base_outer);
+    auto innerCourtExclusion = [&](nlohmann::json const& inner)
+    {
+      auto loop = insetLoop(inner, .8, base);
+      loop.erase(loop.end() - 1);
+      return exclusion("area", withoutHeight(loop), .004);
+    };
     auto wall_exclusions = nlohmann::json::array({
+      exclusion("corridor", withoutHeight(top), lane_width),
+      exclusion("corridor", withoutHeight(middle), lane_width),
+      exclusion("corridor", withoutHeight(bottom), lane_width),
+      exclusion("corridor", withoutHeight(river), river_width),
+      innerCourtExclusion(left_base_inner),
+      innerCourtExclusion(right_base_inner),
+      exclusion("area", withoutHeight(objective_north), .005),
+      exclusion("area", withoutHeight(objective_south), .005)
+    });
+    auto path_wall_exclusions = nlohmann::json::array({
       exclusion("corridor", withoutHeight(top), lane_width),
       exclusion("corridor", withoutHeight(middle), lane_width),
       exclusion("corridor", withoutHeight(bottom), lane_width),
@@ -440,7 +556,6 @@ namespace Noggit::Ai
       exclusion("area", withoutHeight(objective_north), .005),
       exclusion("area", withoutHeight(objective_south), .005)
     });
-    auto path_wall_exclusions = wall_exclusions;
     auto vegetation_exclusions = nlohmann::json::array({
       exclusion("corridor", withoutHeight(top), lane_width + .025),
       exclusion("corridor", withoutHeight(middle), lane_width + .025),
@@ -451,9 +566,43 @@ namespace Noggit::Ai
       exclusion("area", withoutHeight(objective_north), .025),
       exclusion("area", withoutHeight(objective_south), .025)
     });
-    for (auto const& path : jungle_paths)
+    auto toLayoutPoints = [](nlohmann::json const& polygon)
     {
-      wall_exclusions.push_back(exclusion("corridor", withoutHeight(path), .012));
+      std::vector<ProceduralLayoutPoint> points;
+      for (auto const& p : polygon)
+        points.push_back({static_cast<float>(p.at("u").get<double>()),
+                          static_cast<float>(p.at("v").get<double>()), 0.0f});
+      return points;
+    };
+    auto const left_base_points = toLayoutPoints(left_base_outer);
+    auto const right_base_points = toLayoutPoints(right_base_outer);
+    // Jungle main paths end inside the bases; their wall-call exclusions stop
+    // outside so the base wall chain stays continuous and seals those breaches.
+    auto pathClippedOutsideBases = [&](nlohmann::json const& path)
+    {
+      auto result = path;
+      auto pullIfInside = [&](std::size_t index, std::size_t neighbor)
+      {
+        auto const u = result[index].at("u").get<double>();
+        auto const v = result[index].at("v").get<double>();
+        if (!proceduralScatterContains(left_base_points,
+                                       static_cast<float>(u), static_cast<float>(v))
+            && !proceduralScatterContains(right_base_points,
+                                          static_cast<float>(u), static_cast<float>(v)))
+          return;
+        result[index]["u"] = u + (result[neighbor].at("u").get<double>() - u) * .5;
+        result[index]["v"] = v + (result[neighbor].at("v").get<double>() - v) * .5;
+      };
+      pullIfInside(0, 1);
+      pullIfInside(result.size() - 1, result.size() - 2);
+      return result;
+    };
+    for (std::size_t i = 0; i < jungle_paths.size(); ++i)
+    {
+      auto const& path = jungle_paths[i];
+      wall_exclusions.push_back(
+        exclusion("corridor", withoutHeight(pathClippedOutsideBases(path)),
+                  i % 2 == 0 ? .040 : .012));
       path_wall_exclusions.push_back(exclusion("corridor", withoutHeight(path), .027));
       vegetation_exclusions.push_back(exclusion("corridor", withoutHeight(path), .025));
     }
@@ -463,6 +612,128 @@ namespace Noggit::Ai
       wall_exclusions.push_back(exclusion("area", clearing, .004));
       path_wall_exclusions.push_back(exclusion("area", clearing, .006));
       vegetation_exclusions.push_back(exclusion("area", clearing, .012));
+    }
+
+    auto distanceToPolyline = [](nlohmann::json const& path, double u, double v)
+    {
+      auto best = 10.0;
+      for (std::size_t i = 1; i < path.size(); ++i)
+      {
+        auto const au = path[i - 1].at("u").get<double>();
+        auto const av = path[i - 1].at("v").get<double>();
+        auto const du = path[i].at("u").get<double>() - au;
+        auto const dv = path[i].at("v").get<double>() - av;
+        auto const length_squared = du * du + dv * dv;
+        auto const t = length_squared > 0.0
+          ? std::clamp(((u - au) * du + (v - av) * dv) / length_squared, 0.0, 1.0)
+          : 0.0;
+        best = std::min(best, std::hypot(u - (au + du * t), v - (av + dv * t)));
+      }
+      return best;
+    };
+    nlohmann::json props = nlohmann::json::array();
+    auto addProp = [&](std::string name, std::string path, double u, double v,
+                       double scale, double yaw, double height_offset)
+    {
+      props.push_back({{"name", std::move(name)}, {"path", std::move(path)},
+        {"u", u}, {"v", v}, {"scale", scale}, {"yaw_degrees", yaw},
+        {"height_offset", height_offset}});
+    };
+    addProp("team_left_landmark", propPath("base_landmark"), .113, .86, 1.2, 45, 0);
+    addProp("team_left_glow", propPath("team_left_light"), .113, .86, 1.0, 0, 8);
+    addProp("team_right_landmark", propPath("base_landmark"), .887, .14, 1.2, 225, 0);
+    addProp("team_right_glow", propPath("team_right_light"), .887, .14, 1.0, 0, 8);
+    addProp("objective_north_landmark", propPath("objective_landmark"),
+            .34, .27, 1.4, 135, 0);
+    addProp("objective_north_glow", propPath("river_light"), .34, .27, 1.0, 0, 6);
+    addProp("objective_south_landmark", propPath("objective_landmark"),
+            .66, .73, 1.4, 315, 0);
+    addProp("objective_south_glow", propPath("river_light"), .66, .73, 1.0, 0, 6);
+    addProp("river_glow_west", propPath("river_light"),
+            river[1].at("u"), river[1].at("v"), 1.0, 0, 5);
+    addProp("river_glow_east", propPath("river_light"),
+            river[3].at("u"), river[3].at("v"), 1.0, 0, 5);
+    for (auto const& camp : camps)
+    {
+      addProp(std::string{camp.name} + "_brazier", propPath("camp_marker"),
+              camp.u + .02, camp.v - .02, 1.0, 0, 0);
+      addProp(std::string{camp.name} + "_flame", propPath("flame_light"),
+              camp.u + .02, camp.v - .02, 1.0, 0, 2.5);
+    }
+    struct EntranceFlank { char const* name; double u; double v; };
+    auto const entrance_flanks = std::array{
+      EntranceFlank{"top_a", .1215, .677}, EntranceFlank{"top_b", .0285, .713},
+      EntranceFlank{"middle_a", .275, .795}, EntranceFlank{"middle_b", .205, .725},
+      EntranceFlank{"bottom_a", .248, .985}, EntranceFlank{"bottom_b", .270, .888}
+    };
+    for (auto const& flank : entrance_flanks)
+    {
+      addProp("team_left_entrance_" + std::string{flank.name} + "_brazier",
+              propPath("camp_marker"), flank.u, flank.v, 1.1, 0, 0);
+      addProp("team_left_entrance_" + std::string{flank.name} + "_flame",
+              propPath("flame_light"), flank.u, flank.v, 1.0, 0, 2.5);
+      addProp("team_right_entrance_" + std::string{flank.name} + "_brazier",
+              propPath("camp_marker"), 1.0 - flank.u, 1.0 - flank.v, 1.1, 0, 0);
+      addProp("team_right_entrance_" + std::string{flank.name} + "_flame",
+              propPath("flame_light"), 1.0 - flank.u, 1.0 - flank.v, 1.0, 0, 2.5);
+    }
+    auto lamp_count = std::size_t{0};
+    auto lamp_light_count = std::size_t{0};
+    constexpr auto lamp_step = .07;
+    auto const lamp_offset = lane_width + .012;
+    for (auto const& [lane_name, lane] : std::array{
+           std::pair{"top", &top}, std::pair{"middle", &middle},
+           std::pair{"bottom", &bottom}})
+    {
+      auto walked = 0.0;
+      auto next_at = lamp_step * .5;
+      auto side = 1.0;
+      for (std::size_t i = 1; i < lane->size(); ++i)
+      {
+        auto const au = (*lane)[i - 1].at("u").get<double>();
+        auto const av = (*lane)[i - 1].at("v").get<double>();
+        auto const du = (*lane)[i].at("u").get<double>() - au;
+        auto const dv = (*lane)[i].at("v").get<double>() - av;
+        auto const segment = std::hypot(du, dv);
+        while (next_at <= walked + segment && props.size() < 250)
+        {
+          auto const t = (next_at - walked) / segment;
+          next_at += lamp_step;
+          auto const center_u = au + du * t;
+          auto const center_v = av + dv * t;
+          // Lanes hugging the map border lose one shoulder: fall back to the
+          // inner side instead of dropping the lamp.
+          auto placeLamp = [&](double lamp_side)
+          {
+            auto const u = center_u + (-dv / segment) * lamp_offset * lamp_side;
+            auto const v = center_v + (du / segment) * lamp_offset * lamp_side;
+            if (u < .01 || u > .99 || v < .01 || v > .99) return false;
+            if (proceduralScatterContains(left_base_points,
+                                          static_cast<float>(u), static_cast<float>(v))
+                || proceduralScatterContains(right_base_points,
+                                             static_cast<float>(u), static_cast<float>(v)))
+              return false;
+            if (distanceToPolyline(river, u, v) < river_width + .03) return false;
+            auto yaw = std::atan2(dv, -du) * 57.29577951308232;
+            if (yaw < 0.0) yaw += 360.0;
+            if (yaw >= 360.0) yaw = 0.0;
+            ++lamp_count;
+            addProp("lamp_" + std::string{lane_name} + "_" + std::to_string(lamp_count),
+                    propPath("lane_lamp"), u, v, 1.0, yaw, 0);
+            if (lamp_count % 2 == 0 && props.size() < 250)
+            {
+              ++lamp_light_count;
+              addProp("lamp_glow_" + std::string{lane_name} + "_"
+                        + std::to_string(lamp_count),
+                      propPath("lamp_light"), u, v, 1.0, 0, 5);
+            }
+            return true;
+          };
+          if (!placeLamp(side)) placeLamp(-side);
+          side = -side;
+        }
+        walked += segment;
+      }
     }
 
     nlohmann::json terrain = {{"texture_paths", textures}, {"steep_texture_layer", 3},
@@ -486,22 +757,29 @@ namespace Noggit::Ai
       {"assets", std::move(vegetation_assets)},
       {"regions", std::move(vegetation_regions)},
       {"exclusions", std::move(vegetation_exclusions)}};
+    nlohmann::json props_call = {{"props", std::move(props)}};
     if (auto const parsed = parseProceduralScatter(walls); !parsed.scatter)
       throw std::invalid_argument(parsed.error);
     if (auto const parsed = parseProceduralScatter(path_walls); !parsed.scatter)
       throw std::invalid_argument(parsed.error);
     if (auto const parsed = parseProceduralScatter(vegetation); !parsed.scatter)
       throw std::invalid_argument(parsed.error);
+    if (auto const parsed = parseProceduralProps(props_call); !parsed.props)
+      throw std::invalid_argument(parsed.error);
 
     return {{"ok", true}, {"operation", "create_moba_arena_blueprint"},
       {"topology", {{"lanes", 3}, {"bases", 2}, {"river", 1},
                     {"objective_pits", 2}, {"jungle_regions", 4},
-                    {"jungle_camps", 12}, {"jungle_masses", 4},
-                    {"jungle_ridges", 4}, {"jungle_wall_bands", 4},
-                    {"jungle_path_wall_bands", 8},
+                    {"jungle_camps", 12}, {"jungle_floors", 4},
+                    {"jungle_wall_bands", 4}, {"base_wall_bands", 2},
+                    {"jungle_path_wall_bands", 4},
                     {"jungle_paths", 8}, {"fortified_bases", 2},
                     {"public_entrances_per_base", 3},
-                    {"decorative_defender_gates_per_base", 2}}},
+                    {"landmarks", 4}, {"camp_braziers", 12},
+                    {"entrance_braziers", 12}, {"lane_lamps", lamp_count},
+                    {"skyboxes", 1},
+                    {"dynamic_lights",
+                     30 + lamp_light_count}}},
       {"next_calls", nlohmann::json::array({
         {{"name", "apply_terrain_layout_on_map"}, {"arguments", std::move(terrain)}},
         {{"name", "apply_liquid_layout_on_map"}, {"arguments", std::move(liquid)}},
@@ -510,7 +788,10 @@ namespace Noggit::Ai
           {"effect_id", ground_effect_value}, {"overwrite", true}}}},
         {{"name", "scatter_assets_on_map"}, {"arguments", std::move(walls)}},
         {{"name", "scatter_assets_on_map"}, {"arguments", std::move(path_walls)}},
-        {{"name", "scatter_assets_on_map"}, {"arguments", std::move(vegetation)}}
+        {{"name", "place_props_on_map"}, {"arguments", std::move(props_call)}},
+        {{"name", "scatter_assets_on_map"}, {"arguments", std::move(vegetation)}},
+        {{"name", "apply_skybox_on_map"}, {"arguments", {
+          {"skybox_path", skybox_path}, {"flags", skybox_flags}}}}
       })}};
   }
 }

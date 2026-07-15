@@ -89,7 +89,7 @@ namespace Noggit::Ai
     bool validRole(std::string const& role)
     {
       return role == "canopy" || role == "understory"
-          || role == "rock" || role == "detail";
+          || role == "rock" || role == "wall" || role == "detail";
     }
 
     struct WallSample
@@ -100,36 +100,80 @@ namespace Noggit::Ai
     };
 
     WallSample wallSample(std::vector<ProceduralLayoutPoint> const& points,
-                          std::size_t index, std::size_t count)
+                          std::size_t index, std::size_t count,
+                          bool skip_corridor_end_caps)
     {
-      auto perimeter = 0.0f;
-      for (std::size_t index = 0; index < points.size(); ++index)
+      struct Edge
       {
-        auto const& first = points[index];
-        auto const& second = points[(index + 1) % points.size()];
-        perimeter += std::hypot(second.u - first.u, second.v - first.v);
-      }
-      if (perimeter <= 0.0f || count == 0) return {};
-
-      auto remaining = (static_cast<float>(index % count) + 0.5f)
-        / static_cast<float>(count) * perimeter;
+        std::size_t start = 0;
+        float du = 0.0f;
+        float dv = 0.0f;
+        float length = 0.0f;
+        std::size_t samples = 1;
+      };
+      auto edges = std::vector<Edge>{};
+      auto perimeter = 0.0f;
       for (std::size_t edge = 0; edge < points.size(); ++edge)
       {
+        if (skip_corridor_end_caps
+            && (edge + 1 == points.size() / 2 || edge + 1 == points.size()))
+          continue;
         auto const& first = points[edge];
         auto const& second = points[(edge + 1) % points.size()];
         auto const du = second.u - first.u;
         auto const dv = second.v - first.v;
         auto const length = std::hypot(du, dv);
-        if (remaining > length && edge + 1 < points.size())
+        if (length <= 0.0f) continue;
+        edges.push_back({edge, du, dv, length, 1});
+        perimeter += length;
+      }
+      if (edges.empty() || count == 0) return {};
+
+      if (count < edges.size())
+      {
+        auto remaining = (static_cast<float>(index % count) + 0.5f)
+          / static_cast<float>(count) * perimeter;
+        for (auto const& edge : edges)
         {
-          remaining -= length;
+          if (remaining > edge.length)
+          {
+            remaining -= edge.length;
+            continue;
+          }
+          auto const progress = std::clamp(remaining / edge.length, 0.0f, 1.0f);
+          auto yaw = std::atan2(edge.dv, -edge.du) * 57.29577951308232f;
+          if (yaw < 0.0f) yaw += 360.0f;
+          auto const& first = points[edge.start];
+          return {first.u + edge.du * progress,
+                  first.v + edge.dv * progress, yaw};
+        }
+        return {points.front().u, points.front().v, 0.0f};
+      }
+
+      for (auto assigned = edges.size(); assigned < count; ++assigned)
+      {
+        auto best = edges.begin();
+        for (auto edge = edges.begin() + 1; edge != edges.end(); ++edge)
+          if (edge->length / static_cast<float>(edge->samples)
+              > best->length / static_cast<float>(best->samples))
+            best = edge;
+        ++best->samples;
+      }
+      auto local_index = index % count;
+      for (auto const& edge : edges)
+      {
+        if (local_index >= edge.samples)
+        {
+          local_index -= edge.samples;
           continue;
         }
-        auto const progress = length > 0.0f
-          ? std::clamp(remaining / length, 0.0f, 1.0f) : 0.0f;
-        auto yaw = std::atan2(dv, -du) * 57.29577951308232f;
+        auto const progress = (static_cast<float>(local_index) + 0.5f)
+          / static_cast<float>(edge.samples);
+        auto yaw = std::atan2(edge.dv, -edge.du) * 57.29577951308232f;
         if (yaw < 0.0f) yaw += 360.0f;
-        return {first.u + du * progress, first.v + dv * progress, yaw};
+        auto const& first = points[edge.start];
+        return {first.u + edge.du * progress,
+                first.v + edge.dv * progress, yaw};
       }
       return {points.front().u, points.front().v, 0.0f};
     }
@@ -282,11 +326,12 @@ namespace Noggit::Ai
     auto const base = hash(scatter.seed, {region_index, tile_x, tile_z, candidate_index});
     ProceduralScatterCandidate candidate;
     auto const& region = scatter.regions[region_index];
-    auto const is_wall = region.name.ends_with("_wall");
+    auto const is_wall = proceduralScatterIsWallRegion(region);
     if (is_wall)
     {
       auto const sample = wallSample(
-        region.points, candidate_index, region.density_per_tile);
+        region.points, candidate_index, region.density_per_tile,
+        region.name.ends_with("_path_wall"));
       candidate.u = sample.u;
       candidate.v = sample.v;
       candidate.yaw_degrees = sample.yaw_degrees;
@@ -336,7 +381,8 @@ namespace Noggit::Ai
       auto const patch = smoothNoise(scatter.seed, candidate.u, candidate.v,
                                      region.cluster_scale * 1.8f, 1000 + index * 37);
       auto const local_variation = unit(hash(scatter.seed, {base, 2000 + index}));
-      auto const score = patch * 0.8f + local_variation * 0.2f
+      auto const score = (is_wall ? local_variation
+                                  : patch * 0.8f + local_variation * 0.2f)
         + std::log(asset.weight) * 0.05f;
       if (score > best_score)
       {
@@ -350,6 +396,11 @@ namespace Noggit::Ai
     if (!is_wall)
       candidate.yaw_degrees = unit(hash(scatter.seed, {base, 5})) * 360.0f;
     return candidate;
+  }
+
+  bool proceduralScatterIsWallRegion(ProceduralScatterRegion const& region)
+  {
+    return region.role == "wall" || region.name.ends_with("_wall");
   }
 
   bool proceduralScatterContains(

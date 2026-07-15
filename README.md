@@ -40,7 +40,7 @@ Only Docker and the exported files are written on the host. To launch Noggit:
 ```
 
 Pour tester le générateur MOBA sans appeler OpenAI, ouvre une carte carrée
-complète d'au moins 3×3 tuiles puis clique sur **Lab blueprint MOBA** dans le
+complète de 2×2 à 4×4 tuiles puis clique sur **Lab blueprint MOBA** dans le
 dock assistant. Le JSON prérempli peut être compilé sans modifier la carte ;
 **Compiler et exécuter** lance ensuite exactement terrain, eau, végétation et
 validation. La dernière spécification utilisée est conservée dans les réglages.

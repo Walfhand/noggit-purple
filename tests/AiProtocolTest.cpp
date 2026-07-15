@@ -47,7 +47,7 @@ int main()
 {
   auto const tools = Noggit::Ai::toolDefinitions();
   require(tools.is_array(), "tools must be an array");
-  require(tools.size() == 20, "unexpected tool count");
+  require(tools.size() == 22, "unexpected tool count");
 
   std::set<std::string> tool_names;
   nlohmann::json const* terrain_layout = nullptr;
@@ -122,6 +122,8 @@ int main()
           "create_moba_arena_blueprint tool is missing");
   require(tool_names.count("apply_ground_effect_on_map") == 1,
           "apply_ground_effect_on_map tool is missing");
+  require(tool_names.count("apply_skybox_on_map") == 1,
+          "apply_skybox_on_map tool is missing");
   require(tool_names.count("search_ground_effects") == 1,
           "search_ground_effects tool is missing");
 

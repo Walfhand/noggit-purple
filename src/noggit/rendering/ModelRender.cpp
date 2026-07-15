@@ -56,6 +56,7 @@ void ModelRender::upload()
     gl.bufferData (GL_ARRAY_BUFFER, _vertex_box_points.size() * sizeof (glm::vec3), _vertex_box_points.data(), GL_STATIC_DRAW);
   }
 
+  OpenGL::Scoped::vao_binder const vao(_vao);
   OpenGL::Scoped::buffer_binder<GL_ELEMENT_ARRAY_BUFFER> indices_binder(_indices_buffer);
   gl.bufferData (GL_ELEMENT_ARRAY_BUFFER, _model->_indices.size() * sizeof(uint16_t), _model->_indices.data(), GL_STATIC_DRAW);
 
@@ -88,6 +89,7 @@ void ModelRender::unload()
 
   _uploaded = false;
   _vao_setup = false;
+  _single_vao_setup = false;
 }
 
 void ModelRender::draw(glm::mat4x4 const& model_view
@@ -116,27 +118,44 @@ void ModelRender::draw(glm::mat4x4 const& model_view
   if (!_uploaded)
   {
     upload();
+  }
 
-    OpenGL::Scoped::vao_binder const _(_vao);
+  if (!_single_vao_setup)
+  {
+    OpenGL::Scoped::vao_binder const _(_single_vao);
 
     {
         OpenGL::Scoped::buffer_binder<GL_ARRAY_BUFFER> const binder(_vertices_buffer);
         m2_shader.attrib("pos", 3, GL_FLOAT, GL_FALSE, sizeof(ModelVertex), 0);
+        m2_shader.attribi("bones_weight", 4, GL_UNSIGNED_BYTE, sizeof(ModelVertex), reinterpret_cast<void*>(sizeof(::glm::vec3)));
+        m2_shader.attribi("bones_indices", 4, GL_UNSIGNED_BYTE, sizeof(ModelVertex), reinterpret_cast<void*>(sizeof(::glm::vec3) + 4));
         m2_shader.attrib("normal", 3, GL_FLOAT, GL_FALSE, sizeof(ModelVertex), reinterpret_cast<void*> (sizeof(::glm::vec3) + 8));
         m2_shader.attrib("texcoord1", 2, GL_FLOAT, GL_FALSE, sizeof(ModelVertex), reinterpret_cast<void*> (sizeof(::glm::vec3) * 2 + 8));
         m2_shader.attrib("texcoord2", 2, GL_FLOAT, GL_FALSE, sizeof(ModelVertex), reinterpret_cast<void*> (sizeof(::glm::vec3) * 2 + 8 + sizeof(glm::vec2)));
     }
 
-    {
-        OpenGL::Scoped::buffer_binder<GL_ARRAY_BUFFER> const transform_binder(_transform_buffer);
-        m2_shader.uniform("transform", instance.transformMatrix());
-    }
+    _single_vao_setup = true;
   }
+
+  m2_shader.uniform("transform", instance.transformMatrix());
 
   if (_model->animated && animate && (!_model->anim_calculated || _model->_per_instance_animation))
   {
     _model->animate(model_view, 0, animtime);
     _model->anim_calculated = true;
+  }
+
+  OpenGL::Scoped::vao_binder const vao(_single_vao);
+
+  if (_model->animBones)
+  {
+    gl.activeTexture(GL_TEXTURE0);
+    gl.bindTexture(GL_TEXTURE_BUFFER, _bone_matrices_buf_tex);
+    m2_shader.uniform("anim_bones", true);
+  }
+  else
+  {
+    m2_shader.uniform("anim_bones", false);
   }
 
   OpenGL::Scoped::buffer_binder<GL_ELEMENT_ARRAY_BUFFER> indices_binder(_indices_buffer);

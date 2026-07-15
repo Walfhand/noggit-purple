@@ -84,6 +84,8 @@ namespace Noggit::Ai
     float v_min,
     float v_max);
 
+  bool proceduralScatterIsWallRegion(ProceduralScatterRegion const& region);
+
   bool proceduralScatterContains(
     std::vector<ProceduralLayoutPoint> const& points,
     float u,

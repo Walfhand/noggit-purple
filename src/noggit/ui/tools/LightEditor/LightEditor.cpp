@@ -1199,7 +1199,7 @@ void LightEditor::load_light_param(int param_id)
 	  skybox_flag_1->setChecked(true);
 
 	if (sky_param->skyboxFlags & (1 << 1))
-	  skybox_flag_1->setChecked(true);
+	  skybox_flag_2->setChecked(true);
 
 	skybox_flag_1->setEnabled(true);
 	skybox_flag_2->setEnabled(true);

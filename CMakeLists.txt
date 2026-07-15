@@ -402,11 +402,20 @@ if(NOGGIT_BUILD_TESTS)
   target_link_libraries(noggit-procedural-scatter-test nlohmann_json::nlohmann_json)
   add_test(NAME noggit-procedural-scatter COMMAND noggit-procedural-scatter-test)
 
+  add_executable(noggit-procedural-props-test
+    tests/ProceduralPropsTest.cpp
+    src/noggit/ai/ProceduralProps.cpp
+  )
+  target_include_directories(noggit-procedural-props-test PRIVATE "${CMAKE_SOURCE_DIR}/src")
+  target_link_libraries(noggit-procedural-props-test nlohmann_json::nlohmann_json)
+  add_test(NAME noggit-procedural-props COMMAND noggit-procedural-props-test)
+
   add_executable(noggit-moba-arena-blueprint-test
     tests/MobaArenaBlueprintTest.cpp
     src/noggit/ai/MobaArenaBlueprint.cpp
     src/noggit/ai/ProceduralLayout.cpp
     src/noggit/ai/ProceduralLiquidLayout.cpp
+    src/noggit/ai/ProceduralProps.cpp
     src/noggit/ai/ProceduralScatter.cpp
   )
   target_include_directories(noggit-moba-arena-blueprint-test PRIVATE "${CMAKE_SOURCE_DIR}/src")
@@ -419,6 +428,18 @@ if(NOGGIT_BUILD_TESTS)
   )
   target_include_directories(noggit-ground-effect-preview-test PRIVATE "${CMAKE_SOURCE_DIR}/src")
   add_test(NAME noggit-ground-effect-preview COMMAND noggit-ground-effect-preview-test)
+
+  add_executable(noggit-procedural-skybox-test
+    tests/ProceduralSkyboxTest.cpp
+    src/noggit/ai/ProceduralSkybox.cpp
+    src/noggit/DBCFile.cpp
+    src/noggit/Log.cpp
+  )
+  target_include_directories(noggit-procedural-skybox-test PRIVATE
+    "${CMAKE_SOURCE_DIR}/src"
+    "${CMAKE_SOURCE_DIR}/src/external"
+  )
+  add_test(NAME noggit-procedural-skybox COMMAND noggit-procedural-skybox-test)
 
   add_executable(noggit-blueprint-snapshot-test
     tests/BlueprintSnapshotTest.cpp

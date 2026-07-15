@@ -15,5 +15,6 @@ namespace Noggit::Ai
   std::optional<std::string> validateMobaArenaFootprint(
     std::vector<std::pair<std::size_t, std::size_t>> const& tiles);
 
-  nlohmann::json compileMobaArenaBlueprint(nlohmann::json const& arguments);
+  nlohmann::json compileMobaArenaBlueprint(
+    nlohmann::json const& arguments, std::size_t footprint_side_tiles);
 }

@@ -505,7 +505,7 @@ namespace Noggit::Ai
       {"type", "object"},
       {"properties", {
         {"path", {{"type", "string"}, {"minLength", 1}, {"maxLength", 260}}},
-        {"role", {{"type", "string"}, {"enum", {"canopy", "understory", "rock", "detail"}}}},
+        {"role", {{"type", "string"}, {"enum", {"canopy", "understory", "rock", "wall", "detail"}}}},
         {"weight", {{"type", "number"}, {"exclusiveMinimum", 0.0}, {"maximum", 100.0}}},
         {"min_scale", {{"type", "number"}, {"minimum", 0.05}, {"maximum", 10.0}}},
         {"max_scale", {{"type", "number"}, {"minimum", 0.05}, {"maximum", 10.0}}},
@@ -518,7 +518,7 @@ namespace Noggit::Ai
       {"type", "object"},
       {"properties", {
         {"name", {{"type", "string"}, {"minLength", 1}, {"maxLength", 64}}},
-        {"role", {{"type", "string"}, {"enum", {"canopy", "understory", "rock", "detail"}}}},
+        {"role", {{"type", "string"}, {"enum", {"canopy", "understory", "rock", "wall", "detail"}}}},
         {"points", {
           {"type", "array"}, {"items", scatter_point_parameters},
           {"minItems", 3}, {"maxItems", 16}
@@ -573,9 +573,56 @@ namespace Noggit::Ai
       {"additionalProperties", false}
     };
 
+    auto props_parameters = nlohmann::json{
+      {"type", "object"},
+      {"properties", {
+        {"props", {
+          {"type", "array"}, {"minItems", 1}, {"maxItems", 256},
+          {"items", {
+            {"type", "object"},
+            {"properties", {
+              {"name", {{"type", "string"}, {"minLength", 1}, {"maxLength", 64}}},
+              {"path", {{"type", "string"}, {"minLength", 1}, {"maxLength", 260}}},
+              {"u", {{"type", "number"}, {"minimum", 0.0}, {"maximum", 1.0}}},
+              {"v", {{"type", "number"}, {"minimum", 0.0}, {"maximum", 1.0}}},
+              {"scale", {{"type", "number"}, {"minimum", 0.05}, {"maximum", 10.0}}},
+              {"yaw_degrees", {{"type", "number"}, {"minimum", 0.0}, {"maximum", 360.0}}},
+              {"height_offset", {{"type", "number"}, {"minimum", -100.0}, {"maximum", 100.0}}}
+            }},
+            {"required", {"name", "path", "u", "v", "scale",
+                          "yaw_degrees", "height_offset"}},
+            {"additionalProperties", false}
+          }}
+        }}
+      }},
+      {"required", {"props"}},
+      {"additionalProperties", false}
+    };
+
+    auto prop_paths_parameters = nlohmann::json{
+      {"type", "object"},
+      {"description", "Chemins M2 des props d'ambiance : landmarks de base et d'objectif, braziers, lampadaires et lumières dynamiques world/noggit/lights de Patch-E."},
+      {"properties", {
+        {"base_landmark", {{"type", "string"}, {"minLength", 1}, {"maxLength", 260}}},
+        {"objective_landmark", {{"type", "string"}, {"minLength", 1}, {"maxLength", 260}}},
+        {"camp_marker", {{"type", "string"}, {"minLength", 1}, {"maxLength", 260}}},
+        {"lane_lamp", {{"type", "string"}, {"minLength", 1}, {"maxLength", 260}}},
+        {"team_left_light", {{"type", "string"}, {"minLength", 1}, {"maxLength", 260}}},
+        {"team_right_light", {{"type", "string"}, {"minLength", 1}, {"maxLength", 260}}},
+        {"river_light", {{"type", "string"}, {"minLength", 1}, {"maxLength", 260}}},
+        {"flame_light", {{"type", "string"}, {"minLength", 1}, {"maxLength", 260}}},
+        {"lamp_light", {{"type", "string"}, {"minLength", 1}, {"maxLength", 260}}}
+      }},
+      {"required", {"base_landmark", "objective_landmark", "camp_marker",
+                    "lane_lamp", "team_left_light", "team_right_light",
+                    "river_light", "flame_light", "lamp_light"}},
+      {"additionalProperties", false}
+    };
+
     auto moba_parameters = nlohmann::json{
       {"type", "object"},
       {"properties", {
+        {"prop_paths", prop_paths_parameters},
         {"texture_paths", {
           {"type", "array"},
           {"description", "Exactement quatre textures choisies visuellement : herbe, voie, sol humide, roche."},
@@ -597,14 +644,32 @@ namespace Noggit::Ai
         {"ground_effect_texture_id", {
           {"type", "integer"}, {"minimum", 0},
           {"description", "ID GroundEffectTexture.dbc choisi avec search_ground_effects ; 0 installe et sélectionne l'herbe dense Battle for Azeroth si elle est disponible."}
+        }},
+        {"skybox_path", {
+          {"type", "string"}, {"minLength", 1}, {"maxLength", 260},
+          {"description", "Modèle M2 de ciel présent dans le client, généralement sous environments/stars."}
+        }},
+        {"skybox_flags", {
+          {"type", "integer"}, {"minimum", 0}, {"maximum", 3},
+          {"description", "Flags LightSkybox : 1 synchronise l'animation avec l'heure, 2 combine avec le ciel procédural."}
         }}
       }},
       {"required", {
         "texture_paths", "liquid_type_id", "assets", "seed", "base_height",
         "river_depth", "lane_width_ratio", "river_width_ratio", "lane_curvature",
         "river_curvature", "jungle_roughness", "vegetation_density_per_tile",
-        "ground_effect_texture_id"
+        "ground_effect_texture_id", "prop_paths", "skybox_path", "skybox_flags"
       }},
+      {"additionalProperties", false}
+    };
+
+    auto skybox_apply_parameters = nlohmann::json{
+      {"type", "object"},
+      {"properties", {
+        {"skybox_path", { {"type", "string"}, {"minLength", 1}, {"maxLength", 260} }},
+        {"flags", { {"type", "integer"}, {"minimum", 0}, {"maximum", 3} }}
+      }},
+      {"required", {"skybox_path", "flags"}},
       {"additionalProperties", false}
     };
 
@@ -697,8 +762,15 @@ namespace Noggit::Ai
       {
         {"type", "function"},
         {"name", "scatter_assets_on_map"},
-        {"description", "Répartit en un appel des arbres, rochers, buissons et décors M2/WMO dans des zones polygonales. Respecte les exclusions, la hauteur, la pente, la densité et l'espacement. Opération globale déterministe, sauvegardée et réservée à un plan approuvé."},
+        {"description", "Répartit en un appel des arbres, rochers, buissons et décors M2/WMO dans des zones polygonales. Respecte les exclusions, la hauteur, la pente, la densité et l'espacement. Les régions du rôle wall (ou nommées *_wall) placent leurs assets en chaîne déterministe alignée sur le périmètre du polygone, pour bâtir des murs collidables. Opération globale déterministe, sauvegardée et réservée à un plan approuvé."},
         {"parameters", std::move(scatter_parameters)},
+        {"strict", true}
+      },
+      {
+        {"type", "function"},
+        {"name", "place_props_on_map"},
+        {"description", "Place une liste explicite de props M2/WMO à des coordonnées normalisées précises : statues, fontaines, braziers, lampadaires et lumières dynamiques world/noggit/lights de Patch-E. Chaque prop est posé sur la hauteur du terrain, avec un height_offset optionnel pour les lumières flottantes. Opération globale déterministe, sauvegardée et réservée à un plan approuvé."},
+        {"parameters", std::move(props_parameters)},
         {"strict", true}
       },
       {
@@ -710,8 +782,15 @@ namespace Noggit::Ai
       },
       {
         {"type", "function"},
+        {"name", "apply_skybox_on_map"},
+        {"description", "Relie une skybox M2 à la lumière globale de la carte en clonant le LightParams clair et ses bandes, sans modifier les paramètres partagés des autres cartes. Écrit Light.dbc, LightParams.dbc, LightSkybox.dbc, LightIntBand.dbc et LightFloatBand.dbc dans le projet."},
+        {"parameters", std::move(skybox_apply_parameters)},
+        {"strict", true}
+      },
+      {
+        {"type", "function"},
         {"name", "create_moba_arena_blueprint"},
-        {"description", "Compile les choix esthétiques de l'IA en une topologie MOBA fixe et cohérente sur une carte carrée de 3x3 ou 4x4 tuiles : exactement trois voies, deux bases fortifiées à trois entrées, une rivière, quatre jungles ceinturées de chaînes rocheuses collidables, des murs sur les deux côtés des chemins de jungle et deux clairières d'objectif. Les assets rock doivent être des M2 possédant un maillage de collision. Retourne six appels génériques à exécuter sans modifier leurs arguments."},
+        {"description", "Compile les choix esthétiques de l'IA en une topologie MOBA fixe et cohérente sur une carte carrée de 2x2 à 4x4 tuiles, au sol plat : exactement trois voies, deux bases fortifiées ceinturées d'un mur d'enceinte à trois entrées, une rivière, quatre jungles ceinturées de chaînes de murs collidables, des murs sur les deux côtés des chemins de jungle et deux clairières d'objectif. Aucun relief ne sépare les zones : la séparation vient d'assets du rôle wall, des segments de mur M2 avec maillage de collision, de préférence des extensions récentes du Patch-N. Ajoute une couche d'ambiance : fontaines ou statues de base, statues d'objectif, braziers de camps et d'entrées, lampadaires couplés aux lumières dynamiques de Patch-E, puis une skybox moderne de Patch-N. Retourne huit appels génériques à exécuter sans modifier leurs arguments."},
         {"parameters", std::move(moba_parameters)},
         {"strict", true}
       },

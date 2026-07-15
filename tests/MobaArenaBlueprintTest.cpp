@@ -3,11 +3,15 @@
 #include <noggit/ai/MobaArenaBlueprint.hpp>
 #include <noggit/ai/ProceduralLayout.hpp>
 #include <noggit/ai/ProceduralLiquidLayout.hpp>
+#include <noggit/ai/ProceduralProps.hpp>
 #include <noggit/ai/ProceduralScatter.hpp>
 
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <array>
+#include <cmath>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -37,20 +41,37 @@ namespace
          {"min_scale", .7}, {"max_scale", 1.2}, {"spacing_multiplier", .6}},
         {{"path", "world/sapling.m2"}, {"role", "understory"}, {"weight", 2},
          {"min_scale", .6}, {"max_scale", 1.1}, {"spacing_multiplier", .5}},
-        {{"path", "world/expansion07/doodads/riverzone/8riv_rockwall_tall_01.m2"},
-         {"role", "rock"}, {"weight", 1},
-         {"min_scale", .9}, {"max_scale", 1.1}, {"spacing_multiplier", 1.0}},
-        {{"path", "world/expansion07/doodads/riverzone/8riv_rockwall_tall_03.m2"},
-         {"role", "rock"}, {"weight", 1},
-         {"min_scale", .85}, {"max_scale", 1.15}, {"spacing_multiplier", .9}},
+        {{"path", "world/expansion07/doodads/bloodtroll/8tr_ancientblood_walltall01.m2"},
+         {"role", "wall"}, {"weight", 2},
+         {"min_scale", 1.5}, {"max_scale", 1.7}, {"spacing_multiplier", 1.0}},
+        {{"path", "world/expansion07/doodads/bloodtroll/8tr_ancientblood_walltall02.m2"},
+         {"role", "wall"}, {"weight", 1},
+         {"min_scale", 1.5}, {"max_scale", 1.7}, {"spacing_multiplier", 1.0}},
+        {{"path", "world/rock-a.m2"}, {"role", "rock"}, {"weight", 1},
+         {"min_scale", .9}, {"max_scale", 1.4}, {"spacing_multiplier", .9}},
+        {{"path", "world/rock-b.m2"}, {"role", "rock"}, {"weight", 1},
+         {"min_scale", .8}, {"max_scale", 1.3}, {"spacing_multiplier", .8}},
         {{"path", "world/fern.m2"}, {"role", "detail"}, {"weight", 2},
          {"min_scale", .6}, {"max_scale", 1.0}, {"spacing_multiplier", .4}}
       })},
+      {"prop_paths", {
+        {"base_landmark", "world/expansion07/doodads/human/8hu_kultiras_fountain01.m2"},
+        {"objective_landmark", "world/expansion06/doodads/dungeon/doodads/7du_tombofsargeras_elunestatue01.m2"},
+        {"camp_marker", "world/expansion08/doodads/oribos/9ob_oribos_brazier01.m2"},
+        {"lane_lamp", "world/expansion06/doodads/nightelf/7ne_nightelf_streetlight01.m2"},
+        {"team_left_light", "world/noggit/lights/noggit_light_deepskyblue01.m2"},
+        {"team_right_light", "world/noggit/lights/noggit_light_orange01.m2"},
+        {"river_light", "world/noggit/lights/noggit_light_purple_withshadows01.m2"},
+        {"flame_light", "world/noggit/lights/noggit_light_orange_withshadows01.m2"},
+        {"lamp_light", "world/noggit/lights/noggit_light_dimwhite01.m2"}
+      }},
       {"seed", "moba-test"}, {"base_height", 20}, {"river_depth", 8},
       {"lane_width_ratio", .04}, {"river_width_ratio", .03},
       {"lane_curvature", .6}, {"river_curvature", .5},
       {"jungle_roughness", 5}, {"vegetation_density_per_tile", 64},
-      {"ground_effect_texture_id", 17}
+      {"ground_effect_texture_id", 17},
+      {"skybox_path", "environments/stars/tanaan_patch_junglesky01.m2"},
+      {"skybox_flags", 1}
     };
   }
 }
@@ -64,14 +85,16 @@ int main()
       for (std::size_t x = 0; x < width; ++x) tiles.emplace_back(x + 20, z + 20);
     return tiles;
   };
+  require(!Noggit::Ai::validateMobaArenaFootprint(footprint(2, 2)),
+          "a full 2x2 footprint must be accepted");
   require(!Noggit::Ai::validateMobaArenaFootprint(footprint(3, 3)),
           "a full 3x3 footprint must be accepted");
   require(!Noggit::Ai::validateMobaArenaFootprint(footprint(4, 4)),
           "a full square footprint must be accepted");
   require(Noggit::Ai::validateMobaArenaFootprint(footprint(5, 5)).has_value(),
           "a footprint larger than the bounded MOBA scatter budget was accepted");
-  require(Noggit::Ai::validateMobaArenaFootprint(footprint(2, 2)).has_value(),
-          "a footprint smaller than 3x3 was accepted");
+  require(Noggit::Ai::validateMobaArenaFootprint(footprint(1, 1)).has_value(),
+          "a footprint smaller than 2x2 was accepted");
   require(Noggit::Ai::validateMobaArenaFootprint(footprint(4, 3)).has_value(),
           "a stretched footprint was accepted");
   auto incomplete = footprint(3, 3);
@@ -79,25 +102,30 @@ int main()
   require(Noggit::Ai::validateMobaArenaFootprint(incomplete).has_value(),
           "a footprint with a missing tile was accepted");
 
-  auto const first = Noggit::Ai::compileMobaArenaBlueprint(specification());
-  auto const second = Noggit::Ai::compileMobaArenaBlueprint(specification());
+  auto const first = Noggit::Ai::compileMobaArenaBlueprint(specification(), 4);
+  auto const second = Noggit::Ai::compileMobaArenaBlueprint(specification(), 4);
   require(first == second, "blueprint must be deterministic");
   require(first.at("topology").at("lanes") == 3
           && first.at("topology").at("bases") == 2
           && first.at("topology").at("objective_pits") == 2
           && first.at("topology").at("fortified_bases") == 2
           && first.at("topology").at("jungle_camps") == 12
-          && first.at("topology").at("jungle_masses") == 4
-          && first.at("topology").at("jungle_ridges") == 4
+          && first.at("topology").at("jungle_floors") == 4
           && first.at("topology").at("jungle_wall_bands") == 4
-          && first.at("topology").at("jungle_path_wall_bands") == 8
+          && first.at("topology").at("base_wall_bands") == 2
+          && first.at("topology").at("jungle_path_wall_bands") == 4
           && first.at("topology").at("jungle_paths") == 8
           && first.at("topology").at("public_entrances_per_base") == 3
-          && first.at("topology").at("decorative_defender_gates_per_base") == 2,
+          && first.at("topology").at("landmarks") == 4
+          && first.at("topology").at("camp_braziers") == 12
+          && first.at("topology").at("entrance_braziers") == 12,
           "fixed MOBA topology changed");
+  require(first.at("topology").at("lane_lamps").get<std::size_t>() >= 30
+            && first.at("topology").at("dynamic_lights").get<std::size_t>() >= 40,
+          "the ambience layer lost its lamps or dynamic lights");
 
   auto const& calls = first.at("next_calls");
-  require(calls.size() == 6
+  require(calls.size() == 8
           && calls[0].at("name") == "apply_terrain_layout_on_map"
           && calls[1].at("name") == "apply_liquid_layout_on_map"
           && calls[2].at("name") == "apply_ground_effect_on_map"
@@ -105,47 +133,121 @@ int main()
           && calls[2].at("arguments").at("effect_id") == 17
           && calls[3].at("name") == "scatter_assets_on_map"
           && calls[4].at("name") == "scatter_assets_on_map"
-          && calls[5].at("name") == "scatter_assets_on_map",
+          && calls[5].at("name") == "place_props_on_map"
+          && calls[6].at("name") == "scatter_assets_on_map"
+          && calls[7].at("name") == "apply_skybox_on_map"
+          && calls[7].at("arguments").at("skybox_path")
+            == "environments/stars/tanaan_patch_junglesky01.m2"
+          && calls[7].at("arguments").at("flags") == 1,
           "generic execution pipeline changed");
   auto const terrain = Noggit::Ai::parseProceduralLayout(calls[0].at("arguments"));
   auto const liquid = Noggit::Ai::parseProceduralLiquidLayout(calls[1].at("arguments"));
   auto const walls = Noggit::Ai::parseProceduralScatter(calls[3].at("arguments"));
   auto const path_walls = Noggit::Ai::parseProceduralScatter(calls[4].at("arguments"));
-  auto const vegetation = Noggit::Ai::parseProceduralScatter(calls[5].at("arguments"));
+  auto const props = Noggit::Ai::parseProceduralProps(calls[5].at("arguments"));
+  auto const vegetation = Noggit::Ai::parseProceduralScatter(calls[6].at("arguments"));
   if (!terrain.layout) throw std::runtime_error("terrain: " + terrain.error);
   if (!liquid.layout) throw std::runtime_error("liquid: " + liquid.error);
   if (!walls.scatter) throw std::runtime_error("walls: " + walls.error);
   if (!path_walls.scatter) throw std::runtime_error("path walls: " + path_walls.error);
+  if (!props.props) throw std::runtime_error("props: " + props.error);
   if (!vegetation.scatter) throw std::runtime_error("vegetation: " + vegetation.error);
   require(terrain.layout && liquid.layout && walls.scatter
-            && path_walls.scatter && vegetation.scatter,
+            && path_walls.scatter && props.props && vegetation.scatter,
           "blueprint must compile to valid generic tool arguments");
+
+  for (auto const footprint_side : {std::size_t{2}, std::size_t{3}, std::size_t{4}})
+  {
+    auto const blueprint = Noggit::Ai::compileMobaArenaBlueprint(
+      specification(), footprint_side);
+    for (auto const call_index : {std::size_t{3}, std::size_t{4}})
+    {
+      auto const parsed = Noggit::Ai::parseProceduralScatter(
+        blueprint.at("next_calls").at(call_index).at("arguments"));
+      require(parsed.scatter.has_value(), "footprint wall scatter is invalid");
+      for (std::size_t region_index = 0;
+           region_index < parsed.scatter->regions.size(); ++region_index)
+      {
+        auto const& region = parsed.scatter->regions[region_index];
+        auto const density = region.density_per_tile;
+        require(density > 0, "a footprint wall chain is empty");
+        auto candidates = std::vector<Noggit::Ai::ProceduralScatterCandidate>{};
+        candidates.reserve(density);
+        for (std::size_t index = 0; index < density; ++index)
+          candidates.push_back(Noggit::Ai::proceduralScatterCandidate(
+            *parsed.scatter, region_index, 0, 0, index,
+            0.0f, 1.0f, 0.0f, 1.0f));
+        auto const world_size = static_cast<float>(footprint_side) * (1600.0f / 3.0f);
+        require(std::all_of(candidates.begin(), candidates.end(),
+                            [](auto const& candidate) { return candidate.active; }),
+                "wall density produced an inactive perimeter candidate");
+        auto const open_path_sides = region.name.ends_with("_path_wall");
+        for (std::size_t edge = 0; edge < region.points.size(); ++edge)
+        {
+          auto const& start = region.points[edge];
+          auto const& end = region.points[(edge + 1) % region.points.size()];
+          auto const du = end.u - start.u;
+          auto const dv = end.v - start.v;
+          auto const length = std::hypot(du, dv);
+          if (length <= .000001f) continue;
+          auto progresses = std::vector<float>{};
+          for (auto const& candidate : candidates)
+          {
+            auto const offset_u = candidate.u - start.u;
+            auto const offset_v = candidate.v - start.v;
+            auto const cross = std::abs(offset_u * dv - offset_v * du) / length;
+            auto const progress = (offset_u * du + offset_v * dv) / (length * length);
+            if (cross > .0001f || progress < -.0001f || progress > 1.0001f) continue;
+            progresses.push_back(progress);
+          }
+          auto const end_cap = open_path_sides
+            && (edge + 1 == region.points.size() / 2
+                || edge + 1 == region.points.size());
+          if (end_cap)
+          {
+            require(progresses.empty(), "path walls must not close across path entrances");
+            continue;
+          }
+          require(!progresses.empty(), "a wall edge received no candidates");
+          std::sort(progresses.begin(), progresses.end());
+          require(progresses.front() * length * world_size <= 16.01f
+                    && (1.0f - progresses.back()) * length * world_size <= 16.01f,
+                  "every wall edge must reach both corners within 16 metres");
+          for (std::size_t i = 1; i < progresses.size(); ++i)
+            require((progresses[i] - progresses[i - 1]) * length * world_size <= 32.01f,
+                    "wall density must keep physical gaps within 32 metres");
+        }
+      }
+    }
+  }
 
   std::size_t lanes = 0;
   for (auto const& feature : terrain.layout->features)
     if (feature.name.ends_with("_lane")) ++lanes;
-  require(lanes == 3 && terrain.layout->features.size() == 30,
+  require(lanes == 3 && terrain.layout->features.size() == 23,
           "terrain topology is incomplete");
-  std::size_t base_outer_walls = 0;
+  require(terrain.layout->features.front().name == "arena_ground",
+          "the whole arena needs a flat textured background feature");
+  std::size_t base_aprons = 0;
   std::size_t base_inner_courts = 0;
-  std::size_t defender_gates = 0;
   std::size_t jungle_masses = 0;
   std::size_t jungle_paths = 0;
-  std::size_t jungle_ridges = 0;
   for (auto const& feature : terrain.layout->features)
   {
-    if (feature.name.ends_with("_outer_wall")) ++base_outer_walls;
+    if (feature.name.ends_with("_base_apron")) ++base_aprons;
     if (feature.name.ends_with("_inner_court")) ++base_inner_courts;
-    if (feature.name.ends_with("_defender_gate")) ++defender_gates;
     if (feature.name.starts_with("jungle_") && feature.name.ends_with("_mass")) ++jungle_masses;
     if (feature.name.starts_with("jungle_") && feature.name.ends_with("_path")) ++jungle_paths;
-    if (feature.name.starts_with("jungle_") && feature.name.ends_with("_ridge")) ++jungle_ridges;
+    require(!feature.name.ends_with("_ridge") && !feature.name.ends_with("_defender_gate"),
+            "relief separators must be replaced by collidable walls");
   }
-  require(base_outer_walls == 2 && base_inner_courts == 2 && defender_gates == 4,
+  require(base_aprons == 2 && base_inner_courts == 2,
           "fortified base topology is incomplete");
-  require(jungle_masses == 4 && jungle_paths == 8 && jungle_ridges == 4,
-          "jungle floors, ridges or paths are incomplete");
+  require(jungle_masses == 4 && jungle_paths == 8,
+          "jungle floors or paths are incomplete");
   std::vector<std::size_t> feature_cores(terrain.layout->features.size());
+  std::array<std::size_t, Noggit::Ai::procedural_layout_max_texture_paths>
+    strong_texture_pixels{};
   for (int z = 0; z < 256; ++z)
     for (int x = 0; x < 256; ++x)
     {
@@ -154,43 +256,62 @@ int main()
         0.0f, 0.0f, 1066.0f, 1066.0f);
       for (std::size_t i = 0; i < feature_cores.size(); ++i)
         feature_cores[i] += sample.feature_masks[i] >= .999f;
+      for (std::size_t layer = 0; layer < terrain.layout->texture_paths.size(); ++layer)
+        strong_texture_pixels[layer] += sample.quantized_weights[layer] >= 64;
     }
   for (std::size_t i = 0; i < feature_cores.size(); ++i)
     if (feature_cores[i] == 0)
       throw std::runtime_error("missing effective core: " + terrain.layout->features[i].name);
+  for (std::size_t layer = 0; layer < terrain.layout->texture_paths.size(); ++layer)
+    require(strong_texture_pixels[layer] >= 64,
+            "a terrain texture cannot satisfy the runtime visibility check");
   auto sampleHeight = [&](float u, float v)
   {
     return Noggit::Ai::sampleProceduralLayout(
       *terrain.layout, u, v, 0.0f, 0.0f, 1600.0f, 1600.0f).height;
   };
-  require(sampleHeight(.50f, .12f) > 42.0f,
-          "jungle ridge is not high enough to block passage");
-  require(sampleHeight(.50f, .22f) < 22.0f,
-          "jungle main path was not carved back to playable height");
+  auto requireFlat = [&](float u, float v, char const* message)
+  {
+    auto const height = sampleHeight(u, v);
+    if (height < 12.0f || height > 28.0f)
+      throw std::runtime_error(std::string{message} + ": " + std::to_string(height));
+  };
+  requireFlat(.50f, .12f, "jungle floor must stay at playable base height");
+  requireFlat(.50f, .22f, "jungle main path must stay at playable base height");
+  requireFlat(.02f, .98f, "base apron must stay flat without relief walls");
+  requireFlat(.12f, .78f, "former defender gate relief must be flattened");
+  require(sampleHeight(.26f, .3275f) < 15.0f,
+          "the river bed must stay carved below the flat arena");
+
+  require(walls.scatter->regions.size() == 6,
+          "the four jungles and two bases need a collidable wall band");
   std::size_t jungle_wall_bands = 0;
+  std::size_t base_wall_bands = 0;
   for (auto const& region : walls.scatter->regions)
   {
-    require(region.role == "rock", "wall scatter accepted a decorative role");
-    ++jungle_wall_bands;
+    require(region.role == "wall", "wall bands must use the dedicated wall role");
+    require(Noggit::Ai::proceduralScatterIsWallRegion(region),
+            "wall bands must be detected as aligned wall chains");
+    if (region.name.starts_with("jungle_")) ++jungle_wall_bands;
+    if (region.name.ends_with("_base_wall")) ++base_wall_bands;
     require(region.name.ends_with("_wall"),
-            "collidable rock assets must be reserved for named jungle walls");
-    require(region.density_per_tile == 256
-              && region.min_height >= 38.0f && region.min_spacing_ratio <= .0021f
+            "collidable wall assets must be reserved for named wall bands");
+    require(region.density_per_tile > 0
+              && region.min_height <= 5.0f && region.max_height >= 40.0f
+              && region.min_spacing_ratio <= .0021f
               && region.cluster_strength == 0.0f,
-            "jungle wall bands must be dense and limited to raised ridges");
-    require(sampleHeight(.50f, .12f) >= region.min_height
-              && sampleHeight(.50f, .22f) < region.min_height,
-            "wall height filter must keep ridge pieces and reject path openings");
+            "wall bands must be dense, uninterrupted and anchored to flat ground");
   }
-  require(jungle_wall_bands == 4, "the four jungles need a collidable wall band");
-  require(path_walls.scatter->regions.size() == 8,
-          "both sides of the eight jungle paths need wall bands");
+  require(jungle_wall_bands == 4 && base_wall_bands == 2,
+          "jungle and base wall bands are incomplete");
+  require(path_walls.scatter->regions.size() == 4,
+          "both sides of the four main jungle paths need wall bands");
   for (std::size_t region_index = 0;
        region_index < path_walls.scatter->regions.size(); ++region_index)
   {
     auto const& region = path_walls.scatter->regions[region_index];
-    require(region.role == "rock" && region.name.ends_with("_path_wall")
-              && region.density_per_tile == 256 && region.points.size() == 6
+    require(region.role == "wall" && region.name.ends_with("_path_wall")
+              && region.density_per_tile > 0 && region.points.size() == 6
               && region.min_height <= 10.0f,
             "jungle path walls must follow both sides at playable ground height");
     auto const side_width = std::hypot(
@@ -210,33 +331,43 @@ int main()
           *path_walls.scatter, candidate.u, candidate.v, 1600.0f, 1600.0f)
         && height >= region.min_height && height <= region.max_height;
     }
-    require(viable >= 64,
+    require(viable >= 32,
             "jungle path wall band has too few usable collidable pieces");
   }
   require(std::all_of(walls.scatter->assets.begin(), walls.scatter->assets.end(),
             [](auto const& asset)
-            { return asset.role == "rock" && asset.min_scale >= 2.0f; })
+            {
+              return asset.role == "wall"
+                && std::abs(asset.min_scale - 1.5f) < .001f
+                && std::abs(asset.max_scale - 1.7f) < .001f;
+            })
+          && walls.scatter->assets.size() == 2
           && std::all_of(path_walls.scatter->assets.begin(), path_walls.scatter->assets.end(),
-            [](auto const& asset)
-            { return asset.role == "rock" && asset.min_scale >= 2.0f; })
+            [](auto const& asset) { return asset.role == "wall"; })
           && std::none_of(vegetation.scatter->assets.begin(), vegetation.scatter->assets.end(),
+            [](auto const& asset) { return asset.role == "wall"; })
+          && std::any_of(vegetation.scatter->assets.begin(), vegetation.scatter->assets.end(),
             [](auto const& asset) { return asset.role == "rock"; }),
           "wall and vegetation assets must be isolated in separate batches");
+  require(std::any_of(vegetation.scatter->regions.begin(), vegetation.scatter->regions.end(),
+            [](auto const& region) { return region.role == "rock"; }),
+          "decorative rocks must be scattered inside the jungles");
   require(walls.scatter->exclusions.size() == 28
             && path_walls.scatter->exclusions.size() == 28
             && vegetation.scatter->exclusions.size() == 28,
           "lanes, river, bases, objectives, camps and jungle paths need clear openings");
-  require(sampleHeight(.02f, .98f) > 42.0f,
-          "base rear wall is not protected");
-  auto const gate_a = sampleHeight(.09f, .73f);
-  auto const gate_b = sampleHeight(.18f, .82f);
-  auto const gate_c = sampleHeight(.23f, .93f);
-  if (!(gate_a < 22.0f && gate_b < 22.0f && gate_c < 22.0f))
-    throw std::runtime_error("the three public base entrances are not open: "
-      + std::to_string(gate_a) + "," + std::to_string(gate_b) + ","
-      + std::to_string(gate_c));
-  require(sampleHeight(.12f, .78f) > 42.0f,
-          "decorative defender gate became a public entrance");
+  require(Noggit::Ai::proceduralScatterExcluded(
+            *walls.scatter, .075f, .695f, 1600.0f, 1600.0f),
+          "the top lane must cut a public entrance through the base wall");
+  require(Noggit::Ai::proceduralScatterExcluded(
+            *walls.scatter, .1957f, .1820f, 1600.0f, 1600.0f),
+          "main path wall sides must connect without crossing the jungle enclosure");
+  require(!Noggit::Ai::proceduralScatterExcluded(
+            *walls.scatter, .015f, .85f, 1600.0f, 1600.0f),
+          "the base rear wall chain must stay continuous");
+  require(!Noggit::Ai::proceduralScatterExcluded(
+            *walls.scatter, .27f, .84f, 1600.0f, 1600.0f),
+          "the jungle path breach into the base must be sealed by the wall chain");
   require(Noggit::Ai::proceduralScatterExcluded(
             *vegetation.scatter, .50f, .50f, 1066.0f, 1066.0f),
           "middle lane and river crossing must be protected from decoration");
@@ -260,11 +391,12 @@ int main()
         *walls.scatter, region_index, 0, 0, index, 0.0f, 1.0f, 0.0f, 1.0f);
       auto const is_clear = !Noggit::Ai::proceduralScatterExcluded(
         *walls.scatter, candidate.u, candidate.v, 1600.0f, 1600.0f);
-      auto const is_high = sampleHeight(candidate.u, candidate.v) >= region.min_height;
-      if (candidate.active && is_clear && is_high)
+      auto const height = sampleHeight(candidate.u, candidate.v);
+      if (candidate.active && is_clear
+          && height >= region.min_height && height <= region.max_height)
         ++viable;
     }
-    if (viable < 40)
+    if (viable < 48)
       throw std::runtime_error("insufficient deterministic wall chain for "
         + region.name + ": " + std::to_string(viable));
   }
@@ -293,21 +425,59 @@ int main()
 
   auto sparse_vegetation = specification();
   sparse_vegetation["vegetation_density_per_tile"] = 1;
-  auto const sparse_blueprint = Noggit::Ai::compileMobaArenaBlueprint(sparse_vegetation);
+  auto const sparse_blueprint = Noggit::Ai::compileMobaArenaBlueprint(sparse_vegetation, 4);
   auto const sparse_walls = Noggit::Ai::parseProceduralScatter(
     sparse_blueprint.at("next_calls").at(3).at("arguments"));
   require(sparse_walls.scatter
-            && std::all_of(sparse_walls.scatter->regions.begin(),
-                           sparse_walls.scatter->regions.end(),
-                           [](auto const& region)
-                           { return region.density_per_tile == 256; }),
+            && sparse_walls.scatter->regions.size() == walls.scatter->regions.size()
+            && std::equal(sparse_walls.scatter->regions.begin(),
+                          sparse_walls.scatter->regions.end(),
+                          walls.scatter->regions.begin(),
+                          [](auto const& sparse, auto const& normal)
+                          { return sparse.density_per_tile == normal.density_per_tile; }),
           "vegetation density must not weaken gameplay wall chains");
+
+  std::set<std::string> prop_names;
+  std::size_t lamp_props = 0;
+  std::size_t light_props = 0;
+  for (auto const& prop : props.props->props)
+  {
+    require(prop_names.insert(prop.name).second, "prop names must be unique");
+    require(prop.u > 0.0f && prop.u < 1.0f && prop.v > 0.0f && prop.v < 1.0f,
+            "props must stay inside the map footprint");
+    if (prop.name.starts_with("lamp_") && !prop.name.starts_with("lamp_glow_"))
+      ++lamp_props;
+    if (prop.path.find("noggit_light") != std::string::npos) ++light_props;
+  }
+  require(props.props->props.size() <= 256, "the prop budget was exceeded");
+  require(prop_names.contains("team_left_landmark")
+            && prop_names.contains("team_right_landmark")
+            && prop_names.contains("objective_north_landmark")
+            && prop_names.contains("objective_south_landmark"),
+          "base and objective landmarks are missing");
+  require(lamp_props == first.at("topology").at("lane_lamps").get<std::size_t>()
+            && lamp_props >= 30,
+          "lane lamp chains are incomplete");
+  require(light_props == first.at("topology").at("dynamic_lights").get<std::size_t>(),
+          "every ambience light must come from the Patch-E light pack");
+
+  auto missing_walls = specification();
+  for (auto& asset : missing_walls["assets"])
+    if (asset.at("role") == "wall") asset["role"] = "rock";
+  try
+  {
+    static_cast<void>(Noggit::Ai::compileMobaArenaBlueprint(missing_walls, 4));
+    require(false, "a specification without wall assets was accepted");
+  }
+  catch (std::invalid_argument const&)
+  {
+  }
 
   auto invalid = specification();
   invalid["extra"] = true;
   try
   {
-    static_cast<void>(Noggit::Ai::compileMobaArenaBlueprint(invalid));
+    static_cast<void>(Noggit::Ai::compileMobaArenaBlueprint(invalid, 4));
     require(false, "extra root field accepted");
   }
   catch (std::invalid_argument const&)

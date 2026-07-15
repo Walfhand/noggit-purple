@@ -91,7 +91,7 @@ namespace Noggit
       const QMap<QString, asset_browse_mode> brosweModeLabels =  {
       { "World Objects", asset_browse_mode::world },
       { "Detail Doodads", asset_browse_mode::detail_doodads },
-      // { "Skybox", asset_browse_mode::skybox },
+      { "Skybox", asset_browse_mode::skybox },
       // { "Creatures", asset_browse_mode::creatures },
       // { "Characters", asset_browse_mode::characters },
       // {"Particles", asset_browse_mode::particles },

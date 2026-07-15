@@ -8,7 +8,9 @@
 #include <noggit/WMOInstance.h> // WMOInstance
 #include <noggit/World.h>
 #include <noggit/MapTile.h>
+#include <noggit/Sky.h>
 #include <noggit/ai/AssistantDock.hpp>
+#include <noggit/ai/ProceduralSkybox.hpp>
 #include <noggit/map_index.hpp>
 #include <noggit/TabletManager.hpp>
 #include <opengl/texture.hpp>
@@ -77,6 +79,7 @@
 #include <noggit/tools/AreaTriggerTool.hpp>
 #include <noggit/StringHash.hpp>
 #include <noggit/application/NoggitApplication.hpp>
+#include <ClientData.hpp>
 
 #ifdef USE_MYSQL_UID_STORAGE
 #include <mysql/mysql.h>
@@ -4327,6 +4330,59 @@ QDockWidget* MapView::getAssetBrowser()
 Noggit::Ui::Tools::AssetBrowser::Ui::AssetBrowserWidget* MapView::getAssetBrowserWidget()
 {
   return _asset_browser;
+}
+
+Noggit::Ai::ProceduralSkyboxResult MapView::applyGlobalSkybox(
+  std::string path, std::uint32_t flags)
+{
+  auto* application = Noggit::Application::NoggitApplication::instance();
+  path = BlizzardArchive::ClientData::normalizeFilenameInternal(std::move(path));
+  if (!application->hasClientData() || !_world
+      || !path.starts_with("environments/stars/") || !path.ends_with(".m2")
+      || path.find("..") != std::string::npos
+      || !application->clientData()->exists(path))
+    throw std::invalid_argument(
+      "La skybox n'existe pas dans les donnees client : " + path);
+  if (flags > 3)
+    throw std::invalid_argument("Les flags de skybox doivent etre compris entre 0 et 3.");
+
+  auto const light_backup = gLightDB;
+  auto const params_backup = gLightParamsDB;
+  auto const skybox_backup = gLightSkyboxDB;
+  auto const int_band_backup = gLightIntBandDB;
+  auto const float_band_backup = gLightFloatBandDB;
+  try
+  {
+    auto const update = Noggit::Ai::attachGlobalSkybox(
+      gLightDB, gLightParamsDB, gLightSkyboxDB,
+      gLightIntBandDB, gLightFloatBandDB,
+      _world->getMapID(), path, flags);
+
+    makeCurrent();
+    OpenGL::context::scoped_setter const current_context(::gl, context());
+    auto skies = std::make_unique<Skies>(
+      _world->getMapID(), _world->getRenderContext());
+    if (update.changed)
+    {
+      gLightSkyboxDB.save();
+      gLightParamsDB.save();
+      gLightIntBandDB.save();
+      gLightFloatBandDB.save();
+      gLightDB.save();
+    }
+    _world->renderer()->skies() = std::move(skies);
+    invalidate();
+    return update;
+  }
+  catch (...)
+  {
+    gLightDB.overwriteWith(light_backup);
+    gLightParamsDB.overwriteWith(params_backup);
+    gLightSkyboxDB.overwriteWith(skybox_backup);
+    gLightIntBandDB.overwriteWith(int_band_backup);
+    gLightFloatBandDB.overwriteWith(float_band_backup);
+    throw;
+  }
 }
 
 glm::vec3 MapView::cursorPosition() const

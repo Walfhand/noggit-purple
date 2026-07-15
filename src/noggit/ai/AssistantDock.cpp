@@ -1888,33 +1888,10 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
       if (flags < 0 || flags > 3)
         return completeWith(toolError("flags doit être compris entre 0 et 3."));
 
-      auto const light_backup = gLightDB;
-      auto const params_backup = gLightParamsDB;
-      auto const skybox_backup = gLightSkyboxDB;
-      auto const int_band_backup = gLightIntBandDB;
-      auto const float_band_backup = gLightFloatBandDB;
       try
       {
-        auto* world = _map_view->getWorld();
-        auto const update = attachGlobalSkybox(
-          gLightDB, gLightParamsDB, gLightSkyboxDB,
-          gLightIntBandDB, gLightFloatBandDB,
-          world->getMapID(), path, static_cast<std::uint32_t>(flags));
-        if (update.changed)
-        {
-          gLightSkyboxDB.save();
-          gLightParamsDB.save();
-          gLightIntBandDB.save();
-          gLightFloatBandDB.save();
-          gLightDB.save();
-        }
-
-        _map_view->makeCurrent();
-        OpenGL::context::scoped_setter const current_context(
-          ::gl, _map_view->context());
-        world->renderer()->skies() = std::make_unique<Skies>(
-          world->getMapID(), world->getRenderContext());
-        _map_view->invalidate();
+        auto const update = _map_view->applyGlobalSkybox(
+          path, static_cast<std::uint32_t>(flags));
         return completeWith({
           {"ok", true}, {"operation", call.name}, {"skybox_path", path},
           {"flags", flags}, {"changed", update.changed}, {"saved", update.changed},
@@ -1926,11 +1903,6 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
       }
       catch (std::exception const& error)
       {
-        gLightDB.overwriteWith(light_backup);
-        gLightParamsDB.overwriteWith(params_backup);
-        gLightSkyboxDB.overwriteWith(skybox_backup);
-        gLightIntBandDB.overwriteWith(int_band_backup);
-        gLightFloatBandDB.overwriteWith(float_band_backup);
         return completeWith(toolError(
           "Impossible de rattacher la skybox à la lumière globale : "
           + std::string{error.what()}));

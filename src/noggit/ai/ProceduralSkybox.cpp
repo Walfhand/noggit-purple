@@ -32,6 +32,15 @@ namespace Noggit::Ai
       return std::nullopt;
     }
 
+    std::size_t parameterReferenceCount(DBCFile& light, std::uint32_t param_id)
+    {
+      auto count = std::size_t{0};
+      for (auto record = light.begin(); record != light.end(); ++record)
+        for (std::size_t offset = 0; offset < 8; ++offset)
+          if (record->getUInt(LightDB::DataIDs + offset) == param_id) ++count;
+      return count;
+    }
+
     std::optional<std::uint32_t> matchingSkyboxId(
       DBCFile& skyboxes, std::string const& path, std::uint32_t flags)
     {
@@ -102,15 +111,20 @@ namespace Noggit::Ai
       }
     }
 
-    requireBandSources(light_int_band, source_param_id, int_band_count,
-                       "LightIntBand.dbc");
-    requireBandSources(light_float_band, source_param_id, float_band_count,
-                       "LightFloatBand.dbc");
-
-    auto new_param_id = static_cast<std::uint32_t>(light_params.getEmptyRecordID());
-    while (!bandRangeIsFree(light_int_band, new_param_id, int_band_count)
-           || !bandRangeIsFree(light_float_band, new_param_id, float_band_count))
-      ++new_param_id;
+    auto const update_private_param = existing_light_id
+      && parameterReferenceCount(light, source_param_id) == 1;
+    auto new_param_id = source_param_id;
+    if (!update_private_param)
+    {
+      requireBandSources(light_int_band, source_param_id, int_band_count,
+                         "LightIntBand.dbc");
+      requireBandSources(light_float_band, source_param_id, float_band_count,
+                         "LightFloatBand.dbc");
+      new_param_id = static_cast<std::uint32_t>(light_params.getEmptyRecordID());
+      while (!bandRangeIsFree(light_int_band, new_param_id, int_band_count)
+             || !bandRangeIsFree(light_float_band, new_param_id, float_band_count))
+        ++new_param_id;
+    }
     auto const reused_skybox_id = matchingSkyboxId(light_skybox, skybox_path, flags);
     auto const new_skybox_id = reused_skybox_id.value_or(
       static_cast<std::uint32_t>(light_skybox.getEmptyRecordID()));
@@ -129,6 +143,13 @@ namespace Noggit::Ai
         auto skybox = light_skybox.addRecord(new_skybox_id);
         skybox.writeString(LightSkyboxDB::filename, skybox_path);
         skybox.write(LightSkyboxDB::flags, flags);
+      }
+
+      if (update_private_param)
+      {
+        light_params.getByID(source_param_id).write(
+          LightParamsDB::skybox, new_skybox_id);
+        return {true, *existing_light_id, source_param_id, new_skybox_id};
       }
 
       auto params = light_params.addRecordCopy(new_param_id, source_param_id);

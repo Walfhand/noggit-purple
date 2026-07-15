@@ -120,4 +120,21 @@ int main()
             light.getRecordCount(), params.getRecordCount(), skyboxes.getRecordCount(),
             int_bands.getRecordCount(), float_bands.getRecordCount()},
           "idempotent attachment added DBC records");
+
+  auto const third = Noggit::Ai::attachGlobalSkybox(
+    light, params, skyboxes, int_bands, float_bands, 42,
+    "environments/stars/other.m2", 1);
+  require(third.changed && third.light_id == first.light_id
+            && third.light_params_id == first.light_params_id,
+          "changing a private map skybox cloned its light parameters");
+  require(params.getRecordCount() == counts[1]
+            && int_bands.getRecordCount() == counts[3]
+            && float_bands.getRecordCount() == counts[4],
+          "changing a private map skybox added unused parameter bands");
+  require(std::string{skyboxes.getByID(third.skybox_id).getString(
+                       LightSkyboxDB::filename)}
+              == "environments/stars/other.m2"
+            && params.getByID(first.light_params_id).getUInt(
+                 LightParamsDB::skybox) == third.skybox_id,
+          "private map skybox was not updated in place");
 }

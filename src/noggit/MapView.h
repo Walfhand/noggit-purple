@@ -17,7 +17,9 @@
 #include <QtCore/QTimer>
 
 #include <array>
+#include <cstdint>
 #include <forward_list>
+#include <string>
 
 
 class DBCFile;
@@ -43,6 +45,7 @@ namespace Noggit
   namespace Ai
   {
     class AssistantDock;
+    struct ProceduralSkyboxResult;
   }
 
   namespace Project
@@ -282,6 +285,9 @@ public:
 
   [[nodiscard]]
   Noggit::Ui::Tools::AssetBrowser::Ui::AssetBrowserWidget* getAssetBrowserWidget();;
+
+  Noggit::Ai::ProceduralSkyboxResult applyGlobalSkybox(
+    std::string path, std::uint32_t flags);
 
   glm::vec3 cursorPosition() const;
   bool hasValidCursorPosition() const;

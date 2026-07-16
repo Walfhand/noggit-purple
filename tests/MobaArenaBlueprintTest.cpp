@@ -191,7 +191,8 @@ int main()
         require(std::all_of(candidates.begin(), candidates.end(),
                             [](auto const& candidate) { return candidate.active; }),
                 "wall density produced an inactive perimeter candidate");
-        auto const open_path_sides = region.name.ends_with("_path_wall");
+        require(region.name.find("_chain") != std::string::npos,
+                "every wall region must be an open graph-derived chain");
         for (std::size_t edge = 0; edge < region.points.size(); ++edge)
         {
           auto const& start = region.points[edge];
@@ -210,14 +211,8 @@ int main()
             if (cross > .0001f || progress < -.0001f || progress > 1.0001f) continue;
             progresses.push_back(progress);
           }
-          auto const end_cap = open_path_sides
-            && (edge + 1 == region.points.size() / 2
-                || edge + 1 == region.points.size());
-          if (end_cap)
-          {
-            require(progresses.empty(), "path walls must not close across path entrances");
-            continue;
-          }
+          if (edge + 1 == region.points.size()) continue;
+          if (candidates.size() < region.points.size()) continue;
           require(!progresses.empty(), "a wall edge received no candidates");
           std::sort(progresses.begin(), progresses.end());
           require(progresses.front() * length * world_size <= 16.01f
@@ -308,57 +303,93 @@ int main()
   require(sampleHeight(.26f, .3275f) < 15.0f,
           "the river bed must stay carved below the flat arena");
 
-  require(walls.scatter->regions.size() == 6,
-          "the four jungles and two bases need a collidable wall band");
-  std::size_t jungle_wall_bands = 0;
-  std::size_t base_wall_bands = 0;
+  require(walls.scatter->regions.size() >= 12
+            && walls.scatter->regions.size() <= 48,
+          "the jungle rings and base perimeters must yield wall chains");
+  std::set<std::string> jungle_chain_quadrants;
+  std::set<std::string> base_chain_sides;
   for (auto const& region : walls.scatter->regions)
   {
-    require(region.role == "wall", "wall bands must use the dedicated wall role");
+    require(region.role == "wall", "wall chains must use the dedicated wall role");
     require(Noggit::Ai::proceduralScatterIsWallRegion(region),
-            "wall bands must be detected as aligned wall chains");
-    if (region.name.starts_with("jungle_")) ++jungle_wall_bands;
-    if (region.name.ends_with("_base_wall")) ++base_wall_bands;
-    require(region.name.ends_with("_wall"),
-            "collidable wall assets must be reserved for named wall bands");
+            "wall chains must be detected as aligned wall chains");
+    require(region.name.find("_chain") != std::string::npos
+              && region.name.ends_with("_wall"),
+            "collidable wall assets must be reserved for named wall chains");
+    if (region.name.starts_with("jungle_"))
+      jungle_chain_quadrants.insert(region.name.substr(0, 8));
+    if (region.name.starts_with("team_"))
+      base_chain_sides.insert(region.name.substr(0, 9));
     require(region.density_per_tile > 0
               && region.min_height <= 5.0f && region.max_height >= 40.0f
               && region.min_spacing_ratio <= .0021f
               && region.cluster_strength == 0.0f,
-            "wall bands must be dense, uninterrupted and anchored to flat ground");
+            "wall chains must be dense, uninterrupted and anchored to flat ground");
   }
-  require(jungle_wall_bands == 4 && base_wall_bands == 2,
-          "jungle and base wall bands are incomplete");
-  require(path_walls.scatter->regions.size() == 4,
-          "both sides of the four main jungle paths need wall bands");
+  require(jungle_chain_quadrants.size() == 4 && base_chain_sides.size() == 2,
+          "jungle and base wall chains are incomplete");
+  require(path_walls.scatter->regions.size() >= 8
+            && path_walls.scatter->regions.size() <= 48,
+          "both sides of the four main jungle paths need wall chains");
+  std::set<std::string> flank_prefixes;
+  for (auto const& region : path_walls.scatter->regions)
+  {
+    require(region.role == "wall"
+              && region.name.find("_chain") != std::string::npos
+              && region.density_per_tile > 0 && region.min_height <= 10.0f,
+            "jungle path flanks must follow the paths at playable ground height");
+    flank_prefixes.insert(region.name.substr(0, region.name.find("_chain")));
+  }
+  require(flank_prefixes.size() == 8,
+          "each main path needs chains on both of its flanks");
+  // T-joints: no flank segment may sit on top of a ring or base wall segment.
+  auto const wallCandidates = [](Noggit::Ai::ProceduralScatter const& scatter)
+  {
+    std::vector<std::pair<float, float>> positions;
+    for (std::size_t region_index = 0;
+         region_index < scatter.regions.size(); ++region_index)
+      for (std::size_t index = 0;
+           index < scatter.regions[region_index].density_per_tile; ++index)
+      {
+        auto const candidate = Noggit::Ai::proceduralScatterCandidate(
+          scatter, region_index, 0, 0, index, 0.0f, 1.0f, 0.0f, 1.0f);
+        positions.emplace_back(candidate.u, candidate.v);
+      }
+    return positions;
+  };
+  auto const ring_positions = wallCandidates(*walls.scatter);
+  auto const flank_positions = wallCandidates(*path_walls.scatter);
+  for (auto const& [flank_u, flank_v] : flank_positions)
+    for (auto const& [ring_u, ring_v] : ring_positions)
+      if (std::hypot(flank_u - ring_u, flank_v - ring_v) < .016f)
+        throw std::runtime_error("a path flank segment overlaps a ring or "
+                                 "base wall segment");
+  // Flanks of different paths must also keep their clearance to each other.
+  auto flank_path_prefixes = std::vector<std::string>{};
+  auto flank_owner = std::vector<std::size_t>{};
   for (std::size_t region_index = 0;
        region_index < path_walls.scatter->regions.size(); ++region_index)
   {
     auto const& region = path_walls.scatter->regions[region_index];
-    require(region.role == "wall" && region.name.ends_with("_path_wall")
-              && region.density_per_tile > 0 && region.points.size() == 6
-              && region.min_height <= 10.0f,
-            "jungle path walls must follow both sides at playable ground height");
-    auto const side_width = std::hypot(
-      region.points[1].u - region.points[4].u,
-      region.points[1].v - region.points[4].v);
-    require(side_width >= .06f,
-            "jungle path wall loop does not cover both sides of the path");
-    auto viable = std::size_t{0};
+    auto const prefix = region.name.substr(0, region.name.find("_path_"));
+    auto const found = std::find(flank_path_prefixes.begin(),
+                                 flank_path_prefixes.end(), prefix);
+    if (found == flank_path_prefixes.end())
+      flank_path_prefixes.push_back(prefix);
     for (std::size_t index = 0; index < region.density_per_tile; ++index)
-    {
-      auto const candidate = Noggit::Ai::proceduralScatterCandidate(
-        *path_walls.scatter, region_index, 0, 0, index,
-        0.0f, 1.0f, 0.0f, 1.0f);
-      auto const height = sampleHeight(candidate.u, candidate.v);
-      viable += candidate.active
-        && !Noggit::Ai::proceduralScatterExcluded(
-          *path_walls.scatter, candidate.u, candidate.v, 1600.0f, 1600.0f)
-        && height >= region.min_height && height <= region.max_height;
-    }
-    require(viable >= 32,
-            "jungle path wall band has too few usable collidable pieces");
+      flank_owner.push_back(static_cast<std::size_t>(
+        std::distance(flank_path_prefixes.begin(),
+          std::find(flank_path_prefixes.begin(), flank_path_prefixes.end(),
+                    prefix))));
   }
+  for (std::size_t a = 0; a < flank_positions.size(); ++a)
+    for (std::size_t b = a + 1; b < flank_positions.size(); ++b)
+      if (flank_owner[a] != flank_owner[b]
+          && std::hypot(flank_positions[a].first - flank_positions[b].first,
+                        flank_positions[a].second - flank_positions[b].second)
+             < .014f)
+        throw std::runtime_error(
+          "two path flanks from different paths overlap each other");
   require(std::all_of(walls.scatter->assets.begin(), walls.scatter->assets.end(),
             [](auto const& asset)
             {
@@ -377,24 +408,25 @@ int main()
   require(std::any_of(vegetation.scatter->regions.begin(), vegetation.scatter->regions.end(),
             [](auto const& region) { return region.role == "rock"; }),
           "decorative rocks must be scattered inside the jungles");
-  require(walls.scatter->exclusions.size() >= 28
-            && walls.scatter->exclusions.size() <= 96
-            && path_walls.scatter->exclusions.size() >= 28
+  require(walls.scatter->exclusions.size() <= 96
             && path_walls.scatter->exclusions.size() <= 96
             && vegetation.scatter->exclusions.size() == 28,
-          "lanes, river, bases, objectives, camps and jungle paths need clear "
-          "openings, plus the connectivity repair openings");
-  require(Noggit::Ai::proceduralScatterExcluded(
-            *walls.scatter, .075f, .695f, 1600.0f, 1600.0f),
-          "the top lane must cut a public entrance through the base wall");
-  require(Noggit::Ai::proceduralScatterExcluded(
-            *walls.scatter, .1957f, .1820f, 1600.0f, 1600.0f),
-          "main path wall sides must connect without crossing the jungle enclosure");
-  require(!Noggit::Ai::proceduralScatterExcluded(
-            *walls.scatter, .015f, .85f, 1600.0f, 1600.0f),
+          "chains carry their own openings; only repair openings and the "
+          "vegetation exclusions remain");
+  // Openings and continuity are structural now: probe candidate positions.
+  auto const nearestWallDistance = [&](float u, float v)
+  {
+    auto best = 10.0f;
+    for (auto const& [candidate_u, candidate_v] : ring_positions)
+      best = std::min(best, static_cast<float>(
+        std::hypot(candidate_u - u, candidate_v - v)));
+    return best;
+  };
+  require(nearestWallDistance(.075f, .695f) >= .018f,
+          "the top lane must keep a public entrance through the base wall");
+  require(nearestWallDistance(.015f, .85f) <= .02f,
           "the base rear wall chain must stay continuous");
-  require(!Noggit::Ai::proceduralScatterExcluded(
-            *walls.scatter, .27f, .84f, 1600.0f, 1600.0f),
+  require(nearestWallDistance(.27f, .84f) <= .02f,
           "the jungle path breach into the base must be sealed by the wall chain");
   require(Noggit::Ai::proceduralScatterExcluded(
             *vegetation.scatter, .50f, .50f, 1066.0f, 1066.0f),
@@ -408,27 +440,28 @@ int main()
   require(Noggit::Ai::proceduralScatterExcluded(
             *vegetation.scatter, .50f, .22f, 1066.0f, 1066.0f),
           "camp clearings must remain free of decoration");
-  for (std::size_t region_index = 0;
-       region_index < walls.scatter->regions.size(); ++region_index)
-  {
-    auto const& region = walls.scatter->regions[region_index];
-    auto viable = std::size_t{0};
-    for (std::size_t index = 0; index < region.density_per_tile; ++index)
+  for (auto const* scatter : {&*walls.scatter, &*path_walls.scatter})
+    for (std::size_t region_index = 0;
+         region_index < scatter->regions.size(); ++region_index)
     {
-      auto const candidate = Noggit::Ai::proceduralScatterCandidate(
-        *walls.scatter, region_index, 0, 0, index, 0.0f, 1.0f, 0.0f, 1.0f);
-      auto const is_clear = !Noggit::Ai::proceduralScatterExcluded(
-        *walls.scatter, candidate.u, candidate.v, 1600.0f, 1600.0f);
-      auto const height = sampleHeight(candidate.u, candidate.v);
-      if (candidate.active && is_clear
-          && height >= region.min_height && height <= region.max_height)
-        ++viable;
+      auto const& region = scatter->regions[region_index];
+      auto viable = std::size_t{0};
+      for (std::size_t index = 0; index < region.density_per_tile; ++index)
+      {
+        auto const candidate = Noggit::Ai::proceduralScatterCandidate(
+          *scatter, region_index, 0, 0, index, 0.0f, 1.0f, 0.0f, 1.0f);
+        auto const is_clear = !Noggit::Ai::proceduralScatterExcluded(
+          *scatter, candidate.u, candidate.v, 1600.0f, 1600.0f);
+        auto const height = sampleHeight(candidate.u, candidate.v);
+        if (candidate.active && is_clear
+            && height >= region.min_height && height <= region.max_height)
+          ++viable;
+      }
+      // Chains bake their openings in, so nearly every candidate must place.
+      if (viable * 4 < region.density_per_tile * 3)
+        throw std::runtime_error("insufficient deterministic wall chain for "
+          + region.name + ": " + std::to_string(viable));
     }
-    // The designed jungle gates legitimately drop a few candidates per ring.
-    if (viable < 42)
-      throw std::runtime_error("insufficient deterministic wall chain for "
-        + region.name + ": " + std::to_string(viable));
-  }
   auto candidateCount = [](Noggit::Ai::ProceduralScatter const& scatter, int tiles)
   {
     auto count = std::size_t{0};

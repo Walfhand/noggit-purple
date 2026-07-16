@@ -562,7 +562,7 @@ namespace Noggit::Ai
         }},
         {"regions", {
           {"type", "array"}, {"items", std::move(scatter_region_parameters)},
-          {"minItems", 1}, {"maxItems", 16}
+          {"minItems", 1}, {"maxItems", 48}
         }},
         {"exclusions", {
           {"type", "array"}, {"items", std::move(scatter_exclusion_parameters)},

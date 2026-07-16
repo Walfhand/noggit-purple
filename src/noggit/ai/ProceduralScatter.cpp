@@ -101,7 +101,7 @@ namespace Noggit::Ai
 
     WallSample wallSample(std::vector<ProceduralLayoutPoint> const& points,
                           std::size_t index, std::size_t count,
-                          bool skip_corridor_end_caps)
+                          bool skip_corridor_end_caps, bool open_chain)
     {
       struct Edge
       {
@@ -118,6 +118,7 @@ namespace Noggit::Ai
         if (skip_corridor_end_caps
             && (edge + 1 == points.size() / 2 || edge + 1 == points.size()))
           continue;
+        if (open_chain && edge + 1 == points.size()) continue;
         auto const& first = points[edge];
         auto const& second = points[(edge + 1) % points.size()];
         auto const du = second.u - first.u;
@@ -254,8 +255,8 @@ namespace Noggit::Ai
     }
 
     auto const& regions = arguments.at("regions");
-    if (!regions.is_array() || regions.empty() || regions.size() > 16)
-      return fail("regions doit contenir entre 1 et 16 zones.");
+    if (!regions.is_array() || regions.empty() || regions.size() > 48)
+      return fail("regions doit contenir entre 1 et 48 zones.");
     std::set<std::string> names;
     for (auto const& value : regions)
     {
@@ -288,7 +289,15 @@ namespace Noggit::Ai
              { return asset.role == region.role; }))
         return fail("Nom, densité, espacement, hauteur ou pente de région invalide.");
       region.density_per_tile = static_cast<std::size_t>(density);
-      if (!parsePoints(value.at("points"), region.points, 3)
+      // Wall chains are open polylines walked end to end, not closed areas.
+      auto const open_chain = region.role == "wall"
+        && region.name.find("_chain") != std::string::npos;
+      if (open_chain)
+      {
+        if (!parsePoints(value.at("points"), region.points, 2))
+          return fail("Chaque chaîne de mur doit être une polyligne de 2 à 16 points.");
+      }
+      else if (!parsePoints(value.at("points"), region.points, 3)
           || !isSimpleProceduralArea(region.points))
         return fail("Chaque région doit être un polygone simple de 3 à 16 points.");
       scatter.regions.push_back(std::move(region));
@@ -331,7 +340,8 @@ namespace Noggit::Ai
     {
       auto const sample = wallSample(
         region.points, candidate_index, region.density_per_tile,
-        region.name.ends_with("_path_wall"));
+        region.name.ends_with("_path_wall"),
+        region.name.find("_chain") != std::string::npos);
       candidate.u = sample.u;
       candidate.v = sample.v;
       candidate.yaw_degrees = sample.yaw_degrees;

@@ -131,7 +131,7 @@ int main()
   auto const& scatter_properties = asset_scatter->at("parameters").at("properties");
   require(scatter_properties.at("assets").at("minItems") == 1
             && scatter_properties.at("assets").at("maxItems") == 16
-            && scatter_properties.at("regions").at("maxItems") == 16
+            && scatter_properties.at("regions").at("maxItems") == 48
             && scatter_properties.at("exclusions").at("maxItems") == 96,
           "asset scatter bounds changed");
 

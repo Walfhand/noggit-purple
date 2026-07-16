@@ -600,22 +600,15 @@ namespace Noggit::Ai
         jungle_gates.push_back({{"u", mid_u}, {"v", mid_v}});
       }
     };
+    std::vector<nlohmann::json> ring_loops;
     for (std::size_t i = 0; i < jungle_polygons.size(); ++i)
     {
       auto points = nlohmann::json::array();
       for (auto const& p : jungle_polygons[i]) points.push_back(scatterPoint(p.at("u"), p.at("v")));
-      auto const wall_loop = offsetLoopInward(
-        jungle_polygons[i], lane_width + .015, base);
-      auto wall_points = withoutHeight(wall_loop);
-      addRingGates(wall_points);
-      wall_regions.push_back({
-        {"name", "jungle_" + std::to_string(i + 1) + "_wall"},
-        {"role", "wall"}, {"points", wall_points},
-        {"density_per_tile", wallDensity(wall_points, footprint_side_tiles)},
-        {"min_spacing_ratio", .002}, {"min_height", base - 15},
-        {"max_height", base + 25}, {"min_slope_degrees", 0},
-        {"max_slope_degrees", 75}, {"cluster_scale", 2.5},
-        {"cluster_strength", 0.0}});
+      auto ring = withoutHeight(offsetLoopInward(
+        jungle_polygons[i], lane_width + .015, base));
+      addRingGates(ring);
+      ring_loops.push_back(std::move(ring));
       for (auto const& role : role_scatter)
       {
         if (role_counts[role.role] == 0) continue;
@@ -630,130 +623,223 @@ namespace Noggit::Ai
           {"cluster_strength", role.strength}});
       }
     }
-    // Only the four main paths get wall corridors; walling the branch paths as
+    auto const base_loops = std::array{
+      std::pair{std::string{"team_left_base"}, withoutHeight(left_base_outer)},
+      std::pair{std::string{"team_right_base"}, withoutHeight(right_base_outer)}};
+    // Only the four main paths get flanking walls; walling the branch paths as
     // well buries the small footprints under a lattice of criss-crossing fences.
-    // Each flanking wall side also gets a mid-side gate, so the compartments
-    // between path walls and the jungle rings stay open toward the paths.
     auto path_wall_gates = nlohmann::json::array();
+    std::vector<std::pair<std::string, nlohmann::json>> flank_sides;
     for (std::size_t i = 0; i < jungle_paths.size(); i += 2)
     {
-      auto wall_points = withoutHeight(corridorLoop(jungle_paths[i], .035, base));
-      auto const side_length = wall_points.size() / 2;
-      for (auto const side_middle : {side_length / 2, side_length + side_length / 2})
-        path_wall_gates.push_back({
-          {"u", wall_points[side_middle].at("u")},
-          {"v", wall_points[side_middle].at("v")}});
-      path_wall_regions.push_back({
-        {"name", "jungle_" + std::to_string(i / 2 + 1) + "_main_path_wall"},
-        {"role", "wall"},
-        {"points", wall_points},
-        {"density_per_tile", wallDensity(wall_points, footprint_side_tiles)},
-        {"min_spacing_ratio", .002}, {"min_height", base - 15},
-        {"max_height", base + 25}, {"min_slope_degrees", 0},
-        {"max_slope_degrees", 75}, {"cluster_scale", 2.5},
-        {"cluster_strength", 0.0}});
+      auto const loop = withoutHeight(corridorLoop(jungle_paths[i], .035, base));
+      auto const side_length = loop.size() / 2;
+      for (auto const side : {std::size_t{0}, std::size_t{1}})
+      {
+        auto side_points = nlohmann::json::array();
+        for (std::size_t p = 0; p < side_length; ++p)
+          side_points.push_back(loop[side * side_length + p]);
+        auto const& middle = side_points[side_length / 2];
+        path_wall_gates.push_back({{"u", middle.at("u")}, {"v", middle.at("v")}});
+        flank_sides.emplace_back(
+          "jungle_" + std::to_string(i / 2 + 1) + "_path_"
+            + (side == 0 ? "a" : "b"),
+          std::move(side_points));
+      }
     }
-    auto addBaseWall = [&](std::string name, nlohmann::json const& polygon)
+    // The walls are the negative space of the circulation graph: a point on a
+    // wall source boundary stays walled only if no corridor, camp, objective,
+    // gate or higher-priority wall system claims that ground.
+    enum class WallKind { ring, base_wall, flank };
+    auto const openAt = [&](double u, double v, WallKind kind,
+                            std::size_t flank_rank)
     {
-      auto wall_points = withoutHeight(polygon);
-      wall_regions.push_back({
-        {"name", std::move(name)}, {"role", "wall"},
-        {"points", wall_points},
-        {"density_per_tile", wallDensity(wall_points, footprint_side_tiles)},
-        {"min_spacing_ratio", .002}, {"min_height", base - 15},
-        {"max_height", base + 25}, {"min_slope_degrees", 0},
-        {"max_slope_degrees", 75}, {"cluster_scale", 2.5},
-        {"cluster_strength", 0.0}});
-    };
-    addBaseWall("team_left_base_wall", left_base_outer);
-    addBaseWall("team_right_base_wall", right_base_outer);
-    auto innerCourtExclusion = [&](nlohmann::json const& inner)
-    {
-      auto loop = insetLoop(inner, .8, base);
-      loop.erase(loop.end() - 1);
-      return exclusion("area", withoutHeight(loop), .004);
-    };
-    auto wall_exclusions = nlohmann::json::array({
-      exclusion("corridor", withoutHeight(top), lane_width),
-      exclusion("corridor", withoutHeight(middle), lane_width),
-      exclusion("corridor", withoutHeight(bottom), lane_width),
-      exclusion("corridor", withoutHeight(river), river_width),
-      innerCourtExclusion(left_base_inner),
-      innerCourtExclusion(right_base_inner),
-      exclusion("area", withoutHeight(objective_north), .005),
-      exclusion("area", withoutHeight(objective_south), .005)
-    });
-    for (auto const& gate : jungle_gates)
-      wall_exclusions.push_back(exclusion("area",
-        withoutHeight(hexArea(gate.at("u"), gate.at("v"), .03, base)), .012));
-    auto path_wall_exclusions = nlohmann::json::array({
-      exclusion("corridor", withoutHeight(top), lane_width),
-      exclusion("corridor", withoutHeight(middle), lane_width),
-      exclusion("corridor", withoutHeight(bottom), lane_width),
-      exclusion("corridor", withoutHeight(river), river_width),
-      exclusion("area", withoutHeight(left_base_outer), .005),
-      exclusion("area", withoutHeight(right_base_outer), .005),
-      exclusion("area", withoutHeight(objective_north), .005),
-      exclusion("area", withoutHeight(objective_south), .005)
-    });
-    for (auto const& gate : path_wall_gates)
-      path_wall_exclusions.push_back(exclusion("area",
-        withoutHeight(hexArea(gate.at("u"), gate.at("v"), .03, base)), .012));
-    // T-joints: independent wall systems must never clip through each other.
-    // Wherever a path wall would cross a jungle ring or a base wall, trim the
-    // path wall around the intersection so it butts into a T instead; two
-    // path walls crossing each other open into a small four-way plaza.
-    auto wall_crossings = nlohmann::json::array();
-    auto const addCrossing = [&](double u, double v)
-    {
-      for (auto const& existing : wall_crossings)
-        if (std::hypot(existing.at("u").get<double>() - u,
-                       existing.at("v").get<double>() - v) < .05)
-          return;
-      wall_crossings.push_back({{"u", u}, {"v", v}});
-    };
-    auto const collectCrossings = [&](nlohmann::json const& a_points,
-                                      nlohmann::json const& b_points)
-    {
-      auto const coordinates = [](nlohmann::json const& points, std::size_t i)
+      if (segmentDistance(top, false, u, v) <= lane_width + .012) return true;
+      if (segmentDistance(middle, false, u, v) <= lane_width + .012) return true;
+      if (segmentDistance(bottom, false, u, v) <= lane_width + .012) return true;
+      if (segmentDistance(river, false, u, v) <= river_width + .012) return true;
+      for (std::size_t i = 0; i < jungle_paths.size(); ++i)
       {
-        auto const& a = points[i];
-        auto const& b = points[(i + 1) % points.size()];
-        return std::array<double, 4>{
-          a.at("u").get<double>(), a.at("v").get<double>(),
-          b.at("u").get<double>(), b.at("v").get<double>()};
+        auto const main_path = i % 2 == 0;
+        // The flanks deliberately run alongside the main paths, and the base
+        // perimeters stay sealed against them: bases are only entered through
+        // their lane gates. Branch paths cut rings and flanks.
+        if (main_path && kind != WallKind::ring) continue;
+        if (kind == WallKind::base_wall) continue;
+        if (segmentDistance(jungle_paths[i], false, u, v)
+            <= (main_path ? .04 : .016))
+          return true;
+      }
+      if (kind != WallKind::base_wall)
+      {
+        for (auto const& camp : camps)
+          if (std::hypot(u - camp.u, v - camp.v) <= .041) return true;
+        if (std::hypot(u - .34, v - .27) <= .06
+            || std::hypot(u - .66, v - .73) <= .06)
+          return true;
+        for (auto const& gate : jungle_gates)
+          if (std::hypot(u - gate.at("u").get<double>(),
+                         v - gate.at("v").get<double>()) <= .03)
+            return true;
+        for (auto const& gate : path_wall_gates)
+          if (std::hypot(u - gate.at("u").get<double>(),
+                         v - gate.at("v").get<double>()) <= .03)
+            return true;
+      }
+      if (kind == WallKind::flank)
+      {
+        // T-joints: the flanks yield to the rings, the base walls and the
+        // flanks of lower-ranked paths, keeping a clearance that covers the
+        // physical half-length of a wall prop so nothing clips through.
+        for (auto const& ring : ring_loops)
+          if (segmentDistance(ring, true, u, v) <= .025) return true;
+        for (auto const& [name, loop] : base_loops)
+          if (segmentDistance(loop, true, u, v) <= .025) return true;
+        for (std::size_t f = 0; f < flank_rank; ++f)
+          if (segmentDistance(flank_sides[f].second, false, u, v) <= .022)
+            return true;
+      }
+      return false;
+    };
+    struct WallChain { std::string prefix; nlohmann::json points; double length; };
+    std::vector<WallChain> wall_chains;
+    std::vector<WallChain> flank_chains;
+    auto const emitChains = [&](nlohmann::json const& pts, bool closed,
+                                WallKind kind, std::size_t flank_rank,
+                                std::string const& prefix,
+                                std::vector<WallChain>& target)
+    {
+      auto const count = pts.size();
+      if (count < 2) return;
+      auto const edge_count = closed ? count : count - 1;
+      std::vector<double> arc{0.0};
+      for (std::size_t e = 0; e < edge_count; ++e)
+      {
+        auto const& a = pts[e];
+        auto const& b = pts[(e + 1) % count];
+        arc.push_back(arc.back() + std::hypot(
+          b.at("u").get<double>() - a.at("u").get<double>(),
+          b.at("v").get<double>() - a.at("v").get<double>()));
+      }
+      auto const total = arc.back();
+      if (total <= 0.0) return;
+      auto const pointAt = [&](double t)
+      {
+        t = std::clamp(closed ? std::fmod(t + total, total) : t, 0.0, total);
+        auto e = std::size_t{0};
+        while (e + 2 < arc.size() && arc[e + 1] < t) ++e;
+        auto const& a = pts[e];
+        auto const& b = pts[(e + 1) % count];
+        auto const span = arc[e + 1] - arc[e];
+        auto const f = span > 0.0 ? (t - arc[e]) / span : 0.0;
+        return std::pair{
+          a.at("u").get<double>()
+            + (b.at("u").get<double>() - a.at("u").get<double>()) * f,
+          a.at("v").get<double>()
+            + (b.at("v").get<double>() - a.at("v").get<double>()) * f};
       };
-      for (std::size_t i = 0; i < a_points.size(); ++i)
+      auto const samples = std::max<std::size_t>(8,
+        static_cast<std::size_t>(total / .0025));
+      std::vector<char> walled(samples);
+      for (std::size_t s = 0; s < samples; ++s)
       {
-        auto const [au, av, bu, bv] = coordinates(a_points, i);
-        for (std::size_t j = 0; j < b_points.size(); ++j)
+        auto const [u, v] = pointAt((s + .5) * total / samples);
+        walled[s] = !openAt(u, v, kind, flank_rank);
+      }
+      struct Run { double begin; double end; };
+      std::vector<Run> runs;
+      for (std::size_t s = 0; s < samples; ++s)
+      {
+        if (!walled[s]) continue;
+        auto const t0 = s * total / samples;
+        while (s < samples && walled[s]) ++s;
+        runs.push_back({t0, s * total / samples});
+      }
+      if (closed && runs.size() > 1 && walled.front() && walled.back())
+      {
+        runs.front().begin = runs.back().begin - total;
+        runs.pop_back();
+      }
+      for (auto const& run : runs)
+      {
+        // Chains shorter than two props read as floating debris; drop them.
+        if (run.end - run.begin < .04) continue;
+        auto chain = nlohmann::json::array();
+        auto const [begin_u, begin_v] = pointAt(run.begin);
+        chain.push_back(scatterPoint(begin_u, begin_v));
+        std::vector<std::pair<double, std::size_t>> interior;
+        for (std::size_t vertex = 0; vertex < edge_count; ++vertex)
         {
-          auto const [cu, cv, du, dv] = coordinates(b_points, j);
-          auto const denominator = (bu - au) * (dv - cv) - (bv - av) * (du - cu);
-          if (std::abs(denominator) < 1e-12) continue;
-          auto const t = ((cu - au) * (dv - cv) - (cv - av) * (du - cu))
-            / denominator;
-          auto const s = ((cu - au) * (bv - av) - (cv - av) * (bu - au))
-            / denominator;
-          if (t <= 0.0 || t >= 1.0 || s <= 0.0 || s >= 1.0) continue;
-          addCrossing(au + t * (bu - au), av + t * (bv - av));
+          auto position = arc[vertex];
+          if (closed && run.begin < 0.0 && position > total + run.begin)
+            position -= total;
+          if (position > run.begin + .004 && position < run.end - .004)
+            interior.emplace_back(position, vertex);
         }
+        std::sort(interior.begin(), interior.end());
+        for (auto const& [position, vertex] : interior)
+        {
+          auto const& p = pts[vertex];
+          chain.push_back(scatterPoint(p.at("u"), p.at("v")));
+        }
+        auto const [end_u, end_v] = pointAt(run.end);
+        chain.push_back(scatterPoint(end_u, end_v));
+        while (chain.size() > 16)
+        {
+          auto trimmed = nlohmann::json::array();
+          for (std::size_t p = 0; p < chain.size(); ++p)
+            if (p == 0 || p + 1 == chain.size() || p % 2 == 1)
+              trimmed.push_back(chain[p]);
+          chain = std::move(trimmed);
+        }
+        target.push_back({prefix, std::move(chain), run.end - run.begin});
       }
     };
-    for (auto const& path_region : path_wall_regions)
-      for (auto const& region : wall_regions)
-        collectCrossings(path_region.at("points"), region.at("points"));
-    for (std::size_t i = 0; i < path_wall_regions.size(); ++i)
-      for (std::size_t j = i + 1; j < path_wall_regions.size(); ++j)
-        collectCrossings(path_wall_regions[i].at("points"),
-                         path_wall_regions[j].at("points"));
-    for (auto const& crossing : wall_crossings)
+    for (std::size_t i = 0; i < ring_loops.size(); ++i)
+      emitChains(ring_loops[i], true, WallKind::ring, 0,
+                 "jungle_" + std::to_string(i + 1), wall_chains);
+    for (auto const& [name, loop] : base_loops)
+      emitChains(loop, true, WallKind::base_wall, 0, name, wall_chains);
+    for (std::size_t f = 0; f < flank_sides.size(); ++f)
+      emitChains(flank_sides[f].second, false, WallKind::flank, f,
+                 flank_sides[f].first, flank_chains);
+    auto const emitRegions = [&](std::vector<WallChain>& chains,
+                                 nlohmann::json& regions)
     {
-      if (path_wall_exclusions.size() >= 90) break;
-      path_wall_exclusions.push_back(exclusion("area",
-        withoutHeight(hexArea(crossing.at("u"), crossing.at("v"), .018, base)),
-        .008));
-    }
+      if (chains.size() > 48)
+      {
+        std::sort(chains.begin(), chains.end(),
+          [](WallChain const& left, WallChain const& right)
+          { return left.length > right.length; });
+        chains.resize(48);
+      }
+      constexpr auto tile_size = 1600.0 / 3.0;
+      for (std::size_t index = 0; index < chains.size(); ++index)
+      {
+        auto& chain = chains[index];
+        // One baseline candidate per edge, plus one per 32 units of chain, so
+        // every edge is covered to its corners at the props' physical length.
+        auto const density = std::clamp<std::size_t>(
+          static_cast<std::size_t>(std::ceil(chain.length
+            * static_cast<double>(footprint_side_tiles) * tile_size / 32.0))
+            + chain.points.size() - 1,
+          1, 512);
+        regions.push_back({
+          {"name", chain.prefix + "_chain" + std::to_string(index) + "_wall"},
+          {"role", "wall"}, {"points", std::move(chain.points)},
+          {"density_per_tile", density},
+          {"min_spacing_ratio", .002}, {"min_height", base - 15},
+          {"max_height", base + 25}, {"min_slope_degrees", 0},
+          {"max_slope_degrees", 75}, {"cluster_scale", 2.5},
+          {"cluster_strength", 0.0}});
+      }
+    };
+    emitRegions(wall_chains, wall_regions);
+    emitRegions(flank_chains, path_wall_regions);
+    // The chains already carry their openings; the exclusion lists only
+    // receive the connectivity repair openings, if any.
+    auto wall_exclusions = nlohmann::json::array();
+    auto path_wall_exclusions = nlohmann::json::array();
     auto vegetation_exclusions = nlohmann::json::array({
       exclusion("corridor", withoutHeight(top), lane_width + .025),
       exclusion("corridor", withoutHeight(middle), lane_width + .025),
@@ -764,43 +850,12 @@ namespace Noggit::Ai
       exclusion("area", withoutHeight(objective_north), .025),
       exclusion("area", withoutHeight(objective_south), .025)
     });
-    // Jungle main paths end inside the bases; their wall-call exclusions stop
-    // outside so the base wall chain stays continuous and seals those breaches.
-    auto pathClippedOutsideBases = [&](nlohmann::json const& path)
-    {
-      auto result = path;
-      auto pullIfInside = [&](std::size_t index, std::size_t neighbor)
-      {
-        auto const u = result[index].at("u").get<double>();
-        auto const v = result[index].at("v").get<double>();
-        if (!proceduralScatterContains(left_base_points,
-                                       static_cast<float>(u), static_cast<float>(v))
-            && !proceduralScatterContains(right_base_points,
-                                          static_cast<float>(u), static_cast<float>(v)))
-          return;
-        result[index]["u"] = u + (result[neighbor].at("u").get<double>() - u) * .5;
-        result[index]["v"] = v + (result[neighbor].at("v").get<double>() - v) * .5;
-      };
-      pullIfInside(0, 1);
-      pullIfInside(result.size() - 1, result.size() - 2);
-      return result;
-    };
     for (std::size_t i = 0; i < jungle_paths.size(); ++i)
-    {
-      auto const& path = jungle_paths[i];
-      wall_exclusions.push_back(
-        exclusion("corridor", withoutHeight(pathClippedOutsideBases(path)),
-                  i % 2 == 0 ? .040 : .012));
-      path_wall_exclusions.push_back(exclusion("corridor", withoutHeight(path), .027));
-      vegetation_exclusions.push_back(exclusion("corridor", withoutHeight(path), .025));
-    }
+      vegetation_exclusions.push_back(
+        exclusion("corridor", withoutHeight(jungle_paths[i]), .025));
     for (auto const& camp : camps)
-    {
-      auto const clearing = withoutHeight(hexArea(camp.u, camp.v, .035, base));
-      wall_exclusions.push_back(exclusion("area", clearing, .004));
-      path_wall_exclusions.push_back(exclusion("area", clearing, .006));
-      vegetation_exclusions.push_back(exclusion("area", clearing, .012));
-    }
+      vegetation_exclusions.push_back(exclusion("area",
+        withoutHeight(hexArea(camp.u, camp.v, .035, base)), .012));
 
     // --- Connectivity guarantee -------------------------------------------
     // Wall chains follow region loops with openings cut by exclusions, and

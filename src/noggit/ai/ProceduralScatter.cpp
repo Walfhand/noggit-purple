@@ -295,8 +295,8 @@ namespace Noggit::Ai
     }
 
     auto const& exclusions = arguments.at("exclusions");
-    if (!exclusions.is_array() || exclusions.size() > 32)
-      return fail("exclusions doit contenir au plus 32 formes.");
+    if (!exclusions.is_array() || exclusions.size() > 96)
+      return fail("exclusions doit contenir au plus 96 formes.");
     for (auto const& value : exclusions)
     {
       ProceduralScatterExclusion exclusion;

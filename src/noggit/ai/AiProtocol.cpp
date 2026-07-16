@@ -566,7 +566,7 @@ namespace Noggit::Ai
         }},
         {"exclusions", {
           {"type", "array"}, {"items", std::move(scatter_exclusion_parameters)},
-          {"minItems", 0}, {"maxItems", 32}
+          {"minItems", 0}, {"maxItems", 96}
         }}
       }},
       {"required", {"seed", "assets", "regions", "exclusions"}},

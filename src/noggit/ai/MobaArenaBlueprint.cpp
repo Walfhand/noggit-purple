@@ -9,7 +9,10 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <deque>
+#include <limits>
 #include <map>
+#include <optional>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -452,6 +455,30 @@ namespace Noggit::Ai
     raiseLaneEnds(middle);
     raiseLaneEnds(bottom);
 
+    auto const segmentDistance = [](nlohmann::json const& points, bool closed,
+                                    double u, double v)
+    {
+      auto best = 10.0;
+      auto const count = points.size();
+      if (count < 2) return best;
+      auto const limit = closed ? count : count - 1;
+      for (std::size_t i = 0; i < limit; ++i)
+      {
+        auto const& a = points[i];
+        auto const& b = points[(i + 1) % count];
+        auto const au = a.at("u").get<double>();
+        auto const av = a.at("v").get<double>();
+        auto const du = b.at("u").get<double>() - au;
+        auto const dv = b.at("v").get<double>() - av;
+        auto const length_squared = du * du + dv * dv;
+        auto const t = length_squared > 0.0
+          ? std::clamp(((u - au) * du + (v - av) * dv) / length_squared, 0.0, 1.0)
+          : 0.0;
+        best = std::min(best, std::hypot(u - (au + du * t), v - (av + dv * t)));
+      }
+      return best;
+    };
+
     auto terrain_features = nlohmann::json::array();
     terrain_features.push_back(feature("arena_ground", "area",
       nlohmann::json::array({point(0, 0, base), point(1, 0, base),
@@ -530,6 +557,49 @@ namespace Noggit::Ai
     nlohmann::json wall_regions = nlohmann::json::array();
     nlohmann::json path_wall_regions = nlohmann::json::array();
     nlohmann::json vegetation_regions = nlohmann::json::array();
+    // Designed gates: every long wall-ring side that runs along a lane or the
+    // river gets a structural opening at its midpoint, so each jungle quadrant
+    // is entered from every adjacent corridor by construction (the walls are
+    // the negative space of the circulation graph, not independent chains).
+    auto jungle_gates = nlohmann::json::array();
+    auto const gate_corridors = std::array<std::pair<nlohmann::json const*, double>, 4>{
+      {{&top, lane_width + .05}, {&middle, lane_width + .05},
+       {&bottom, lane_width + .05}, {&river, river_width + .05}}};
+    auto const addRingGates = [&](nlohmann::json const& ring)
+    {
+      for (std::size_t e = 0; e < ring.size(); ++e)
+      {
+        auto const& a = ring[e];
+        auto const& b = ring[(e + 1) % ring.size()];
+        auto const edge_length = std::hypot(
+          a.at("u").get<double>() - b.at("u").get<double>(),
+          a.at("v").get<double>() - b.at("v").get<double>());
+        if (edge_length < .12) continue;
+        auto const mid_u = (a.at("u").get<double>() + b.at("u").get<double>()) / 2;
+        auto const mid_v = (a.at("v").get<double>() + b.at("v").get<double>()) / 2;
+        auto const near_corridor = std::any_of(
+          gate_corridors.begin(), gate_corridors.end(), [&](auto const& corridor)
+          {
+            return segmentDistance(*corridor.first, false, mid_u, mid_v)
+              <= corridor.second
+              && segmentDistance(*corridor.first, false,
+                   a.at("u").get<double>(), a.at("v").get<double>())
+                <= corridor.second + .04
+              && segmentDistance(*corridor.first, false,
+                   b.at("u").get<double>(), b.at("v").get<double>())
+                <= corridor.second + .04;
+          });
+        if (!near_corridor) continue;
+        auto const duplicate = std::any_of(
+          jungle_gates.begin(), jungle_gates.end(), [&](auto const& gate)
+          {
+            return std::hypot(gate.at("u").template get<double>() - mid_u,
+                              gate.at("v").template get<double>() - mid_v) < .06;
+          });
+        if (duplicate) continue;
+        jungle_gates.push_back({{"u", mid_u}, {"v", mid_v}});
+      }
+    };
     for (std::size_t i = 0; i < jungle_polygons.size(); ++i)
     {
       auto points = nlohmann::json::array();
@@ -537,6 +607,7 @@ namespace Noggit::Ai
       auto const wall_loop = offsetLoopInward(
         jungle_polygons[i], lane_width + .015, base);
       auto wall_points = withoutHeight(wall_loop);
+      addRingGates(wall_points);
       wall_regions.push_back({
         {"name", "jungle_" + std::to_string(i + 1) + "_wall"},
         {"role", "wall"}, {"points", wall_points},
@@ -561,9 +632,17 @@ namespace Noggit::Ai
     }
     // Only the four main paths get wall corridors; walling the branch paths as
     // well buries the small footprints under a lattice of criss-crossing fences.
+    // Each flanking wall side also gets a mid-side gate, so the compartments
+    // between path walls and the jungle rings stay open toward the paths.
+    auto path_wall_gates = nlohmann::json::array();
     for (std::size_t i = 0; i < jungle_paths.size(); i += 2)
     {
       auto wall_points = withoutHeight(corridorLoop(jungle_paths[i], .035, base));
+      auto const side_length = wall_points.size() / 2;
+      for (auto const side_middle : {side_length / 2, side_length + side_length / 2})
+        path_wall_gates.push_back({
+          {"u", wall_points[side_middle].at("u")},
+          {"v", wall_points[side_middle].at("v")}});
       path_wall_regions.push_back({
         {"name", "jungle_" + std::to_string(i / 2 + 1) + "_main_path_wall"},
         {"role", "wall"},
@@ -604,6 +683,9 @@ namespace Noggit::Ai
       exclusion("area", withoutHeight(objective_north), .005),
       exclusion("area", withoutHeight(objective_south), .005)
     });
+    for (auto const& gate : jungle_gates)
+      wall_exclusions.push_back(exclusion("area",
+        withoutHeight(hexArea(gate.at("u"), gate.at("v"), .03, base)), .012));
     auto path_wall_exclusions = nlohmann::json::array({
       exclusion("corridor", withoutHeight(top), lane_width),
       exclusion("corridor", withoutHeight(middle), lane_width),
@@ -614,6 +696,64 @@ namespace Noggit::Ai
       exclusion("area", withoutHeight(objective_north), .005),
       exclusion("area", withoutHeight(objective_south), .005)
     });
+    for (auto const& gate : path_wall_gates)
+      path_wall_exclusions.push_back(exclusion("area",
+        withoutHeight(hexArea(gate.at("u"), gate.at("v"), .03, base)), .012));
+    // T-joints: independent wall systems must never clip through each other.
+    // Wherever a path wall would cross a jungle ring or a base wall, trim the
+    // path wall around the intersection so it butts into a T instead; two
+    // path walls crossing each other open into a small four-way plaza.
+    auto wall_crossings = nlohmann::json::array();
+    auto const addCrossing = [&](double u, double v)
+    {
+      for (auto const& existing : wall_crossings)
+        if (std::hypot(existing.at("u").get<double>() - u,
+                       existing.at("v").get<double>() - v) < .05)
+          return;
+      wall_crossings.push_back({{"u", u}, {"v", v}});
+    };
+    auto const collectCrossings = [&](nlohmann::json const& a_points,
+                                      nlohmann::json const& b_points)
+    {
+      auto const coordinates = [](nlohmann::json const& points, std::size_t i)
+      {
+        auto const& a = points[i];
+        auto const& b = points[(i + 1) % points.size()];
+        return std::array<double, 4>{
+          a.at("u").get<double>(), a.at("v").get<double>(),
+          b.at("u").get<double>(), b.at("v").get<double>()};
+      };
+      for (std::size_t i = 0; i < a_points.size(); ++i)
+      {
+        auto const [au, av, bu, bv] = coordinates(a_points, i);
+        for (std::size_t j = 0; j < b_points.size(); ++j)
+        {
+          auto const [cu, cv, du, dv] = coordinates(b_points, j);
+          auto const denominator = (bu - au) * (dv - cv) - (bv - av) * (du - cu);
+          if (std::abs(denominator) < 1e-12) continue;
+          auto const t = ((cu - au) * (dv - cv) - (cv - av) * (du - cu))
+            / denominator;
+          auto const s = ((cu - au) * (bv - av) - (cv - av) * (bu - au))
+            / denominator;
+          if (t <= 0.0 || t >= 1.0 || s <= 0.0 || s >= 1.0) continue;
+          addCrossing(au + t * (bu - au), av + t * (bv - av));
+        }
+      }
+    };
+    for (auto const& path_region : path_wall_regions)
+      for (auto const& region : wall_regions)
+        collectCrossings(path_region.at("points"), region.at("points"));
+    for (std::size_t i = 0; i < path_wall_regions.size(); ++i)
+      for (std::size_t j = i + 1; j < path_wall_regions.size(); ++j)
+        collectCrossings(path_wall_regions[i].at("points"),
+                         path_wall_regions[j].at("points"));
+    for (auto const& crossing : wall_crossings)
+    {
+      if (path_wall_exclusions.size() >= 90) break;
+      path_wall_exclusions.push_back(exclusion("area",
+        withoutHeight(hexArea(crossing.at("u"), crossing.at("v"), .018, base)),
+        .008));
+    }
     auto vegetation_exclusions = nlohmann::json::array({
       exclusion("corridor", withoutHeight(top), lane_width + .025),
       exclusion("corridor", withoutHeight(middle), lane_width + .025),
@@ -660,6 +800,276 @@ namespace Noggit::Ai
       wall_exclusions.push_back(exclusion("area", clearing, .004));
       path_wall_exclusions.push_back(exclusion("area", clearing, .006));
       vegetation_exclusions.push_back(exclusion("area", clearing, .012));
+    }
+
+    // --- Connectivity guarantee -------------------------------------------
+    // Wall chains follow region loops with openings cut by exclusions, and
+    // nothing structural prevents a loop from sealing a jungle pocket.
+    // Rasterize the wall bands, flood fill the open ground from the lanes and
+    // river, then carve extra openings until every camp, objective and base
+    // court is reachable (flood-fill repair + reachability validation; the
+    // graph-derived wall rework will later make this a pure safety net).
+    constexpr auto grid_size = 160;
+    auto const world_size = static_cast<double>(footprint_side_tiles)
+      * (1600.0 / 3.0);
+    // Full 32-unit wall chain spacing: the wall props are longer than their
+    // spacing at their placement scale, so consecutive segments overlap and a
+    // gap is only real when at least two adjacent candidates are dropped.
+    auto const block_radius = 32.0 / world_size;
+    auto const cellCenter = [&](int index)
+    {
+      return std::pair{(index % grid_size + .5) / grid_size,
+                       (index / grid_size + .5) / grid_size};
+    };
+    auto const cellIndex = [&](double u, double v)
+    {
+      auto const x = std::clamp(static_cast<int>(u * grid_size), 0, grid_size - 1);
+      auto const z = std::clamp(static_cast<int>(v * grid_size), 0, grid_size - 1);
+      return z * grid_size + x;
+    };
+    // Rasterize the walls the scatter pipeline will actually place: the same
+    // deterministic candidates, dropped by the same exclusion test, so
+    // degenerate loops and physical prop footprints are modeled faithfully.
+    auto const rasterizeBlocked = [&]() -> std::optional<std::vector<char>>
+    {
+      std::vector<char> blocked(grid_size * grid_size, 0);
+      auto const markCall = [&](nlohmann::json const& regions,
+                                nlohmann::json const& exclusions)
+      {
+        auto const parsed = parseProceduralScatter({{"seed", seed_value},
+          {"assets", wall_assets}, {"regions", regions},
+          {"exclusions", exclusions}});
+        if (!parsed.scatter) return false;
+        for (std::size_t region_index = 0;
+             region_index < parsed.scatter->regions.size(); ++region_index)
+        {
+          auto const density =
+            parsed.scatter->regions[region_index].density_per_tile;
+          for (std::size_t index = 0; index < density; ++index)
+          {
+            auto const candidate = proceduralScatterCandidate(
+              *parsed.scatter, region_index, 0, 0, index, 0.0f, 1.0f, 0.0f, 1.0f);
+            if (!candidate.active) continue;
+            if (proceduralScatterExcluded(
+                  *parsed.scatter, candidate.u, candidate.v,
+                  static_cast<float>(world_size), static_cast<float>(world_size)))
+              continue;
+            auto const cell_min_x = std::clamp(static_cast<int>(
+              (candidate.u - block_radius) * grid_size), 0, grid_size - 1);
+            auto const cell_max_x = std::clamp(static_cast<int>(
+              (candidate.u + block_radius) * grid_size), 0, grid_size - 1);
+            auto const cell_min_z = std::clamp(static_cast<int>(
+              (candidate.v - block_radius) * grid_size), 0, grid_size - 1);
+            auto const cell_max_z = std::clamp(static_cast<int>(
+              (candidate.v + block_radius) * grid_size), 0, grid_size - 1);
+            for (int z = cell_min_z; z <= cell_max_z; ++z)
+              for (int x = cell_min_x; x <= cell_max_x; ++x)
+              {
+                auto const [u, v] = cellCenter(z * grid_size + x);
+                if (std::hypot(u - candidate.u, v - candidate.v) <= block_radius)
+                  blocked[z * grid_size + x] = 1;
+              }
+          }
+        }
+        return true;
+      };
+      if (!markCall(wall_regions, wall_exclusions)
+          || !markCall(path_wall_regions, path_wall_exclusions))
+        return std::nullopt;
+      return blocked;
+    };
+    auto const floodFromLanes = [&](std::vector<char> const& blocked)
+    {
+      std::vector<char> reached(grid_size * grid_size, 0);
+      std::deque<int> queue;
+      for (int index = 0; index < grid_size * grid_size; ++index)
+      {
+        if (blocked[index]) continue;
+        auto const [u, v] = cellCenter(index);
+        if (segmentDistance(top, false, u, v) <= lane_width
+            || segmentDistance(middle, false, u, v) <= lane_width
+            || segmentDistance(bottom, false, u, v) <= lane_width
+            || segmentDistance(river, false, u, v) <= river_width)
+        {
+          reached[index] = 1;
+          queue.push_back(index);
+        }
+      }
+      while (!queue.empty())
+      {
+        auto const index = queue.front();
+        queue.pop_front();
+        auto const x = index % grid_size;
+        auto const z = index / grid_size;
+        for (auto const& [dx, dz] : std::array<std::pair<int, int>, 4>{
+               {{1, 0}, {-1, 0}, {0, 1}, {0, -1}}})
+        {
+          auto const nx = x + dx;
+          auto const nz = z + dz;
+          if (nx < 0 || nx >= grid_size || nz < 0 || nz >= grid_size) continue;
+          auto const neighbor = nz * grid_size + nx;
+          if (blocked[neighbor] || reached[neighbor]) continue;
+          reached[neighbor] = 1;
+          queue.push_back(neighbor);
+        }
+      }
+      return reached;
+    };
+    struct Poi { std::string name; double u; double v; };
+    std::vector<Poi> pois;
+    for (auto const& camp : camps) pois.push_back({camp.name, camp.u, camp.v});
+    pois.push_back({"objective_north", .34, .27});
+    pois.push_back({"objective_south", .66, .73});
+    pois.push_back({"team_left_court", .113, .86});
+    pois.push_back({"team_right_court", .887, .14});
+    std::array<std::vector<ProceduralLayoutPoint>, 4> jungle_points;
+    for (std::size_t i = 0; i < jungle_polygons.size(); ++i)
+      jungle_points[i] = toLayoutPoints(jungle_polygons[i]);
+    auto const inJungle = [&](double u, double v)
+    {
+      for (auto const& polygon : jungle_points)
+        if (proceduralScatterContains(polygon, static_cast<float>(u),
+                                      static_cast<float>(v)))
+          return true;
+      return false;
+    };
+    // An enclosed pocket is walkable jungle ground cut off from the lane
+    // network, even without a POI inside: dead space the walls must not seal.
+    auto const analyzeJunglePockets = [&](std::vector<char> const& blocked,
+                                          std::vector<char> const& reached)
+      -> std::pair<std::optional<int>, std::size_t>
+    {
+      std::vector<char> seen(grid_size * grid_size, 0);
+      std::optional<int> best;
+      std::size_t best_size = 0;
+      std::size_t total_cells = 0;
+      for (int index = 0; index < grid_size * grid_size; ++index)
+      {
+        if (blocked[index] || reached[index] || seen[index]) continue;
+        auto const [u, v] = cellCenter(index);
+        if (!inJungle(u, v)) continue;
+        std::size_t size = 0;
+        std::deque<int> queue{index};
+        seen[index] = 1;
+        while (!queue.empty())
+        {
+          auto const current = queue.front();
+          queue.pop_front();
+          ++size;
+          auto const x = current % grid_size;
+          auto const z = current / grid_size;
+          for (auto const& [dx, dz] : std::array<std::pair<int, int>, 4>{
+                 {{1, 0}, {-1, 0}, {0, 1}, {0, -1}}})
+          {
+            auto const nx = x + dx;
+            auto const nz = z + dz;
+            if (nx < 0 || nx >= grid_size || nz < 0 || nz >= grid_size)
+              continue;
+            auto const neighbor = nz * grid_size + nx;
+            if (blocked[neighbor] || reached[neighbor] || seen[neighbor])
+              continue;
+            seen[neighbor] = 1;
+            queue.push_back(neighbor);
+          }
+        }
+        if (size >= 4)
+        {
+          total_cells += size;
+          if (size > best_size)
+          {
+            best_size = size;
+            best = index;
+          }
+        }
+      }
+      return {best, total_cells};
+    };
+    auto repair_openings = std::size_t{0};
+    auto unreachable_pois = nlohmann::json::array();
+    auto enclosed_pocket_cells = std::size_t{0};
+    for (int attempt = 0; attempt < 12; ++attempt)
+    {
+      auto const blocked_cells = rasterizeBlocked();
+      if (!blocked_cells) break;
+      auto const& blocked = *blocked_cells;
+      auto const reached = floodFromLanes(blocked);
+      unreachable_pois = nlohmann::json::array();
+      std::optional<int> pocket;
+      for (auto const& poi : pois)
+      {
+        if (!reached[cellIndex(poi.u, poi.v)])
+        {
+          unreachable_pois.push_back(poi.name);
+          if (!pocket) pocket = cellIndex(poi.u, poi.v);
+        }
+      }
+      auto const [pocket_seed, pocket_cells] = analyzeJunglePockets(blocked, reached);
+      enclosed_pocket_cells = pocket_cells;
+      if (!pocket) pocket = pocket_seed;
+      if (!pocket) break;
+      // Cheapest escape route: cross as few wall cells as possible, then
+      // carve one opening in the middle of each wall run along that route.
+      constexpr auto wall_cost = 400;
+      std::vector<int> cost(grid_size * grid_size,
+                            std::numeric_limits<int>::max());
+      std::vector<int> previous(grid_size * grid_size, -1);
+      std::deque<int> frontier{*pocket};
+      cost[*pocket] = 0;
+      while (!frontier.empty())
+      {
+        auto const index = frontier.front();
+        frontier.pop_front();
+        auto const x = index % grid_size;
+        auto const z = index / grid_size;
+        for (auto const& [dx, dz] : std::array<std::pair<int, int>, 4>{
+               {{1, 0}, {-1, 0}, {0, 1}, {0, -1}}})
+        {
+          auto const nx = x + dx;
+          auto const nz = z + dz;
+          if (nx < 0 || nx >= grid_size || nz < 0 || nz >= grid_size) continue;
+          auto const neighbor = nz * grid_size + nx;
+          auto const step = blocked[neighbor] ? wall_cost : 1;
+          if (cost[index] + step >= cost[neighbor]) continue;
+          cost[neighbor] = cost[index] + step;
+          previous[neighbor] = index;
+          if (blocked[neighbor]) frontier.push_back(neighbor);
+          else frontier.push_front(neighbor);
+        }
+      }
+      auto target = -1;
+      auto best_cost = std::numeric_limits<int>::max();
+      for (int index = 0; index < grid_size * grid_size; ++index)
+        if (reached[index] && cost[index] < best_cost)
+        {
+          best_cost = cost[index];
+          target = index;
+        }
+      if (target < 0) break;
+      auto run = std::vector<int>{};
+      auto openings_this_attempt = std::size_t{0};
+      auto const carveRun = [&]
+      {
+        if (run.empty()) return;
+        if (wall_exclusions.size() >= 96 || path_wall_exclusions.size() >= 96)
+        {
+          run.clear();
+          return;
+        }
+        auto const [u, v] = cellCenter(run[run.size() / 2]);
+        auto const opening = withoutHeight(hexArea(u, v, .03, base));
+        wall_exclusions.push_back(exclusion("area", opening, .012));
+        path_wall_exclusions.push_back(exclusion("area", opening, .012));
+        ++repair_openings;
+        ++openings_this_attempt;
+        run.clear();
+      };
+      for (auto index = target; index >= 0; index = previous[index])
+      {
+        if (blocked[index]) run.push_back(index);
+        else carveRun();
+      }
+      carveRun();
+      if (openings_this_attempt == 0) break;
     }
 
     auto distanceToPolyline = [](nlohmann::json const& path, double u, double v)
@@ -819,12 +1229,18 @@ namespace Noggit::Ai
       throw std::invalid_argument(parsed.error);
 
     return {{"ok", true}, {"operation", "create_moba_arena_blueprint"},
+      {"connectivity", {{"grid_resolution", grid_size},
+                        {"repair_openings", repair_openings},
+                        {"enclosed_jungle_cells", enclosed_pocket_cells},
+                        {"unreachable_pois", unreachable_pois}}},
       {"topology", {{"lanes", 3}, {"bases", 2}, {"river", 1},
                     {"objective_pits", 2}, {"jungle_regions", 4},
                     {"elevation_tiers", 4}, {"camp_clearings", 12},
                     {"jungle_camps", 12}, {"jungle_floors", 4},
                     {"jungle_wall_bands", 4}, {"base_wall_bands", 2},
                     {"jungle_path_wall_bands", 4},
+                    {"jungle_gates", jungle_gates.size()},
+                    {"path_wall_gates", path_wall_gates.size()},
                     {"jungle_paths", 8}, {"fortified_bases", 2},
                     {"public_entrances_per_base", 3},
                     {"landmarks", 4}, {"camp_braziers", 12},

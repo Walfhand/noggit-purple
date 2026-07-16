@@ -132,7 +132,7 @@ int main()
   require(scatter_properties.at("assets").at("minItems") == 1
             && scatter_properties.at("assets").at("maxItems") == 16
             && scatter_properties.at("regions").at("maxItems") == 16
-            && scatter_properties.at("exclusions").at("maxItems") == 32,
+            && scatter_properties.at("exclusions").at("maxItems") == 96,
           "asset scatter bounds changed");
 
   require(terrain_layout != nullptr, "terrain layout schema is missing");

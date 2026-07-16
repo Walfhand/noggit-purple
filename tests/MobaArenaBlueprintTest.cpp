@@ -164,6 +164,12 @@ int main()
   {
     auto const blueprint = Noggit::Ai::compileMobaArenaBlueprint(
       specification(), footprint_side);
+    require(blueprint.at("connectivity").at("unreachable_pois").empty(),
+            "every camp, objective and base court must stay reachable "
+            "from the lane network");
+    require(blueprint.at("connectivity").at("enclosed_jungle_cells")
+              .get<std::size_t>() == 0,
+            "walls must not seal any walkable jungle pocket");
     for (auto const call_index : {std::size_t{3}, std::size_t{4}})
     {
       auto const parsed = Noggit::Ai::parseProceduralScatter(
@@ -371,10 +377,13 @@ int main()
   require(std::any_of(vegetation.scatter->regions.begin(), vegetation.scatter->regions.end(),
             [](auto const& region) { return region.role == "rock"; }),
           "decorative rocks must be scattered inside the jungles");
-  require(walls.scatter->exclusions.size() == 28
-            && path_walls.scatter->exclusions.size() == 28
+  require(walls.scatter->exclusions.size() >= 28
+            && walls.scatter->exclusions.size() <= 96
+            && path_walls.scatter->exclusions.size() >= 28
+            && path_walls.scatter->exclusions.size() <= 96
             && vegetation.scatter->exclusions.size() == 28,
-          "lanes, river, bases, objectives, camps and jungle paths need clear openings");
+          "lanes, river, bases, objectives, camps and jungle paths need clear "
+          "openings, plus the connectivity repair openings");
   require(Noggit::Ai::proceduralScatterExcluded(
             *walls.scatter, .075f, .695f, 1600.0f, 1600.0f),
           "the top lane must cut a public entrance through the base wall");
@@ -415,7 +424,8 @@ int main()
           && height >= region.min_height && height <= region.max_height)
         ++viable;
     }
-    if (viable < 48)
+    // The designed jungle gates legitimately drop a few candidates per ring.
+    if (viable < 42)
       throw std::runtime_error("insufficient deterministic wall chain for "
         + region.name + ": " + std::to_string(viable));
   }

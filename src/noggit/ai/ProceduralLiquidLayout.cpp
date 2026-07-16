@@ -125,7 +125,7 @@ namespace Noggit::Ai
     if (!features.is_array() || features.empty()
         || features.size() > procedural_layout_max_features)
     {
-      return fail("features doit contenir entre une et 32 formes.");
+      return fail("features doit contenir entre une et 64 formes.");
     }
 
     std::set<std::string> unique_names;

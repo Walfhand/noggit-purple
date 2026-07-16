@@ -14,7 +14,7 @@
 
 namespace Noggit::Ai
 {
-  inline constexpr std::size_t procedural_layout_max_features = 32;
+  inline constexpr std::size_t procedural_layout_max_features = 64;
   inline constexpr std::size_t procedural_layout_max_texture_paths = 16;
 
   enum class ProceduralLayoutShape : std::uint8_t

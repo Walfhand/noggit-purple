@@ -263,7 +263,7 @@ int main()
 
   auto too_many_segments = validArguments();
   too_many_segments["features"] = nlohmann::json::array();
-  for (int feature_index = 0; feature_index < 9; ++feature_index)
+  for (int feature_index = 0; feature_index < 18; ++feature_index)
   {
     auto feature = validArguments()["features"][0];
     feature["name"] = "oversized_" + std::to_string(feature_index);
@@ -272,14 +272,14 @@ int main()
     {
       feature["points"].push_back({
         {"u", static_cast<double>(point) / 15.0},
-        {"v", static_cast<double>(feature_index) / 8.0},
+        {"v", static_cast<double>(feature_index) / 16.0},
         {"height", 10.0}
       });
     }
     too_many_segments["features"].push_back(std::move(feature));
   }
   require(!Noggit::Ai::parseProceduralLayout(too_many_segments).layout,
-          "layout with more than 128 segments was accepted");
+          "layout with more than 256 segments was accepted");
 
   auto bad_name = validArguments();
   bad_name["features"][0]["name"] = "bad\nname";

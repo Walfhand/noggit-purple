@@ -390,7 +390,7 @@ namespace Noggit::Ai
         }},
         {"features", {
           {"type", "array"},
-          {"description", "Formes aux noms ASCII uniques, avec au plus 128 segments au total."},
+          {"description", "Formes aux noms ASCII uniques, avec au plus 256 segments au total."},
           {"items", std::move(layout_feature_parameters)},
           {"minItems", 1},
           {"maxItems", 32}
@@ -482,7 +482,7 @@ namespace Noggit::Ai
         }},
         {"features", {
           {"type", "array"},
-          {"description", "Une à 32 zones d'eau ou d'océan, avec au plus 128 segments et 14 IDs distincts au total."},
+          {"description", "Une à 64 zones d'eau ou d'océan, avec au plus 128 segments et 14 IDs distincts au total."},
           {"items", std::move(liquid_feature_parameters)},
           {"minItems", 1},
           {"maxItems", 32}
@@ -634,7 +634,7 @@ namespace Noggit::Ai
         {"seed", {{"type", "string"}, {"minLength", 1}, {"maxLength", 64}}},
         {"base_height", {{"type", "number"}, {"minimum", -450.0}, {"maximum", 4950.0}}},
         {"river_depth", {{"type", "number"}, {"minimum", 2.0}, {"maximum", 30.0}}},
-        {"lane_width_ratio", {{"type", "number"}, {"minimum", 0.025}, {"maximum", 0.055},
+        {"lane_width_ratio", {{"type", "number"}, {"minimum", 0.012}, {"maximum", 0.055},
           {"description", "Demi-largeur normalisée des voies ; utiliser 0.032 par défaut."}}},
         {"river_width_ratio", {{"type", "number"}, {"minimum", 0.015}, {"maximum", 0.08}}},
         {"lane_curvature", {{"type", "number"}, {"minimum", 0.0}, {"maximum", 1.0}}},

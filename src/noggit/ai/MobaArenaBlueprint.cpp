@@ -327,15 +327,25 @@ namespace Noggit::Ai
 
     auto const base = finiteNumber(arguments, "base_height", -450.0, 4950.0);
     auto const river_depth = finiteNumber(arguments, "river_depth", 2.0, 30.0);
-    auto const lane_width = finiteNumber(arguments, "lane_width_ratio", 0.025, 0.055);
+    auto const lane_width = finiteNumber(arguments, "lane_width_ratio", 0.012, 0.055);
     auto const river_width = finiteNumber(arguments, "river_width_ratio", 0.015, 0.08);
     auto const lane_curve = finiteNumber(arguments, "lane_curvature", 0.0, 1.0);
     auto const river_curve = finiteNumber(arguments, "river_curvature", 0.0, 1.0);
     auto const roughness = finiteNumber(arguments, "jungle_roughness", 1.0, 12.0);
     auto const river_height = base - river_depth;
-    auto const water_height = river_height + std::min(2.0, river_depth * 0.35);
+    // Keep the water column under WoW's swim threshold so the river is
+    // always wadeable on foot, however deep the bed is carved.
+    auto const water_height = river_height + std::min(1.0, river_depth * 0.25);
     auto const bend = 0.035 + lane_curve * 0.055;
     auto const river_bend = river_curve * 0.055;
+    // Elevation tiers: river < lanes (base) < jungle paths < jungle floor,
+    // with the base courts raised so lanes ramp up into them.
+    auto const jungle_rise = 6.0;
+    auto const path_rise = 3.0;
+    auto const apron_rise = 2.0;
+    auto const court_rise = 4.0;
+    auto const jungle_top = base + jungle_rise;
+    auto const path_top = base + path_rise;
 
     auto top = nlohmann::json::array({point(.07, .88, base), point(.09, .73, base),
       point(.055, .64, base), point(.06, .28, base), point(.14, .10, base),
@@ -353,18 +363,18 @@ namespace Noggit::Ai
       point(.74, .70 - river_bend, river_height), point(.96, .86 + river_bend, river_height)});
 
     auto const jungle_polygons = std::array<nlohmann::json, 4>{
-      nlohmann::json::array({point(.12,.16,base), point(.24,.075,base),
-        point(.76,.075,base), point(.88,.16,base), point(.56,.45,base),
-        point(.44,.45,base)}),
-      nlohmann::json::array({point(.56,.45,base), point(.88,.16,base),
-        point(.94,.28,base), point(.94,.72,base), point(.86,.84,base),
-        point(.56,.55,base)}),
-      nlohmann::json::array({point(.56,.55,base), point(.88,.84,base),
-        point(.76,.925,base), point(.24,.925,base), point(.12,.84,base),
-        point(.44,.55,base)}),
-      nlohmann::json::array({point(.44,.55,base), point(.12,.84,base),
-        point(.06,.72,base), point(.06,.28,base), point(.14,.16,base),
-        point(.44,.45,base)})
+      nlohmann::json::array({point(.12,.16,jungle_top), point(.24,.075,jungle_top),
+        point(.76,.075,jungle_top), point(.88,.16,jungle_top), point(.56,.45,jungle_top),
+        point(.44,.45,jungle_top)}),
+      nlohmann::json::array({point(.56,.45,jungle_top), point(.88,.16,jungle_top),
+        point(.94,.28,jungle_top), point(.94,.72,jungle_top), point(.86,.84,jungle_top),
+        point(.56,.55,jungle_top)}),
+      nlohmann::json::array({point(.56,.55,jungle_top), point(.88,.84,jungle_top),
+        point(.76,.925,jungle_top), point(.24,.925,jungle_top), point(.12,.84,jungle_top),
+        point(.44,.55,jungle_top)}),
+      nlohmann::json::array({point(.44,.55,jungle_top), point(.12,.84,jungle_top),
+        point(.06,.72,jungle_top), point(.06,.28,jungle_top), point(.14,.16,jungle_top),
+        point(.44,.45,jungle_top)})
     };
     struct Camp { char const* name; double u; double v; };
     auto const camps = std::array{
@@ -376,21 +386,23 @@ namespace Noggit::Ai
     auto const objective_north = hexArea(.34, .27, .055, base - 1);
     auto const objective_south = hexArea(.66, .73, .055, base - 1);
     auto const jungle_paths = std::array<nlohmann::json, 8>{
-      nlohmann::json::array({point(.13,.13,base), point(.50,.22,base), point(.84,.13,base)}),
-      nlohmann::json::array({point(.34,.27,base), point(.50,.22,base), point(.56,.45,base)}),
-      nlohmann::json::array({point(.87,.13,base), point(.78,.50,base), point(.87,.84,base)}),
-      nlohmann::json::array({point(.66,.34,base), point(.78,.50,base), point(.66,.66,base)}),
-      nlohmann::json::array({point(.87,.87,base), point(.50,.78,base), point(.13,.87,base)}),
-      nlohmann::json::array({point(.66,.73,base), point(.50,.78,base), point(.44,.55,base)}),
-      nlohmann::json::array({point(.13,.87,base), point(.22,.50,base), point(.13,.16,base)}),
-      nlohmann::json::array({point(.34,.66,base), point(.22,.50,base), point(.34,.34,base)})
+      nlohmann::json::array({point(.13,.13,path_top), point(.50,.22,path_top), point(.84,.13,path_top)}),
+      nlohmann::json::array({point(.34,.27,path_top), point(.50,.22,path_top), point(.56,.45,path_top)}),
+      nlohmann::json::array({point(.87,.13,path_top), point(.78,.50,path_top), point(.87,.84,path_top)}),
+      nlohmann::json::array({point(.66,.34,path_top), point(.78,.50,path_top), point(.66,.66,path_top)}),
+      nlohmann::json::array({point(.87,.87,path_top), point(.50,.78,path_top), point(.13,.87,path_top)}),
+      nlohmann::json::array({point(.66,.73,path_top), point(.50,.78,path_top), point(.44,.55,path_top)}),
+      nlohmann::json::array({point(.13,.87,path_top), point(.22,.50,path_top), point(.13,.16,path_top)}),
+      nlohmann::json::array({point(.34,.66,path_top), point(.22,.50,path_top), point(.34,.34,path_top)})
     };
-    auto const left_base_outer = nlohmann::json::array({point(.01,.70,base),
-      point(.10,.68,base), point(.24,.76,base), point(.30,.90,base),
-      point(.20,.99,base), point(.01,.99,base)});
-    auto const left_base_inner = nlohmann::json::array({point(.025,.78,base),
-      point(.09,.75,base), point(.18,.81,base), point(.21,.90,base),
-      point(.15,.96,base), point(.025,.96,base)});
+    auto const left_base_outer = nlohmann::json::array({point(.01,.70,base + apron_rise),
+      point(.10,.68,base + apron_rise), point(.24,.76,base + apron_rise),
+      point(.30,.90,base + apron_rise), point(.20,.99,base + apron_rise),
+      point(.01,.99,base + apron_rise)});
+    auto const left_base_inner = nlohmann::json::array({point(.025,.78,base + court_rise),
+      point(.09,.75,base + court_rise), point(.18,.81,base + court_rise),
+      point(.21,.90,base + court_rise), point(.15,.96,base + court_rise),
+      point(.025,.96,base + court_rise)});
     auto mirror = [](nlohmann::json const& points)
     {
       auto result = nlohmann::json::array();
@@ -404,6 +416,42 @@ namespace Noggit::Ai
     auto const right_base_outer = mirror(left_base_outer);
     auto const right_base_inner = mirror(left_base_inner);
 
+    auto toLayoutPoints = [](nlohmann::json const& polygon)
+    {
+      std::vector<ProceduralLayoutPoint> points;
+      for (auto const& p : polygon)
+        points.push_back({static_cast<float>(p.at("u").get<double>()),
+                          static_cast<float>(p.at("v").get<double>()), 0.0f});
+      return points;
+    };
+    auto const left_base_points = toLayoutPoints(left_base_outer);
+    auto const right_base_points = toLayoutPoints(right_base_outer);
+    auto const left_court_points = toLayoutPoints(left_base_inner);
+    auto const right_court_points = toLayoutPoints(right_base_inner);
+    auto const insideBase = [&](std::vector<ProceduralLayoutPoint> const& polygon,
+                                nlohmann::json const& p)
+    {
+      return proceduralScatterContains(polygon,
+        static_cast<float>(p.at("u").get<double>()),
+        static_cast<float>(p.at("v").get<double>()));
+    };
+    // The corridor sampler interpolates heights along the path, so raising
+    // only the points that sit on a base plateau turns the lane ends into
+    // ramps instead of trenches carved through the raised courts.
+    auto const raiseLaneEnds = [&](nlohmann::json& lane)
+    {
+      for (auto& p : lane)
+      {
+        if (insideBase(left_court_points, p) || insideBase(right_court_points, p))
+          p["height"] = base + court_rise;
+        else if (insideBase(left_base_points, p) || insideBase(right_base_points, p))
+          p["height"] = base + apron_rise;
+      }
+    };
+    raiseLaneEnds(top);
+    raiseLaneEnds(middle);
+    raiseLaneEnds(bottom);
+
     auto terrain_features = nlohmann::json::array();
     terrain_features.push_back(feature("arena_ground", "area",
       nlohmann::json::array({point(0, 0, base), point(1, 0, base),
@@ -416,12 +464,22 @@ namespace Noggit::Ai
       terrain_features.push_back(feature("jungle_" + std::to_string(i / 2 + 1)
         + (i % 2 == 0 ? "_main_path" : "_branch_path"), "corridor",
         jungle_paths[i], .022, .018, 0, 55, "absolute", .6, .65, .12));
+    // Narrow deep channel with long submerged banks: the shoreline lands on
+    // the gentle underwater slope, so edge water is shallow and fades out
+    // instead of meeting the bank at full depth.
     terrain_features.push_back(feature("river_bed", "corridor", river,
-      river_width, .025, 2, 60, "absolute", 0, 1, .18));
+      river_width * .5, std::min(.25, river_width * 1.2), 2, 60,
+      "absolute", 0, 1, .18));
     terrain_features.push_back(feature("objective_north", "area",
       objective_north, .005, .025, 2, 65));
     terrain_features.push_back(feature("objective_south", "area",
       objective_south, .005, .025, 2, 65));
+    // Flat clearings so camps sit on level ground within the raised,
+    // noisy jungle floor.
+    for (auto const& camp : camps)
+      terrain_features.push_back(feature(std::string{camp.name} + "_camp_floor",
+        "area", hexArea(camp.u, camp.v, .03, jungle_top), .005, .02, 0, 58,
+        "absolute", .5, .4));
     terrain_features.push_back(feature("team_left_base_apron", "area", left_base_outer,
       .005, .018, 3, 40, "absolute", .4, .9));
     terrain_features.push_back(feature("team_right_base_apron", "area", right_base_outer,
@@ -566,16 +624,6 @@ namespace Noggit::Ai
       exclusion("area", withoutHeight(objective_north), .025),
       exclusion("area", withoutHeight(objective_south), .025)
     });
-    auto toLayoutPoints = [](nlohmann::json const& polygon)
-    {
-      std::vector<ProceduralLayoutPoint> points;
-      for (auto const& p : polygon)
-        points.push_back({static_cast<float>(p.at("u").get<double>()),
-                          static_cast<float>(p.at("v").get<double>()), 0.0f});
-      return points;
-    };
-    auto const left_base_points = toLayoutPoints(left_base_outer);
-    auto const right_base_points = toLayoutPoints(right_base_outer);
     // Jungle main paths end inside the bases; their wall-call exclusions stop
     // outside so the base wall chain stays continuous and seals those breaches.
     auto pathClippedOutsideBases = [&](nlohmann::json const& path)
@@ -740,10 +788,13 @@ namespace Noggit::Ai
       {"slope_start_degrees", 18}, {"slope_full_degrees", 34},
       {"edge_noise_ratio", .006}, {"max_slope_degrees", 60},
       {"smoothing_strength", .25}, {"features", std::move(terrain_features)}};
+    // The water polygon stops on the submerged bank slope, where roughly one
+    // third of the water column remains, so shore cells are shallow and the
+    // depth attribute fades the edge out.
     nlohmann::json liquid = {{"replace_existing", true}, {"edge_noise_ratio", .004},
       {"features", nlohmann::json::array({{{"name", "central_river"}, {"shape", "corridor"},
-        {"points", withoutHeight(river)}, {"half_width_ratio", river_width * .78},
-        {"transition_width_ratio", .012}, {"liquid_type_id", liquid_value},
+        {"points", withoutHeight(river)}, {"half_width_ratio", river_width * .5},
+        {"transition_width_ratio", std::min(.25, river_width * .2)}, {"liquid_type_id", liquid_value},
         {"depth", .65}, {"priority", 50}}})}};
     for (auto& p : liquid["features"][0]["points"]) p["height"] = water_height;
     auto path_wall_assets = wall_assets;
@@ -770,6 +821,7 @@ namespace Noggit::Ai
     return {{"ok", true}, {"operation", "create_moba_arena_blueprint"},
       {"topology", {{"lanes", 3}, {"bases", 2}, {"river", 1},
                     {"objective_pits", 2}, {"jungle_regions", 4},
+                    {"elevation_tiers", 4}, {"camp_clearings", 12},
                     {"jungle_camps", 12}, {"jungle_floors", 4},
                     {"jungle_wall_bands", 4}, {"base_wall_bands", 2},
                     {"jungle_path_wall_bands", 4},

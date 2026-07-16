@@ -113,13 +113,13 @@ int main()
 
   auto too_many_features = validArguments();
   too_many_features["features"] = nlohmann::json::array();
-  for (int index = 0; index < 33; ++index)
+  for (int index = 0; index < 65; ++index)
   {
     too_many_features["features"].push_back(
       corridor("feature_" + std::to_string(index)));
   }
   require(!Noggit::Ai::parseProceduralLiquidLayout(too_many_features).layout,
-          "liquid layout with more than 32 features was accepted");
+          "liquid layout with more than 64 features was accepted");
 
   auto too_many_liquid_types = validArguments();
   too_many_liquid_types["features"] = nlohmann::json::array();

@@ -18,7 +18,7 @@ namespace Noggit::Ai
   namespace
   {
     constexpr std::size_t max_points_per_feature = 16;
-    constexpr std::size_t max_total_segments = 128;
+    constexpr std::size_t max_total_segments = 256;
     constexpr float minimum_layout_height = -500.0f;
     constexpr float maximum_layout_height = 5000.0f;
 
@@ -525,7 +525,7 @@ namespace Noggit::Ai
     if (!features.is_array() || features.empty()
         || features.size() > procedural_layout_max_features)
     {
-      return fail("features doit contenir entre une et 32 formes.");
+      return fail("features doit contenir entre une et 64 formes.");
     }
 
     std::set<std::string> unique_names;
@@ -603,7 +603,7 @@ namespace Noggit::Ai
         ? points.size() : points.size() - 1;
       if (total_segments > max_total_segments)
       {
-        return fail("Le layout ne peut pas dépasser 128 segments au total.");
+        return fail("Le layout ne peut pas dépasser 256 segments au total.");
       }
       for (auto const& point_value : points)
       {
@@ -740,7 +740,7 @@ namespace Noggit::Ai
 
     auto const feature_count = std::min(
       layout.features.size(), procedural_layout_max_features);
-    // ponytail: O(samples * segments) is bounded by 128 segments; add a
+    // ponytail: O(samples * segments) is bounded by 256 segments; add a
     // spatial index only if profiling shows large layouts need it.
     for (std::size_t index = 0; index < feature_count; ++index)
     {

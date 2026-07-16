@@ -155,6 +155,10 @@ int main()
   require(terrain.layout && liquid.layout && walls.scatter
             && path_walls.scatter && props.props && vegetation.scatter,
           "blueprint must compile to valid generic tool arguments");
+  // base_height 20 and river_depth 8 put the bed bottom at 12; the water
+  // column must stay under WoW's swim threshold so the river is wadeable.
+  require(liquid.layout->features.front().points.front().height <= 13.01f,
+          "the river water column must stay wadeable on foot");
 
   for (auto const footprint_side : {std::size_t{2}, std::size_t{3}, std::size_t{4}})
   {
@@ -224,7 +228,7 @@ int main()
   std::size_t lanes = 0;
   for (auto const& feature : terrain.layout->features)
     if (feature.name.ends_with("_lane")) ++lanes;
-  require(lanes == 3 && terrain.layout->features.size() == 23,
+  require(lanes == 3 && terrain.layout->features.size() == 35,
           "terrain topology is incomplete");
   require(terrain.layout->features.front().name == "arena_ground",
           "the whole arena needs a flat textured background feature");
@@ -276,8 +280,23 @@ int main()
     if (height < 12.0f || height > 28.0f)
       throw std::runtime_error(std::string{message} + ": " + std::to_string(height));
   };
-  requireFlat(.50f, .12f, "jungle floor must stay at playable base height");
-  requireFlat(.50f, .22f, "jungle main path must stay at playable base height");
+  auto const lane_height = sampleHeight(.50f, .50f);
+  auto const jungle_height = sampleHeight(.50f, .12f);
+  auto const path_height = sampleHeight(.4075f, .1975f);
+  require(lane_height >= 17.0f && lane_height <= 23.0f,
+          "mid lane must stay at playable base height");
+  require(jungle_height >= lane_height + 1.0f
+            && jungle_height <= lane_height + 12.0f,
+          "jungle floor must rise above the lanes");
+  require(path_height >= lane_height + 1.0f
+            && path_height <= lane_height + 5.0f,
+          "jungle main path must terrace between lane and jungle floor");
+  require(sampleHeight(.50f, .22f) >= lane_height + 4.0f,
+          "camp clearings must sit level with the raised jungle floor");
+  require(sampleHeight(.02f, .98f) >= lane_height + 1.0f,
+          "base apron must rise above the lanes");
+  require(sampleHeight(.10f, .85f) >= lane_height + 2.5f,
+          "base court must rise above the lanes");
   requireFlat(.02f, .98f, "base apron must stay flat without relief walls");
   requireFlat(.12f, .78f, "former defender gate relief must be flattened");
   require(sampleHeight(.26f, .3275f) < 15.0f,

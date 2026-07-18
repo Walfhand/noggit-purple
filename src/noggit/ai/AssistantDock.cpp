@@ -108,7 +108,7 @@ Pour une création, une refonte ou une opération portant sur toute la carte :
 Après generate_terrain_on_map, utilise blend_terrain_textures_on_map pour répartir les textures selon la hauteur et la pente. apply_terrain_layout_on_map produit déjà sa texturation finale par zone : ne l'écrase ensuite ni avec blend_terrain_textures_on_map ni avec set_base_texture_on_map. Réserve paint_texture aux retouches locales.
 Pour créer des routes, rivières, voies, plateformes ou autres formes continues, utilise apply_terrain_layout_on_map afin d'appliquer ensemble leur hauteur et leurs textures sémantiques.
 Pour toute arène MOBA complète de 2x2 à 4x4 tuiles, utilise create_moba_arena_blueprint après avoir choisi quatre textures dans l'ordre herbe, voie, sol humide, roche, plusieurs assets de jungle, au moins deux segments de mur, un jeu de prop_paths, un GroundEffectTexture avec search_ground_effects et une skybox M2 sous environments/stars. Pour prop_paths, choisis des landmarks M2 des extensions récentes (fountain, statue, brazier, streetlight ou lamppost) et les lumières dynamiques world/noggit/lights/noggit_light_*.m2 de Patch-E : couleur d'équipe à gauche et à droite, flamme orange pour les braziers, violet ou felgreen pour la rivière. Pour une skybox animée complète, utilise skybox_flags=1 afin de la synchroniser avec l'heure sans doubler ses astres avec le ciel procédural. Après approbation du plan, exécute dans l'ordre et sans les modifier les huit next_calls retournés. Le blueprint utilise une topologie en X sur un sol plat : bases fortifiées au sud-ouest et au nord-est ceinturées d'un mur d'enceinte à trois entrées, voies latérales longeant les bords, voie médiane et rivière sur deux diagonales opposées, quatre jungles ceinturées de chaînes de murs et des murs sur les deux côtés de leurs chemins, douze camps et deux fosses d'objectif. Aucun relief ne sépare les zones : toute séparation vient des assets du rôle wall, des segments de mur M2 avec maillage de collision placés en chaîne alignée, le centre des voies et chemins restant ouvert. N'essaie pas de redessiner ces coordonnées toi-même. Les outils génériques restent destinés aux cartes qui ne sont pas des arènes MOBA.
-Pour les choix par défaut d'une arène MOBA, préfère des textures et modèles d'extensions récentes réellement retournés par les recherches du client ouvert. Pour le rôle wall, choisis des segments épais et massifs, jamais de clôtures fines : les deux grands murs de jungle world/expansion07/doodads/bloodtroll/8tr_ancientblood_walltall01 et walltall02 possèdent de vraies collisions. Utilise-les entre 1.5 et 1.7 afin de conserver une barrière haute et large. La texture de voie doit être une vraie route (road/path/trail), pas une terre générique, et lane_width_ratio vaut 0.02 sauf demande contraire.
+Pour les choix par défaut d'une arène MOBA, préfère des textures et modèles d'extensions récentes réellement retournés par les recherches du client ouvert. Pour le rôle wall, choisis des segments épais et massifs, jamais de clôtures fines : la muraille de Suramar world/expansion06/doodads/suramar/7sr_boundarywall_short (34 unités de long) et 7sr_boundarywall_broken05 (45 unités) possèdent de vraies collisions et s'enchaînent presque parfaitement à l'espacement de 32 unités des chaînes. Utilise-les entre 0.95 et 1.05. La texture de voie doit être une vraie route (road/path/trail), pas une terre générique, et lane_width_ratio vaut 0.02 sauf demande contraire.
 Avant une texturation globale, explore plusieurs termes anglais de noms de fichiers et plusieurs pages avec search_textures : grass, dirt, leaf, moss, mud, root et rock. Appelle ensuite preview_textures sur les candidates sérieuses et choisis la palette d'après l'image obtenue, pas seulement d'après leurs noms. Évite de reprendre systématiquement la même famille. Un layout peut référencer jusqu'à 16 textures sur la carte, mais jamais plus de quatre textures actives dans un même chunk ; réserve les variantes aux zones éloignées. Pour casser une grande surface uniforme, ajoute quelques petites areas de texture avec height_mode=offset, height=0 et roughness_amplitude=0 plutôt que de modifier de nouveau tout le relief.
 Une texture de boue n'est pas de l'eau. Pour une rivière, un lac ou un océan visible en jeu, crée d'abord son lit avec apply_terrain_layout_on_map puis appelle apply_liquid_layout_on_map avec les mêmes points. Choisis uniquement un liquid_type_id eau ou océan retourné par inspect_map. Place la surface au-dessus du fond et sous les berges. depth est une profondeur/opacité MH2O normalisée : environ 0.2 à 0.6 pour une eau peu profonde, 0.7 à 1 pour une eau profonde. Utilise replace_existing=true seulement lors d'une refonte totale.
 Pour rendre une jungle, forêt ou zone rocheuse vivante, recherche plusieurs arbres, buissons, petites plantes, bois mort et rochers avec search_assets puis utilise scatter_assets_on_map après le relief et l'eau. Classe chaque asset dans canopy, understory, rock, wall ou detail ; le rôle wall place ses assets en chaîne alignée sur le périmètre du polygone de sa région et sert à bâtir des murs collidables. Utilise au moins deux espèces de canopée, du sous-bois et des rochers pour une arène MOBA ; spacing_multiplier doit être plus grand pour les grands arbres et plus petit pour les détails. Décris les zones par des polygones, exclue explicitement les voies et plateformes avec des corridors, et laisse aussi l'outil éviter l'eau MH2O. cluster_scale et cluster_strength créent des massifs et des trouées à basse fréquence ; ne distribue pas toutes les espèces uniformément. N'utilise pas le scatter pour les bâtiments uniques ou les objectifs placés précisément.
@@ -845,8 +845,8 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
     {"path":"world/expansion05/doodads/tanaanjungle/doodads/6tj_patchtree_bigcanopy_c03.m2","role":"canopy","weight":2,"min_scale":0.8,"max_scale":1.2,"spacing_multiplier":1.2},
     {"path":"world/expansion05/doodads/tanaanjungle/doodads/6tj_patchswamp_bush_b01.m2","role":"understory","weight":4,"min_scale":0.7,"max_scale":1.15,"spacing_multiplier":0.55},
     {"path":"world/expansion05/doodads/tanaanjungle/doodads/6tj_patchbushtall_b02.m2","role":"understory","weight":4,"min_scale":0.7,"max_scale":1.15,"spacing_multiplier":0.5},
-    {"path":"world/expansion07/doodads/bloodtroll/8tr_ancientblood_walltall01.m2","role":"wall","weight":3,"min_scale":1.5,"max_scale":1.7,"spacing_multiplier":1.0},
-    {"path":"world/expansion07/doodads/bloodtroll/8tr_ancientblood_walltall02.m2","role":"wall","weight":3,"min_scale":1.5,"max_scale":1.7,"spacing_multiplier":1.0},
+    {"path":"world/expansion06/doodads/suramar/7sr_boundarywall_short.m2","role":"wall","weight":5,"min_scale":0.95,"max_scale":1.05,"spacing_multiplier":1.0},
+    {"path":"world/expansion06/doodads/suramar/7sr_boundarywall_broken05.m2","role":"wall","weight":1,"min_scale":0.95,"max_scale":1.05,"spacing_multiplier":1.0},
     {"path":"world/expansion05/doodads/tanaanjungle/doodads/6tj_rocksmall_a01.m2","role":"rock","weight":2,"min_scale":0.9,"max_scale":1.6,"spacing_multiplier":0.8},
     {"path":"world/expansion05/doodads/tanaanjungle/doodads/6tj_rocksmall_a03.m2","role":"rock","weight":2,"min_scale":0.9,"max_scale":1.6,"spacing_multiplier":0.8},
     {"path":"world/expansion05/doodads/tanaanjungle/doodads/6tj_patchfernleaf_01.m2","role":"detail","weight":8,"min_scale":0.65,"max_scale":1.1,"spacing_multiplier":0.35}
@@ -887,6 +887,7 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
     auto* editor = new QPlainTextEdit(&dialog);
     QSettings settings;
     static constexpr auto specification_keys = std::array{
+      "ai/mobaBlueprintLabSpecificationV13",
       "ai/mobaBlueprintLabSpecificationV12",
       "ai/mobaBlueprintLabSpecificationV11",
       "ai/mobaBlueprintLabSpecificationV10",
@@ -924,22 +925,14 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
           "world/expansion07/doodads/riverzone/8riv_rockwall_tall_03.m2",
           "world/expansion07/doodads/riverzone/8riv_rockwall_tall_pillar_01.m2",
           "world/expansion07/doodads/bloodtroll/8tr_ancientblood_wallshort01.m2",
-          "world/expansion07/doodads/bloodtroll/8tr_ancientblood_wallshort02.m2"
+          "world/expansion07/doodads/bloodtroll/8tr_ancientblood_wallshort02.m2",
+          "world/expansion07/doodads/bloodtroll/8tr_ancientblood_walltall01.m2",
+          "world/expansion07/doodads/bloodtroll/8tr_ancientblood_walltall02.m2"
         };
         for (auto asset : specification.at("assets"))
         {
           auto const path = asset.at("path").get<std::string>();
           if (obsolete_wall_paths.contains(path)) continue;
-          if (path == "world/expansion07/doodads/bloodtroll/8tr_ancientblood_walltall01.m2"
-              || path == "world/expansion07/doodads/bloodtroll/8tr_ancientblood_walltall02.m2")
-          {
-            if (asset.value("min_scale", 0.0) == 1.2
-                && asset.value("max_scale", 0.0) == 1.4)
-            {
-              asset["min_scale"] = 1.5;
-              asset["max_scale"] = 1.7;
-            }
-          }
           if (paths.insert(path).second)
             unique_assets.push_back(std::move(asset));
         }

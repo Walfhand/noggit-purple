@@ -111,9 +111,9 @@ int main()
           && first.at("topology").at("fortified_bases") == 2
           && first.at("topology").at("jungle_camps") == 12
           && first.at("topology").at("jungle_floors") == 4
-          && first.at("topology").at("jungle_wall_bands") == 4
+          && first.at("topology").at("jungle_wall_bands") == 0
           && first.at("topology").at("base_wall_bands") == 2
-          && first.at("topology").at("jungle_path_wall_bands") == 4
+          && first.at("topology").at("jungle_path_wall_bands") == 0
           && first.at("topology").at("jungle_paths") == 8
           && first.at("topology").at("public_entrances_per_base") == 3
           && first.at("topology").at("landmarks") == 4
@@ -125,35 +125,32 @@ int main()
           "the ambience layer lost its lamps or dynamic lights");
 
   auto const& calls = first.at("next_calls");
-  require(calls.size() == 8
+  require(calls.size() == 7
           && calls[0].at("name") == "apply_terrain_layout_on_map"
           && calls[1].at("name") == "apply_liquid_layout_on_map"
           && calls[2].at("name") == "apply_ground_effect_on_map"
           && calls[2].at("arguments").at("texture_path") == "tileset/grass.blp"
           && calls[2].at("arguments").at("effect_id") == 17
           && calls[3].at("name") == "scatter_assets_on_map"
-          && calls[4].at("name") == "scatter_assets_on_map"
-          && calls[5].at("name") == "place_props_on_map"
-          && calls[6].at("name") == "scatter_assets_on_map"
-          && calls[7].at("name") == "apply_skybox_on_map"
-          && calls[7].at("arguments").at("skybox_path")
+          && calls[4].at("name") == "place_props_on_map"
+          && calls[5].at("name") == "scatter_assets_on_map"
+          && calls[6].at("name") == "apply_skybox_on_map"
+          && calls[6].at("arguments").at("skybox_path")
             == "environments/stars/tanaan_patch_junglesky01.m2"
-          && calls[7].at("arguments").at("flags") == 1,
+          && calls[6].at("arguments").at("flags") == 1,
           "generic execution pipeline changed");
   auto const terrain = Noggit::Ai::parseProceduralLayout(calls[0].at("arguments"));
   auto const liquid = Noggit::Ai::parseProceduralLiquidLayout(calls[1].at("arguments"));
   auto const walls = Noggit::Ai::parseProceduralScatter(calls[3].at("arguments"));
-  auto const path_walls = Noggit::Ai::parseProceduralScatter(calls[4].at("arguments"));
-  auto const props = Noggit::Ai::parseProceduralProps(calls[5].at("arguments"));
-  auto const vegetation = Noggit::Ai::parseProceduralScatter(calls[6].at("arguments"));
+  auto const props = Noggit::Ai::parseProceduralProps(calls[4].at("arguments"));
+  auto const vegetation = Noggit::Ai::parseProceduralScatter(calls[5].at("arguments"));
   if (!terrain.layout) throw std::runtime_error("terrain: " + terrain.error);
   if (!liquid.layout) throw std::runtime_error("liquid: " + liquid.error);
   if (!walls.scatter) throw std::runtime_error("walls: " + walls.error);
-  if (!path_walls.scatter) throw std::runtime_error("path walls: " + path_walls.error);
   if (!props.props) throw std::runtime_error("props: " + props.error);
   if (!vegetation.scatter) throw std::runtime_error("vegetation: " + vegetation.error);
   require(terrain.layout && liquid.layout && walls.scatter
-            && path_walls.scatter && props.props && vegetation.scatter,
+            && props.props && vegetation.scatter,
           "blueprint must compile to valid generic tool arguments");
   // base_height 20 and river_depth 8 put the bed bottom at 12; the water
   // column must stay under WoW's swim threshold so the river is wadeable.
@@ -170,7 +167,7 @@ int main()
     require(blueprint.at("connectivity").at("enclosed_jungle_cells")
               .get<std::size_t>() == 0,
             "walls must not seal any walkable jungle pocket");
-    for (auto const call_index : {std::size_t{3}, std::size_t{4}})
+    for (auto const call_index : {std::size_t{3}})
     {
       auto const parsed = Noggit::Ai::parseProceduralScatter(
         blueprint.at("next_calls").at(call_index).at("arguments"));
@@ -229,27 +226,41 @@ int main()
   std::size_t lanes = 0;
   for (auto const& feature : terrain.layout->features)
     if (feature.name.ends_with("_lane")) ++lanes;
-  require(lanes == 3 && terrain.layout->features.size() == 35,
+  require(lanes == 3 && terrain.layout->features.size() == 39,
           "terrain topology is incomplete");
   require(terrain.layout->features.front().name == "arena_ground",
           "the whole arena needs a flat textured background feature");
   std::size_t base_aprons = 0;
   std::size_t base_inner_courts = 0;
   std::size_t jungle_masses = 0;
+  std::size_t jungle_reliefs = 0;
   std::size_t jungle_paths = 0;
   for (auto const& feature : terrain.layout->features)
   {
     if (feature.name.ends_with("_base_apron")) ++base_aprons;
     if (feature.name.ends_with("_inner_court")) ++base_inner_courts;
-    if (feature.name.starts_with("jungle_") && feature.name.ends_with("_mass")) ++jungle_masses;
+    if (feature.name.starts_with("jungle_") && feature.name.ends_with("_mass"))
+    {
+      ++jungle_masses;
+      require(feature.roughness_amplitude >= 5.0f
+                && feature.transition_width_ratio <= .025f,
+              "jungle borders must come from rough, compact relief");
+    }
     if (feature.name.starts_with("jungle_") && feature.name.ends_with("_path")) ++jungle_paths;
-    require(!feature.name.ends_with("_ridge") && !feature.name.ends_with("_defender_gate"),
-            "relief separators must be replaced by collidable walls");
+    if (feature.name.starts_with("jungle_") && feature.name.ends_with("_relief"))
+    {
+      ++jungle_reliefs;
+      require(feature.priority > 20 && feature.priority < 55
+                && feature.transition_width_ratio <= .015f,
+              "jungle relief must stay compact and yield to paths");
+    }
+    require(!feature.name.ends_with("_defender_gate"),
+            "bases must not rely on artificial defender ridges");
   }
   require(base_aprons == 2 && base_inner_courts == 2,
           "fortified base topology is incomplete");
-  require(jungle_masses == 4 && jungle_paths == 8,
-          "jungle floors or paths are incomplete");
+  require(jungle_masses == 4 && jungle_reliefs == 4 && jungle_paths == 8,
+          "jungle floors, reliefs or paths are incomplete");
   std::vector<std::size_t> feature_cores(terrain.layout->features.size());
   std::array<std::size_t, Noggit::Ai::procedural_layout_max_texture_paths>
     strong_texture_pixels{};
@@ -265,7 +276,8 @@ int main()
         strong_texture_pixels[layer] += sample.quantized_weights[layer] >= 64;
     }
   for (std::size_t i = 0; i < feature_cores.size(); ++i)
-    if (feature_cores[i] == 0)
+    if (feature_cores[i] == 0
+        && !terrain.layout->features[i].name.ends_with("_mass"))
       throw std::runtime_error("missing effective core: " + terrain.layout->features[i].name);
   for (std::size_t layer = 0; layer < terrain.layout->texture_paths.size(); ++layer)
     require(strong_texture_pixels[layer] >= 64,
@@ -286,8 +298,8 @@ int main()
   auto const path_height = sampleHeight(.4075f, .1975f);
   require(lane_height >= 17.0f && lane_height <= 23.0f,
           "mid lane must stay at playable base height");
-  require(jungle_height >= lane_height + 1.0f
-            && jungle_height <= lane_height + 12.0f,
+  require(jungle_height >= lane_height + 8.0f
+            && jungle_height <= lane_height + 32.0f,
           "jungle floor must rise above the lanes");
   require(path_height >= lane_height + 1.0f
             && path_height <= lane_height + 5.0f,
@@ -303,10 +315,9 @@ int main()
   require(sampleHeight(.26f, .3275f) < 15.0f,
           "the river bed must stay carved below the flat arena");
 
-  require(walls.scatter->regions.size() >= 12
-            && walls.scatter->regions.size() <= 48,
-          "the jungle rings and base perimeters must yield wall chains");
-  std::set<std::string> jungle_chain_quadrants;
+  require(walls.scatter->regions.size() >= 2
+            && walls.scatter->regions.size() <= 16,
+          "the two base perimeters must yield wall chains");
   std::set<std::string> base_chain_sides;
   for (auto const& region : walls.scatter->regions)
   {
@@ -316,8 +327,8 @@ int main()
     require(region.name.find("_chain") != std::string::npos
               && region.name.ends_with("_wall"),
             "collidable wall assets must be reserved for named wall chains");
-    if (region.name.starts_with("jungle_"))
-      jungle_chain_quadrants.insert(region.name.substr(0, 8));
+    require(region.name.starts_with("team_"),
+            "constructed walls must be reserved for fortified bases");
     if (region.name.starts_with("team_"))
       base_chain_sides.insert(region.name.substr(0, 9));
     require(region.density_per_tile > 0
@@ -326,23 +337,8 @@ int main()
               && region.cluster_strength == 0.0f,
             "wall chains must be dense, uninterrupted and anchored to flat ground");
   }
-  require(jungle_chain_quadrants.size() == 4 && base_chain_sides.size() == 2,
-          "jungle and base wall chains are incomplete");
-  require(path_walls.scatter->regions.size() >= 8
-            && path_walls.scatter->regions.size() <= 48,
-          "both sides of the four main jungle paths need wall chains");
-  std::set<std::string> flank_prefixes;
-  for (auto const& region : path_walls.scatter->regions)
-  {
-    require(region.role == "wall"
-              && region.name.find("_chain") != std::string::npos
-              && region.density_per_tile > 0 && region.min_height <= 10.0f,
-            "jungle path flanks must follow the paths at playable ground height");
-    flank_prefixes.insert(region.name.substr(0, region.name.find("_chain")));
-  }
-  require(flank_prefixes.size() == 8,
-          "each main path needs chains on both of its flanks");
-  // T-joints: no flank segment may sit on top of a ring or base wall segment.
+  require(base_chain_sides.size() == 2,
+          "base wall chains are incomplete");
   auto const wallCandidates = [](Noggit::Ai::ProceduralScatter const& scatter)
   {
     std::vector<std::pair<float, float>> positions;
@@ -357,49 +353,15 @@ int main()
       }
     return positions;
   };
-  auto const ring_positions = wallCandidates(*walls.scatter);
-  auto const flank_positions = wallCandidates(*path_walls.scatter);
-  for (auto const& [flank_u, flank_v] : flank_positions)
-    for (auto const& [ring_u, ring_v] : ring_positions)
-      if (std::hypot(flank_u - ring_u, flank_v - ring_v) < .016f)
-        throw std::runtime_error("a path flank segment overlaps a ring or "
-                                 "base wall segment");
-  // Flanks of different paths must also keep their clearance to each other.
-  auto flank_path_prefixes = std::vector<std::string>{};
-  auto flank_owner = std::vector<std::size_t>{};
-  for (std::size_t region_index = 0;
-       region_index < path_walls.scatter->regions.size(); ++region_index)
-  {
-    auto const& region = path_walls.scatter->regions[region_index];
-    auto const prefix = region.name.substr(0, region.name.find("_path_"));
-    auto const found = std::find(flank_path_prefixes.begin(),
-                                 flank_path_prefixes.end(), prefix);
-    if (found == flank_path_prefixes.end())
-      flank_path_prefixes.push_back(prefix);
-    for (std::size_t index = 0; index < region.density_per_tile; ++index)
-      flank_owner.push_back(static_cast<std::size_t>(
-        std::distance(flank_path_prefixes.begin(),
-          std::find(flank_path_prefixes.begin(), flank_path_prefixes.end(),
-                    prefix))));
-  }
-  for (std::size_t a = 0; a < flank_positions.size(); ++a)
-    for (std::size_t b = a + 1; b < flank_positions.size(); ++b)
-      if (flank_owner[a] != flank_owner[b]
-          && std::hypot(flank_positions[a].first - flank_positions[b].first,
-                        flank_positions[a].second - flank_positions[b].second)
-             < .014f)
-        throw std::runtime_error(
-          "two path flanks from different paths overlap each other");
+  auto const wall_positions = wallCandidates(*walls.scatter);
   require(std::all_of(walls.scatter->assets.begin(), walls.scatter->assets.end(),
             [](auto const& asset)
             {
               return asset.role == "wall"
                 && std::abs(asset.min_scale - 1.5f) < .001f
                 && std::abs(asset.max_scale - 1.7f) < .001f;
-            })
+          })
           && walls.scatter->assets.size() == 2
-          && std::all_of(path_walls.scatter->assets.begin(), path_walls.scatter->assets.end(),
-            [](auto const& asset) { return asset.role == "wall"; })
           && std::none_of(vegetation.scatter->assets.begin(), vegetation.scatter->assets.end(),
             [](auto const& asset) { return asset.role == "wall"; })
           && std::any_of(vegetation.scatter->assets.begin(), vegetation.scatter->assets.end(),
@@ -408,16 +370,23 @@ int main()
   require(std::any_of(vegetation.scatter->regions.begin(), vegetation.scatter->regions.end(),
             [](auto const& region) { return region.role == "rock"; }),
           "decorative rocks must be scattered inside the jungles");
+  std::set<std::string> jungle_layers;
+  for (auto const& region : vegetation.scatter->regions)
+    if (region.role == "canopy" || region.role == "understory" || region.role == "rock")
+      jungle_layers.insert(region.name);
+  for (auto const quadrant : {1, 2, 3, 4})
+    for (auto const* role : {"canopy", "understory", "rock"})
+      require(jungle_layers.contains("jungle_" + std::to_string(quadrant) + "_" + role),
+              "every jungle quadrant needs canopy, understory and rocks");
   require(walls.scatter->exclusions.size() <= 96
-            && path_walls.scatter->exclusions.size() <= 96
             && vegetation.scatter->exclusions.size() == 28,
-          "chains carry their own openings; only repair openings and the "
+          "base chains carry their own openings; only repair openings and the "
           "vegetation exclusions remain");
   // Openings and continuity are structural now: probe candidate positions.
   auto const nearestWallDistance = [&](float u, float v)
   {
     auto best = 10.0f;
-    for (auto const& [candidate_u, candidate_v] : ring_positions)
+    for (auto const& [candidate_u, candidate_v] : wall_positions)
       best = std::min(best, static_cast<float>(
         std::hypot(candidate_u - u, candidate_v - v)));
     return best;
@@ -436,11 +405,11 @@ int main()
           "jungle interior should remain available for decoration");
   require(Noggit::Ai::proceduralScatterExcluded(
             *vegetation.scatter, .50f, .30f, 1066.0f, 1066.0f),
-          "jungle paths must remain open through the wall bands");
+          "jungle paths must remain open through the vegetation bands");
   require(Noggit::Ai::proceduralScatterExcluded(
             *vegetation.scatter, .50f, .22f, 1066.0f, 1066.0f),
           "camp clearings must remain free of decoration");
-  for (auto const* scatter : {&*walls.scatter, &*path_walls.scatter})
+  for (auto const* scatter : {&*walls.scatter})
     for (std::size_t region_index = 0;
          region_index < scatter->regions.size(); ++region_index)
     {
@@ -474,8 +443,7 @@ int main()
             count += region.density_per_tile;
     return count;
   };
-  for (auto const* scatter : {&*walls.scatter, &*path_walls.scatter,
-                              &*vegetation.scatter})
+  for (auto const* scatter : {&*walls.scatter, &*vegetation.scatter})
   {
     require(candidateCount(*scatter, 2) <= 4096,
             "a 2x2 MOBA batch must fit the compact scatter budget");
@@ -522,6 +490,10 @@ int main()
           "lane lamp chains are incomplete");
   require(light_props == first.at("topology").at("dynamic_lights").get<std::size_t>(),
           "every ambience light must come from the Patch-E light pack");
+
+  auto single_wall = specification();
+  single_wall["assets"].erase(single_wall["assets"].begin() + 6);
+  static_cast<void>(Noggit::Ai::compileMobaArenaBlueprint(single_wall, 4));
 
   auto missing_walls = specification();
   for (auto& asset : missing_walls["assets"])

@@ -270,7 +270,7 @@ namespace Noggit::Ai
     // Elevation tiers: river < lanes (base) < jungle paths < jungle floor,
     // with the base courts raised so lanes ramp up into them.
     auto const jungle_rise = 6.0;
-    auto const relief_rise = 22.0;
+    auto const relief_rise = 20.0;
     auto const path_rise = 3.0;
     auto const apron_rise = 2.0;
     auto const court_rise = 4.0;
@@ -444,7 +444,7 @@ namespace Noggit::Ai
     for (std::size_t i = 0; i < relief_polygons.size(); ++i)
       terrain_features.push_back(feature("jungle_" + std::to_string(i + 1) + "_relief", "area",
         relief_polygons[i], .008, .014, 0, 35, "absolute",
-        roughness * .55, .72));
+        roughness * .4, .72));
     // A short capsule merges into the continuous jungle relief; the camp
     // floor cuts an enclave instead of a repeated circular crater.
     for (auto const& camp : camps)
@@ -456,7 +456,7 @@ namespace Noggit::Ai
         point(camp.u + tangent_u * .028, camp.v + tangent_v * .028, relief_top)});
       terrain_features.push_back(feature(std::string{camp.name} + "_camp_relief",
         "corridor", camp_relief, .072, .012, 0, 59,
-        "absolute", roughness * .25, .72));
+        "absolute", roughness * .16, .72));
     }
     for (std::size_t i = 0; i < jungle_paths.size(); ++i)
       terrain_features.push_back(feature("jungle_" + std::to_string(i / 2 + 1)
@@ -468,7 +468,7 @@ namespace Noggit::Ai
     {
       auto access = campAccess(camp, jungle_top);
       terrain_features.push_back(feature(std::string{camp.name} + "_camp_access",
-        "corridor", access, .009, .006, 0, 67, "absolute", .3, .5));
+        "corridor", access, .011, .006, 0, 67, "absolute", .3, .5));
     }
     // Narrow deep channel with long submerged banks: the shoreline lands on
     // the gentle underwater slope, so edge water is shallow and fades out
@@ -484,8 +484,8 @@ namespace Noggit::Ai
     // leaving the surrounding relief visible at every camp.
     for (auto const& camp : camps)
       terrain_features.push_back(feature(std::string{camp.name} + "_camp_floor",
-        "area", hexArea(camp.u, camp.v, .03, jungle_top), .005, .01, 0, 68,
-        "absolute", .5, .4));
+        "area", hexArea(camp.u, camp.v, .036, jungle_top), .005, .01, 1, 68,
+        "absolute", .5, .5));
     terrain_features.push_back(feature("team_left_base_apron", "area", left_base_outer,
       .005, .018, 3, 40, "absolute", .4, .9));
     terrain_features.push_back(feature("team_right_base_apron", "area", right_base_outer,

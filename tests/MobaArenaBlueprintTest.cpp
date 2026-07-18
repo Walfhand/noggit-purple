@@ -257,14 +257,17 @@ int main()
     {
       ++jungle_reliefs;
       require(feature.priority > 20 && feature.priority < 55
-                && feature.transition_width_ratio <= .015f,
+                && feature.transition_width_ratio <= .015f
+                && feature.roughness_amplitude <= 2.01f,
               "jungle relief must stay compact and yield to paths");
     }
     if (feature.name.ends_with("_camp_relief"))
     {
       ++camp_reliefs;
       require(feature.priority > 55 && feature.priority < 60
-                && feature.transition_width_ratio <= .015f,
+                && feature.transition_width_ratio <= .015f
+                && std::abs(feature.points.front().height - 40.0f) <= .01f
+                && feature.roughness_amplitude <= .81f,
               "camp relief must merge into the jungle around explicit accesses");
     }
     if (feature.name.ends_with("_camp_access"))
@@ -272,6 +275,7 @@ int main()
       ++camp_accesses;
       require(feature.priority > 66 && feature.priority < 68
                 && feature.transition_width_ratio <= .01f
+                && feature.half_width_ratio >= .011f
                 && feature.points.size() == 2,
               "camp accesses must cut narrow openings through the relief");
       camp_entrances += 2;
@@ -280,7 +284,12 @@ int main()
     {
       ++camp_floors;
       require(feature.priority > 65 && feature.priority < 70
-                && feature.transition_width_ratio <= .011f,
+                && feature.transition_width_ratio <= .011f
+                && feature.points.size() == 6
+                && std::hypot(feature.points[0].u - feature.points[3].u,
+                              feature.points[0].v - feature.points[3].v) >= .07f
+                && feature.texture_layer == 1
+                && feature.texture_strength >= .49f,
               "camp floors must cut compact, playable clearings");
     }
     require(!feature.name.ends_with("_defender_gate"),

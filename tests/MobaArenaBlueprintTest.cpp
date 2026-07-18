@@ -110,6 +110,8 @@ int main()
           && first.at("topology").at("objective_pits") == 2
           && first.at("topology").at("fortified_bases") == 2
           && first.at("topology").at("jungle_camps") == 12
+          && first.at("topology").at("camp_alcoves") == 12
+          && first.at("topology").at("camp_entrances") == 24
           && first.at("topology").at("jungle_floors") == 4
           && first.at("topology").at("jungle_wall_bands") == 0
           && first.at("topology").at("base_wall_bands") == 2
@@ -226,7 +228,7 @@ int main()
   std::size_t lanes = 0;
   for (auto const& feature : terrain.layout->features)
     if (feature.name.ends_with("_lane")) ++lanes;
-  require(lanes == 3 && terrain.layout->features.size() == 39,
+  require(lanes == 3 && terrain.layout->features.size() == 63,
           "terrain topology is incomplete");
   require(terrain.layout->features.front().name == "arena_ground",
           "the whole arena needs a flat textured background feature");
@@ -235,6 +237,10 @@ int main()
   std::size_t jungle_masses = 0;
   std::size_t jungle_reliefs = 0;
   std::size_t jungle_paths = 0;
+  std::size_t camp_reliefs = 0;
+  std::size_t camp_accesses = 0;
+  std::size_t camp_entrances = 0;
+  std::size_t camp_floors = 0;
   for (auto const& feature : terrain.layout->features)
   {
     if (feature.name.ends_with("_base_apron")) ++base_aprons;
@@ -254,6 +260,29 @@ int main()
                 && feature.transition_width_ratio <= .015f,
               "jungle relief must stay compact and yield to paths");
     }
+    if (feature.name.ends_with("_camp_relief"))
+    {
+      ++camp_reliefs;
+      require(feature.priority > 55 && feature.priority < 60
+                && feature.transition_width_ratio <= .015f,
+              "camp relief must merge into the jungle around explicit accesses");
+    }
+    if (feature.name.ends_with("_camp_access"))
+    {
+      ++camp_accesses;
+      require(feature.priority > 66 && feature.priority < 68
+                && feature.transition_width_ratio <= .01f
+                && feature.points.size() == 2,
+              "camp accesses must cut narrow openings through the relief");
+      camp_entrances += 2;
+    }
+    if (feature.name.ends_with("_camp_floor"))
+    {
+      ++camp_floors;
+      require(feature.priority > 65 && feature.priority < 70
+                && feature.transition_width_ratio <= .011f,
+              "camp floors must cut compact, playable clearings");
+    }
     require(!feature.name.ends_with("_defender_gate"),
             "bases must not rely on artificial defender ridges");
   }
@@ -261,6 +290,10 @@ int main()
           "fortified base topology is incomplete");
   require(jungle_masses == 4 && jungle_reliefs == 4 && jungle_paths == 8,
           "jungle floors, reliefs or paths are incomplete");
+  require(camp_reliefs == 12 && camp_accesses == 12 && camp_floors == 12,
+          "every jungle camp needs one relief alcove, explicit entrances and one flat clearing");
+  require(camp_entrances == 24,
+          "every camp must keep exactly two controlled entrances");
   std::vector<std::size_t> feature_cores(terrain.layout->features.size());
   std::array<std::size_t, Noggit::Ai::procedural_layout_max_texture_paths>
     strong_texture_pixels{};
@@ -294,18 +327,73 @@ int main()
       throw std::runtime_error(std::string{message} + ": " + std::to_string(height));
   };
   auto const lane_height = sampleHeight(.50f, .50f);
-  auto const jungle_height = sampleHeight(.50f, .12f);
-  auto const path_height = sampleHeight(.4075f, .1975f);
+  auto const jungle_height = sampleHeight(.58f, .14f);
+  auto const path_height = sampleHeight(.539f, .37f);
   require(lane_height >= 17.0f && lane_height <= 23.0f,
           "mid lane must stay at playable base height");
   require(jungle_height >= lane_height + 8.0f
             && jungle_height <= lane_height + 32.0f,
           "jungle floor must rise above the lanes");
-  require(path_height >= lane_height + 1.0f
-            && path_height <= lane_height + 5.0f,
-          "jungle main path must terrace between lane and jungle floor");
-  require(sampleHeight(.50f, .22f) >= lane_height + 4.0f,
-          "camp clearings must sit level with the raised jungle floor");
+  if (path_height < lane_height + 1.0f || path_height > lane_height + 5.0f)
+    throw std::runtime_error("jungle main path must terrace between lane and jungle floor: "
+      + std::to_string(path_height));
+  struct CampProbe { float u; float v; };
+  auto const camps = std::array{
+    CampProbe{.40f, .14f}, CampProbe{.50f, .19f}, CampProbe{.64f, .22f},
+    CampProbe{.83f, .43f}, CampProbe{.68f, .50f}, CampProbe{.82f, .56f},
+    CampProbe{.60f, .86f}, CampProbe{.50f, .81f}, CampProbe{.36f, .78f},
+    CampProbe{.17f, .57f}, CampProbe{.32f, .50f}, CampProbe{.18f, .44f}
+  };
+  for (auto const& camp : camps)
+  {
+    auto const center = sampleHeight(camp.u, camp.v);
+    require(center >= lane_height + 4.0f && center <= lane_height + 9.0f,
+            "camp clearings must stay flat below their surrounding relief");
+    std::array<bool, 16> open{};
+    auto raised_rim_samples = std::size_t{0};
+    for (std::size_t i = 0; i < open.size(); ++i)
+    {
+      auto const angle = static_cast<float>(i) * 6.283185307f / 16.0f;
+      auto const rim_height = sampleHeight(
+        camp.u + std::cos(angle) * .06f,
+        camp.v + std::sin(angle) * .06f);
+      raised_rim_samples += rim_height >= center + 8.0f;
+      open[i] = rim_height <= center + 4.0f;
+    }
+    auto access_groups = std::size_t{0};
+    for (std::size_t i = 0; i < open.size(); ++i)
+      access_groups += open[i] && !open[(i + open.size() - 1) % open.size()];
+    if (raised_rim_samples < 10)
+      throw std::runtime_error("camp clearing lacks surrounding relief at "
+        + std::to_string(camp.u) + "," + std::to_string(camp.v) + ": "
+        + std::to_string(raised_rim_samples));
+    require(access_groups == 2,
+            "camp clearings must expose exactly two controlled accesses");
+    for (auto const& feature : terrain.layout->features)
+      if (feature.name.starts_with("jungle_") && feature.name.ends_with("_path"))
+        require(Noggit::Ai::distanceToProceduralShape(
+                  feature.points, feature.shape, camp.u, camp.v, 1, 1).distance
+                  > feature.half_width_ratio,
+                "camp centers must stay outside broad jungle paths");
+  }
+  auto const objective_centers = std::array{
+    std::pair{.34f, .27f}, std::pair{.66f, .73f}};
+  auto const objective_offsets = std::array{
+    std::pair{0.0f, 0.0f}, std::pair{-.055f, 0.0f},
+    std::pair{-.0275f, -.0473f}, std::pair{.0275f, -.0473f},
+    std::pair{.055f, 0.0f}, std::pair{.0275f, .0473f},
+    std::pair{-.0275f, .0473f}};
+  for (auto const& objective : objective_centers)
+    for (auto const& offset : objective_offsets)
+    {
+      auto const sample = Noggit::Ai::sampleProceduralLayout(
+        *terrain.layout, objective.first + offset.first,
+        objective.second + offset.second,
+        0.0f, 0.0f, 1600.0f, 1600.0f);
+      require(std::abs(sample.height - (lane_height - 1.0f)) <= .75f
+                && sample.quantized_weights[2] >= 240,
+              "objective pits must keep their full flat, muddy footprint");
+    }
   require(sampleHeight(.02f, .98f) >= lane_height + 1.0f,
           "base apron must rise above the lanes");
   require(sampleHeight(.10f, .85f) >= lane_height + 2.5f,
@@ -379,7 +467,7 @@ int main()
       require(jungle_layers.contains("jungle_" + std::to_string(quadrant) + "_" + role),
               "every jungle quadrant needs canopy, understory and rocks");
   require(walls.scatter->exclusions.size() <= 96
-            && vegetation.scatter->exclusions.size() == 28,
+            && vegetation.scatter->exclusions.size() == 40,
           "base chains carry their own openings; only repair openings and the "
           "vegetation exclusions remain");
   // Openings and continuity are structural now: probe candidate positions.

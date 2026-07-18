@@ -102,10 +102,11 @@ the liquid type, decorative assets and bounded style parameters; the blueprint
 returns exact arguments for the existing terrain, liquid and scatter tools. Its
 square-map template places fortified bases in opposite corners, side lanes along
 the perimeter, mid and river on opposing diagonals, four raised jungle sectors,
-twelve protected camp clearings and two epic objective pits. Irregular nested
-terrain masses create rocky jungle boundaries; higher-priority paths and camps
-cut readable passages through them, while constructed walls remain at the two
-bases. Scatter preflight counts only regions that actually intersect a
+twelve camp clearings nested inside continuous relief and two epic objective
+pits. Each off-path camp keeps exactly two readable entrances and a flat combat
+floor; lanes, riverbanks and objective pits retain their complete footprint,
+while constructed walls remain at the two bases. Scatter
+preflight counts only regions that actually intersect a
 tile, so a 2x2 arena does not multiply candidates across unrelated tiles.
 Generic tools remain available unchanged for non-MOBA maps.
 The main viewport also approximates native texture GroundEffects with transient

@@ -310,12 +310,35 @@ namespace Noggit::Ai
     auto relief_polygons = jungle_polygons;
     for (auto& polygon : relief_polygons)
       polygon = offsetLoopInward(polygon, .055, relief_top);
-    struct Camp { char const* name; double u; double v; };
+    struct Camp
+    {
+      char const* name;
+      double u;
+      double v;
+      double access_u;
+      double access_v;
+    };
     auto const camps = std::array{
-      Camp{"north_wolves", .31, .20}, Camp{"north_blue", .50, .22}, Camp{"north_gromp", .69, .20},
-      Camp{"east_raptors", .80, .32}, Camp{"east_red", .78, .50}, Camp{"east_krugs", .80, .68},
-      Camp{"south_wolves", .69, .80}, Camp{"south_blue", .50, .78}, Camp{"south_gromp", .32, .80},
-      Camp{"west_raptors", .20, .68}, Camp{"west_red", .22, .50}, Camp{"west_krugs", .20, .32}
+      Camp{"north_wolves", .40, .14, 0, 1},
+      Camp{"north_blue", .50, .19, 0, 1},
+      Camp{"north_gromp", .64, .22, 0, 1},
+      Camp{"east_raptors", .83, .43, 1, 0},
+      Camp{"east_red", .68, .50, 1, 0},
+      Camp{"east_krugs", .82, .56, 1, 0},
+      Camp{"south_wolves", .60, .86, 0, 1},
+      Camp{"south_blue", .50, .81, 0, 1},
+      Camp{"south_gromp", .36, .78, 0, 1},
+      Camp{"west_raptors", .17, .57, 1, 0},
+      Camp{"west_red", .32, .50, 1, 0},
+      Camp{"west_krugs", .18, .44, 1, 0}
+    };
+    auto campAccess = [&](Camp const& camp, double height)
+    {
+      return nlohmann::json::array({
+        point(camp.u - camp.access_u * .085,
+              camp.v - camp.access_v * .085, height),
+        point(camp.u + camp.access_u * .085,
+              camp.v + camp.access_v * .085, height)});
     };
     auto const objective_north = hexArea(.34, .27, .055, base - 1);
     auto const objective_south = hexArea(.66, .73, .055, base - 1);
@@ -422,10 +445,31 @@ namespace Noggit::Ai
       terrain_features.push_back(feature("jungle_" + std::to_string(i + 1) + "_relief", "area",
         relief_polygons[i], .008, .014, 0, 35, "absolute",
         roughness * .55, .72));
+    // A short capsule merges into the continuous jungle relief; the camp
+    // floor cuts an enclave instead of a repeated circular crater.
+    for (auto const& camp : camps)
+    {
+      auto const tangent_u = -camp.access_v;
+      auto const tangent_v = camp.access_u;
+      auto const camp_relief = nlohmann::json::array({
+        point(camp.u - tangent_u * .028, camp.v - tangent_v * .028, relief_top),
+        point(camp.u + tangent_u * .028, camp.v + tangent_v * .028, relief_top)});
+      terrain_features.push_back(feature(std::string{camp.name} + "_camp_relief",
+        "corridor", camp_relief, .072, .012, 0, 59,
+        "absolute", roughness * .25, .72));
+    }
     for (std::size_t i = 0; i < jungle_paths.size(); ++i)
       terrain_features.push_back(feature("jungle_" + std::to_string(i / 2 + 1)
         + (i % 2 == 0 ? "_main_path" : "_branch_path"), "corridor",
         jungle_paths[i], .022, .018, 0, 55, "absolute", .6, .65, .12));
+    // Two narrow opposite cuts connect each off-path camp while most of the
+    // capsule remains raised as a continuous enclave.
+    for (auto const& camp : camps)
+    {
+      auto access = campAccess(camp, jungle_top);
+      terrain_features.push_back(feature(std::string{camp.name} + "_camp_access",
+        "corridor", access, .009, .006, 0, 67, "absolute", .3, .5));
+    }
     // Narrow deep channel with long submerged banks: the shoreline lands on
     // the gentle underwater slope, so edge water is shallow and fades out
     // instead of meeting the bank at full depth.
@@ -436,11 +480,11 @@ namespace Noggit::Ai
       objective_north, .005, .025, 2, 65));
     terrain_features.push_back(feature("objective_south", "area",
       objective_south, .005, .025, 2, 65));
-    // Flat clearings so camps sit on level ground within the raised,
-    // noisy jungle floor.
+    // Flat combat spaces win over nearby river/objective transitions while
+    // leaving the surrounding relief visible at every camp.
     for (auto const& camp : camps)
       terrain_features.push_back(feature(std::string{camp.name} + "_camp_floor",
-        "area", hexArea(camp.u, camp.v, .03, jungle_top), .005, .02, 0, 58,
+        "area", hexArea(camp.u, camp.v, .03, jungle_top), .005, .01, 0, 68,
         "absolute", .5, .4));
     terrain_features.push_back(feature("team_left_base_apron", "area", left_base_outer,
       .005, .018, 3, 40, "absolute", .4, .9));
@@ -665,8 +709,13 @@ namespace Noggit::Ai
       vegetation_exclusions.push_back(
         exclusion("corridor", withoutHeight(jungle_paths[i]), .025));
     for (auto const& camp : camps)
+    {
       vegetation_exclusions.push_back(exclusion("area",
         withoutHeight(hexArea(camp.u, camp.v, .035, base)), .012));
+      auto access = campAccess(camp, base);
+      vegetation_exclusions.push_back(
+        exclusion("corridor", withoutHeight(access), .02));
+    }
 
     // --- Connectivity guarantee -------------------------------------------
     // Wall chains follow region loops with openings cut by exclusions, and
@@ -1093,7 +1142,9 @@ namespace Noggit::Ai
       {"topology", {{"lanes", 3}, {"bases", 2}, {"river", 1},
                     {"objective_pits", 2}, {"jungle_regions", 4},
                     {"elevation_tiers", 4}, {"camp_clearings", 12},
-                    {"jungle_camps", 12}, {"jungle_floors", 4},
+                    {"jungle_camps", 12}, {"camp_alcoves", 12},
+                    {"camp_entrances", 24},
+                    {"jungle_floors", 4},
                     {"jungle_wall_bands", 0}, {"base_wall_bands", 2},
                     {"jungle_path_wall_bands", 0},
                     {"jungle_gates", 0},

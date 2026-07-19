@@ -18,7 +18,7 @@ namespace Noggit::Ai
   namespace
   {
     constexpr std::size_t max_points_per_feature = 16;
-    constexpr std::size_t max_total_segments = 256;
+    constexpr std::size_t max_total_segments = 512;
     constexpr float minimum_layout_height = -500.0f;
     constexpr float maximum_layout_height = 5000.0f;
 
@@ -603,7 +603,7 @@ namespace Noggit::Ai
         ? points.size() : points.size() - 1;
       if (total_segments > max_total_segments)
       {
-        return fail("Le layout ne peut pas dépasser 256 segments au total.");
+        return fail("Le layout ne peut pas dépasser 512 segments au total.");
       }
       for (auto const& point_value : points)
       {
@@ -685,6 +685,18 @@ namespace Noggit::Ai
         return fail("width_variation_ratio doit être dans [0,0.75].");
       }
       used_layers[feature.texture_layer] = true;
+      feature.min_u = feature.max_u = feature.points.front().u;
+      feature.min_v = feature.max_v = feature.points.front().v;
+      feature.min_height = feature.max_height = feature.points.front().height;
+      for (auto const& bound_point : feature.points)
+      {
+        feature.min_u = std::min(feature.min_u, bound_point.u);
+        feature.max_u = std::max(feature.max_u, bound_point.u);
+        feature.min_v = std::min(feature.min_v, bound_point.v);
+        feature.max_v = std::max(feature.max_v, bound_point.v);
+        feature.min_height = std::min(feature.min_height, bound_point.height);
+        feature.max_height = std::max(feature.max_height, bound_point.height);
+      }
       layout.features.emplace_back(std::move(feature));
     }
 
@@ -740,14 +752,50 @@ namespace Noggit::Ai
 
     auto const feature_count = std::min(
       layout.features.size(), procedural_layout_max_features);
-    // ponytail: O(samples * segments) is bounded by 256 segments; add a
-    // spatial index only if profiling shows large layouts need it.
+    constexpr float degrees_to_radians_gradient = 0.017453292519943295f;
+    auto const slope_widening_gradient = layout.max_slope_degrees
+        && std::isfinite(*layout.max_slope_degrees)
+        && *layout.max_slope_degrees >= 5.0f
+        && *layout.max_slope_degrees <= 60.0f
+      ? std::optional<float>(std::tan(
+          *layout.max_slope_degrees * degrees_to_radians_gradient))
+      : std::nullopt;
+    // Bounding-box cull with a conservative influence reach (widened
+    // transitions and edge noise included) keeps large layouts affordable:
+    // the per-sample cost is dominated by the few features actually nearby.
     for (std::size_t index = 0; index < feature_count; ++index)
     {
       auto const& feature = layout.features[index];
       if (feature.points.empty())
       {
         continue;
+      }
+      {
+        auto const height_delta_bound = feature.roughness_amplitude
+          + (feature.height_mode == ProceduralLayoutHeightMode::Offset
+             ? std::max(std::abs(feature.min_height), std::abs(feature.max_height))
+             : std::max(std::abs(feature.min_height - sample.height),
+                        std::abs(feature.max_height - sample.height)));
+        auto transition_bound = feature.transition_width_ratio;
+        if (slope_widening_gradient)
+        {
+          transition_bound = std::max(transition_bound,
+            1.5f * height_delta_bound
+              / (*slope_widening_gradient * minimum_dimension));
+        }
+        auto const reach = feature.half_width_ratio
+            * (1.0f + feature.width_variation_ratio)
+          + transition_bound + layout.edge_noise_ratio;
+        auto const outside_x = std::max({feature.min_u * scale_x - sample_x,
+                                         sample_x - feature.max_u * scale_x,
+                                         0.0f});
+        auto const outside_z = std::max({feature.min_v * scale_z - sample_z,
+                                         sample_z - feature.max_v * scale_z,
+                                         0.0f});
+        if (outside_x * outside_x + outside_z * outside_z > reach * reach)
+        {
+          continue;
+        }
       }
       auto const nearest = distanceToProceduralShape(
         feature.points, feature.shape, sample_x, sample_z, scale_x, scale_z);

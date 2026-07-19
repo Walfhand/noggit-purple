@@ -103,9 +103,10 @@ returns exact arguments for the existing terrain, liquid and scatter tools. Its
 square-map template places fortified bases in opposite corners, side lanes along
 the perimeter, mid and river on opposing diagonals, four raised jungle sectors,
 twelve camp clearings nested inside continuous relief and two epic objective
-pits. Each off-path camp keeps exactly two readable entrances and a flat combat
-floor; lanes, riverbanks and objective pits retain their complete footprint,
-while constructed walls remain at the two bases. Scatter
+pits. Each quadrant uses a buff-centred graph with five doors, a through-route
+for the medium camp and a short spur for the small camp; lanes, riverbanks and
+objective pits retain their complete footprint, while constructed walls remain
+at the two bases. Scatter
 preflight counts only regions that actually intersect a
 tile, so a 2x2 arena does not multiply candidates across unrelated tiles.
 Generic tools remain available unchanged for non-MOBA maps.

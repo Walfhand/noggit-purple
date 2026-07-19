@@ -14,7 +14,7 @@
 
 namespace Noggit::Ai
 {
-  inline constexpr std::size_t procedural_layout_max_features = 64;
+  inline constexpr std::size_t procedural_layout_max_features = 96;
   inline constexpr std::size_t procedural_layout_max_texture_paths = 16;
 
   enum class ProceduralLayoutShape : std::uint8_t
@@ -72,6 +72,14 @@ namespace Noggit::Ai
     float roughness_amplitude = 0.0f;
     float texture_strength = 1.0f;
     float width_variation_ratio = 0.0f;
+    // Sampling cull bounds, tightened by parseProceduralLayout. The defaults
+    // cover the whole layout so hand-built features stay correct (no cull).
+    float min_u = 0.0f;
+    float max_u = 1.0f;
+    float min_v = 0.0f;
+    float max_v = 1.0f;
+    float min_height = -500.0f;
+    float max_height = 5000.0f;
   };
 
   struct ProceduralLayoutSteep

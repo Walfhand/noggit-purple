@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <map>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -111,17 +112,25 @@ int main()
           && first.at("topology").at("fortified_bases") == 2
           && first.at("topology").at("jungle_camps") == 12
           && first.at("topology").at("camp_alcoves") == 12
-          && first.at("topology").at("camp_entrances") == 24
+          && first.at("topology").at("camp_entrances") == 32
+          && first.at("topology").at("jungle_clear_routes") == 4
+          && first.at("topology").at("river_branch_paths") == 4
           && first.at("topology").at("jungle_floors") == 4
           && first.at("topology").at("jungle_wall_bands") == 0
           && first.at("topology").at("base_wall_bands") == 2
           && first.at("topology").at("jungle_path_wall_bands") == 0
-          && first.at("topology").at("jungle_paths") == 8
+          && first.at("topology").at("jungle_paths") == 16
+          && first.at("topology").at("jungle_wall_cuts") == 8
+          && first.at("topology").at("door_paths") == 4
+          && first.at("topology").at("jungle_doors") == 20
+          && first.at("topology").at("camp_rings") == 0
           && first.at("topology").at("public_entrances_per_base") == 3
           && first.at("topology").at("landmarks") == 4
           && first.at("topology").at("camp_braziers") == 12
           && first.at("topology").at("entrance_braziers") == 12,
           "fixed MOBA topology changed");
+  require(first.at("topology").at("jungle_wall_masses").get<std::size_t>() == 16,
+          "the jungle needs four separate wall islands per quadrant");
   require(first.at("topology").at("lane_lamps").get<std::size_t>() >= 30
             && first.at("topology").at("dynamic_lights").get<std::size_t>() >= 40,
           "the ambience layer lost its lamps or dynamic lights");
@@ -228,58 +237,69 @@ int main()
   std::size_t lanes = 0;
   for (auto const& feature : terrain.layout->features)
     if (feature.name.ends_with("_lane")) ++lanes;
-  require(lanes == 3 && terrain.layout->features.size() == 63,
-          "terrain topology is incomplete");
+  require(lanes == 3, "terrain topology is incomplete");
   require(terrain.layout->features.front().name == "arena_ground",
           "the whole arena needs a flat textured background feature");
   std::size_t base_aprons = 0;
   std::size_t base_inner_courts = 0;
-  std::size_t jungle_masses = 0;
-  std::size_t jungle_reliefs = 0;
   std::size_t jungle_paths = 0;
-  std::size_t camp_reliefs = 0;
-  std::size_t camp_accesses = 0;
-  std::size_t camp_entrances = 0;
+  std::size_t jungle_wall_cuts = 0;
+  std::size_t jungle_wall_masses = 0;
   std::size_t camp_floors = 0;
   for (auto const& feature : terrain.layout->features)
   {
     if (feature.name.ends_with("_base_apron")) ++base_aprons;
     if (feature.name.ends_with("_inner_court")) ++base_inner_courts;
-    if (feature.name.starts_with("jungle_") && feature.name.ends_with("_mass"))
+    if (feature.name.starts_with("jungle_") && feature.name.ends_with("_path"))
     {
-      ++jungle_masses;
-      require(feature.roughness_amplitude >= 5.0f
-                && feature.transition_width_ratio <= .025f,
-              "jungle borders must come from rough, compact relief");
+      ++jungle_paths;
+      auto const influence = feature.half_width_ratio
+        * (1.0f + feature.width_variation_ratio)
+        + feature.transition_width_ratio;
+      require(feature.half_width_ratio >= .010f
+                && influence <= .023f
+                && feature.texture_layer == 0
+                && feature.texture_strength >= .90f,
+              "jungle paths must stay narrow and visually legible");
     }
-    if (feature.name.starts_with("jungle_") && feature.name.ends_with("_path")) ++jungle_paths;
-    if (feature.name.starts_with("jungle_") && feature.name.ends_with("_relief"))
+    if (feature.name.starts_with("jungle_")
+        && feature.name.ends_with("_wall_cut"))
     {
-      ++jungle_reliefs;
-      require(feature.priority > 20 && feature.priority < 55
+      ++jungle_wall_cuts;
+      require(feature.shape == Noggit::Ai::ProceduralLayoutShape::Corridor
+                && feature.half_width_ratio >= .007f
+                && feature.half_width_ratio <= .009f
+                && feature.transition_width_ratio <= .005f
+                && feature.texture_layer == 0
+                && feature.texture_strength >= .90f,
+              "wall cuts must form thin grass passages through broad masses");
+    }
+    if (feature.name.starts_with("jungle_")
+        && feature.name.ends_with("_wall_mass"))
+    {
+      ++jungle_wall_masses;
+      auto twice_area = 0.0f;
+      for (std::size_t i = 0; i < feature.points.size(); ++i)
+      {
+        auto const& a = feature.points[i];
+        auto const& b = feature.points[(i + 1) % feature.points.size()];
+        twice_area += a.u * b.v - b.u * a.v;
+      }
+      auto const area = std::abs(twice_area) * .5f;
+      require(feature.shape == Noggit::Ai::ProceduralLayoutShape::Area
                 && feature.transition_width_ratio <= .015f
-                && feature.roughness_amplitude <= 2.01f,
-              "jungle relief must stay compact and yield to paths");
+                && area >= .010f && area <= .070f
+                && feature.points.front().height >= 33.0f
+                && feature.points.front().height <= 35.0f,
+              "jungle walls must be medium irregular islands");
     }
-    if (feature.name.ends_with("_camp_relief"))
-    {
-      ++camp_reliefs;
-      require(feature.priority > 55 && feature.priority < 60
-                && feature.transition_width_ratio <= .015f
-                && std::abs(feature.points.front().height - 40.0f) <= .01f
-                && feature.roughness_amplitude <= .81f,
-              "camp relief must merge into the jungle around explicit accesses");
-    }
-    if (feature.name.ends_with("_camp_access"))
-    {
-      ++camp_accesses;
-      require(feature.priority > 66 && feature.priority < 68
-                && feature.transition_width_ratio <= .01f
-                && feature.half_width_ratio >= .011f
-                && feature.points.size() == 2,
-              "camp accesses must cut narrow openings through the relief");
-      camp_entrances += 2;
-    }
+    require(!feature.name.starts_with("jungle_strand_")
+              && !feature.name.ends_with("_ring"),
+            "isolated wall strands and repeated rings must not shape the jungle");
+    require(!feature.name.ends_with("_camp_relief")
+              && !feature.name.ends_with("_camp_access"),
+            "the wall-by-default relief encloses camps without per-camp "
+            "capsules or access cuts");
     if (feature.name.ends_with("_camp_floor"))
     {
       ++camp_floors;
@@ -287,9 +307,11 @@ int main()
                 && feature.transition_width_ratio <= .011f
                 && feature.points.size() == 6
                 && std::hypot(feature.points[0].u - feature.points[3].u,
-                              feature.points[0].v - feature.points[3].v) >= .07f
-                && feature.texture_layer == 1
-                && feature.texture_strength >= .49f,
+                              feature.points[0].v - feature.points[3].v) >= .04f
+                && feature.points.front().height >= 21.0f
+                && feature.points.front().height <= 22.0f
+                && feature.texture_layer == 0
+                && feature.texture_strength >= .90f,
               "camp floors must cut compact, playable clearings");
     }
     require(!feature.name.ends_with("_defender_gate"),
@@ -297,12 +319,38 @@ int main()
   }
   require(base_aprons == 2 && base_inner_courts == 2,
           "fortified base topology is incomplete");
-  require(jungle_masses == 4 && jungle_reliefs == 4 && jungle_paths == 8,
-          "jungle floors, reliefs or paths are incomplete");
-  require(camp_reliefs == 12 && camp_accesses == 12 && camp_floors == 12,
-          "every jungle camp needs one relief alcove, explicit entrances and one flat clearing");
-  require(camp_entrances == 24,
-          "every camp must keep exactly two controlled entrances");
+  require(jungle_paths == 16,
+          "jungle routes or gank furrows are incomplete");
+  require(jungle_wall_cuts == 8,
+          "each jungle quadrant needs two thin cuts through broad wall masses");
+  require(jungle_wall_masses == 16,
+          "the jungle needs four separate wall islands per quadrant");
+  require(camp_floors == 12,
+          "every jungle camp needs one flat clearing carved from the wall");
+  auto longest_wall_segment = 0.0f;
+  auto longest_path_segment = 0.0f;
+  for (auto const& feature : terrain.layout->features)
+  {
+    auto const wall = feature.name.starts_with("jungle_")
+      && feature.name.ends_with("_wall_mass");
+    auto const path = feature.name.starts_with("jungle_")
+      && feature.name.ends_with("_path");
+    if ((!wall && !path) || feature.points.size() < 2) continue;
+    if (wall)
+      require(feature.points.size() >= 12,
+              "jungle wall silhouettes must use articulated organic loops");
+    auto const edge_count = feature.points.size() - (path ? 1 : 0);
+    for (std::size_t i = 0; i < edge_count; ++i)
+    {
+      auto const& a = feature.points[i];
+      auto const& b = feature.points[(i + 1) % feature.points.size()];
+      auto const length = std::hypot(b.u - a.u, b.v - a.v);
+      (wall ? longest_wall_segment : longest_path_segment)
+        = std::max(wall ? longest_wall_segment : longest_path_segment, length);
+    }
+  }
+  require(longest_wall_segment <= .11f && longest_path_segment <= .13f,
+          "jungle walls and routes must not contain long straight spokes");
   std::vector<std::size_t> feature_cores(terrain.layout->features.size());
   std::array<std::size_t, Noggit::Ai::procedural_layout_max_texture_paths>
     strong_texture_pixels{};
@@ -317,9 +365,11 @@ int main()
       for (std::size_t layer = 0; layer < terrain.layout->texture_paths.size(); ++layer)
         strong_texture_pixels[layer] += sample.quantized_weights[layer] >= 64;
     }
+  // The in-app apply_terrain_layout_on_map aborts the whole blueprint chain
+  // when ANY feature keeps no effective core pixel, so this check must stay
+  // exemption-free.
   for (std::size_t i = 0; i < feature_cores.size(); ++i)
-    if (feature_cores[i] == 0
-        && !terrain.layout->features[i].name.ends_with("_mass"))
+    if (feature_cores[i] == 0)
       throw std::runtime_error("missing effective core: " + terrain.layout->features[i].name);
   for (std::size_t layer = 0; layer < terrain.layout->texture_paths.size(); ++layer)
     require(strong_texture_pixels[layer] >= 64,
@@ -336,27 +386,70 @@ int main()
       throw std::runtime_error(std::string{message} + ": " + std::to_string(height));
   };
   auto const lane_height = sampleHeight(.50f, .50f);
-  auto const jungle_height = sampleHeight(.58f, .14f);
-  auto const path_height = sampleHeight(.539f, .37f);
+  auto const jungle_height = sampleHeight(.4302f, .2788f);
+  auto const path_height = sampleHeight(.165f, .5925f);
+  auto const path_core = Noggit::Ai::sampleProceduralLayout(
+    *terrain.layout, .2775f, .5375f, 0.0f, 0.0f, 1600.0f, 1600.0f);
   require(lane_height >= 17.0f && lane_height <= 23.0f,
           "mid lane must stay at playable base height");
   require(jungle_height >= lane_height + 8.0f
             && jungle_height <= lane_height + 32.0f,
           "jungle floor must rise above the lanes");
-  if (path_height < lane_height + 1.0f || path_height > lane_height + 5.0f)
-    throw std::runtime_error("jungle main path must terrace between lane and jungle floor: "
+  if (path_height < lane_height + .5f || path_height > lane_height + 3.0f)
+    throw std::runtime_error("jungle trails must stay level with the open floor: "
       + std::to_string(path_height));
-  struct CampProbe { float u; float v; };
+  require(path_core.height >= lane_height + .5f
+            && path_core.height <= lane_height + 3.0f
+            && path_core.quantized_weights[0] >= 200
+            && path_core.quantized_weights[1] <= 32,
+          "internal jungle paths must remain low and visually legible");
+  {
+    auto framed_samples = std::size_t{0};
+    auto route_samples = std::size_t{0};
+    for (auto const& path : terrain.layout->features)
+    {
+      if (!path.name.starts_with("jungle_") || !path.name.ends_with("_path"))
+        continue;
+      for (std::size_t part = 1; part < path.points.size(); ++part)
+      {
+        auto const du = path.points[part].u - path.points[part - 1].u;
+        auto const dv = path.points[part].v - path.points[part - 1].v;
+        auto const length = std::hypot(du, dv);
+        if (length <= .000001f) continue;
+        for (int step = 1; step < 8; ++step)
+        {
+          auto const t = static_cast<float>(step) / 8.0f;
+          auto const u = path.points[part - 1].u + du * t;
+          auto const v = path.points[part - 1].v + dv * t;
+          auto const normal_u = -dv / length * .04f;
+          auto const normal_v = du / length * .04f;
+          ++route_samples;
+          framed_samples += sampleHeight(u + normal_u, v + normal_v)
+                >= lane_height + 8.0f
+            || sampleHeight(u - normal_u, v - normal_v)
+                >= lane_height + 8.0f;
+        }
+      }
+    }
+    require(framed_samples * 5 >= route_samples * 3,
+            "jungle walls must frame routes instead of floating as islands");
+  }
+  struct CampProbe { float u; float v; int kind; };
   auto const camps = std::array{
-    CampProbe{.40f, .14f}, CampProbe{.50f, .19f}, CampProbe{.64f, .22f},
-    CampProbe{.83f, .43f}, CampProbe{.68f, .50f}, CampProbe{.82f, .56f},
-    CampProbe{.60f, .86f}, CampProbe{.50f, .81f}, CampProbe{.36f, .78f},
-    CampProbe{.17f, .57f}, CampProbe{.32f, .50f}, CampProbe{.18f, .44f}
+    CampProbe{.50f, .335f, 1}, CampProbe{.48f, .25f, 2},
+    CampProbe{.435f, .18f, 0},
+    CampProbe{.745f, .435f, 1}, CampProbe{.74f, .53f, 2},
+    CampProbe{.85f, .565f, 0},
+    CampProbe{.50f, .665f, 1}, CampProbe{.52f, .75f, 2},
+    CampProbe{.565f, .82f, 0},
+    CampProbe{.255f, .565f, 1}, CampProbe{.26f, .47f, 2},
+    CampProbe{.15f, .435f, 0}
   };
+
   for (auto const& camp : camps)
   {
     auto const center = sampleHeight(camp.u, camp.v);
-    require(center >= lane_height + 4.0f && center <= lane_height + 9.0f,
+    require(center >= lane_height + .5f && center <= lane_height + 3.0f,
             "camp clearings must stay flat below their surrounding relief");
     std::array<bool, 16> open{};
     auto raised_rim_samples = std::size_t{0};
@@ -372,21 +465,106 @@ int main()
     auto access_groups = std::size_t{0};
     for (std::size_t i = 0; i < open.size(); ++i)
       access_groups += open[i] && !open[(i + open.size() - 1) % open.size()];
-    if (raised_rim_samples < 10)
+    if (raised_rim_samples
+          < static_cast<std::size_t>(camp.kind == 0 ? 3 : camp.kind == 2 ? 4 : 5))
       throw std::runtime_error("camp clearing lacks surrounding relief at "
         + std::to_string(camp.u) + "," + std::to_string(camp.v) + ": "
         + std::to_string(raised_rim_samples));
-    require(access_groups == 2,
-            "camp clearings must expose exactly two controlled accesses");
+    if (camp.kind == 0 ? (access_groups < 1 || access_groups > 3)
+          : camp.kind == 1 ? (access_groups < 2 || access_groups > 3)
+          : (access_groups < 2 || access_groups > 4))
+      throw std::runtime_error("camp accesses must match the route flow at "
+        + std::to_string(camp.u) + "," + std::to_string(camp.v) + ": "
+        + std::to_string(access_groups));
+    // Buffs and medium camps form the through-route; small camps are spurs.
+    auto on_clear_route = false;
+    auto on_spur = false;
+    auto incident_paths = std::size_t{0};
+    auto path_ends_at_camp = false;
     for (auto const& feature : terrain.layout->features)
       if (feature.name.starts_with("jungle_") && feature.name.ends_with("_path"))
-        require(Noggit::Ai::distanceToProceduralShape(
-                  feature.points, feature.shape, camp.u, camp.v, 1, 1).distance
-                  > feature.half_width_ratio,
-                "camp centers must stay outside broad jungle paths");
+      {
+        auto const on_path = Noggit::Ai::distanceToProceduralShape(
+          feature.points, feature.shape, camp.u, camp.v, 1, 1).distance < .001f;
+        incident_paths += on_path;
+        if (on_path)
+          path_ends_at_camp = std::hypot(feature.points.front().u - camp.u,
+                                        feature.points.front().v - camp.v) < .001f
+            || std::hypot(feature.points.back().u - camp.u,
+                          feature.points.back().v - camp.v) < .001f;
+        on_clear_route = on_clear_route
+          || (on_path && feature.name.ends_with("_clear_path"));
+        on_spur = on_spur || (on_path && feature.name.ends_with("_spur_path"));
+      }
+    require(incident_paths == 1 && !path_ends_at_camp,
+            "camp routes must pass through clearings without star hubs or lollipops");
+    require(camp.kind == 0 ? (!on_clear_route && on_spur) : on_clear_route,
+            "small camps must be spurs while hubs and medium camps stay on the clear route");
+  }
+  // Full-clear invariant: the hub/medium stretch never touches a lane;
+  // the small camp remains reachable as its short internal spur.
+  {
+    std::vector<std::vector<Noggit::Ai::ProceduralLayoutPoint>> lane_lines;
+    for (auto const& feature : terrain.layout->features)
+      if (feature.name.ends_with("_lane"))
+        lane_lines.push_back(feature.points);
+    auto const laneDistance = [&](float u, float v)
+    {
+      auto best = 10.0f;
+      for (auto const& lane : lane_lines)
+        for (std::size_t i = 1; i < lane.size(); ++i)
+        {
+          auto const du = lane[i].u - lane[i - 1].u;
+          auto const dv = lane[i].v - lane[i - 1].v;
+          auto const length_squared = du * du + dv * dv;
+          auto const t = length_squared > 0.0f
+            ? std::clamp(((u - lane[i - 1].u) * du + (v - lane[i - 1].v) * dv)
+                           / length_squared, 0.0f, 1.0f)
+            : 0.0f;
+          best = std::min(best, static_cast<float>(std::hypot(
+            u - (lane[i - 1].u + du * t), v - (lane[i - 1].v + dv * t))));
+        }
+      return best;
+    };
+    auto clear_routes = std::size_t{0};
+    for (auto const& feature : terrain.layout->features)
+    {
+      if (!feature.name.ends_with("_clear_path")) continue;
+      ++clear_routes;
+      require(feature.points.size() >= 4 && feature.points.size() <= 7,
+              "a clear route must chain lane entrance, medium camp, hub and exit");
+      auto first_camp = feature.points.size();
+      auto last_camp = std::size_t{0};
+      auto camp_vertices = std::size_t{0};
+      for (std::size_t point_index = 0;
+           point_index < feature.points.size(); ++point_index)
+        for (auto const& camp : camps)
+          if (camp.kind != 0
+              && std::hypot(feature.points[point_index].u - camp.u,
+                            feature.points[point_index].v - camp.v) < .001f)
+          {
+            first_camp = std::min(first_camp, point_index);
+            last_camp = std::max(last_camp, point_index);
+            ++camp_vertices;
+          }
+      require(camp_vertices == 2 && first_camp < last_camp,
+              "each clear route must visit exactly one medium camp and one hub");
+      for (std::size_t i = first_camp; i < last_camp; ++i)
+        for (int step = 0; step <= 16; ++step)
+        {
+          auto const t = static_cast<float>(step) / 16.0f;
+          auto const u = feature.points[i].u
+            + (feature.points[i + 1].u - feature.points[i].u) * t;
+          auto const v = feature.points[i].v
+            + (feature.points[i + 1].v - feature.points[i].v) * t;
+          require(laneDistance(u, v) > .04f + feature.half_width_ratio,
+                  "the inter-camp clear route must stay clear of every lane");
+        }
+    }
+    require(clear_routes == 4, "every jungle quadrant needs one clear route");
   }
   auto const objective_centers = std::array{
-    std::pair{.34f, .27f}, std::pair{.66f, .73f}};
+    std::pair{.35f, .31f}, std::pair{.65f, .69f}};
   auto const objective_offsets = std::array{
     std::pair{0.0f, 0.0f}, std::pair{-.055f, 0.0f},
     std::pair{-.0275f, -.0473f}, std::pair{.0275f, -.0473f},
@@ -403,6 +581,53 @@ int main()
                 && sample.quantized_weights[2] >= 240,
               "objective pits must keep their full flat, muddy footprint");
     }
+  // Drake and nashor pits open onto the river only: every rim sample away
+  // from the river bed must be sealed by the jungle wall, while the river
+  // side keeps an open mouth.
+  {
+    std::vector<Noggit::Ai::ProceduralLayoutPoint> river_line;
+    for (auto const& feature : terrain.layout->features)
+      if (feature.name == "river_bed") river_line = feature.points;
+    require(!river_line.empty(), "the river bed feature is missing");
+    auto const riverDistance = [&](float u, float v)
+    {
+      auto best = 10.0f;
+      for (std::size_t i = 1; i < river_line.size(); ++i)
+      {
+        auto const du = river_line[i].u - river_line[i - 1].u;
+        auto const dv = river_line[i].v - river_line[i - 1].v;
+        auto const length_squared = du * du + dv * dv;
+        auto const t = length_squared > 0.0f
+          ? std::clamp(((u - river_line[i - 1].u) * du
+                        + (v - river_line[i - 1].v) * dv) / length_squared,
+                       0.0f, 1.0f)
+          : 0.0f;
+        best = std::min(best, static_cast<float>(std::hypot(
+          u - (river_line[i - 1].u + du * t),
+          v - (river_line[i - 1].v + dv * t))));
+      }
+      return best;
+    };
+    for (auto const& objective : objective_centers)
+    {
+      auto river_mouth_samples = std::size_t{0};
+      for (std::size_t i = 0; i < 16; ++i)
+      {
+        auto const angle = static_cast<float>(i) * 6.283185307f / 16.0f;
+        auto const u = objective.first + std::cos(angle) * .085f;
+        auto const v = objective.second + std::sin(angle) * .085f;
+        auto const height = sampleHeight(u, v);
+        if (riverDistance(u, v) > .105f && height < 32.25f)
+          throw std::runtime_error("objective pits must be sealed by the jungle wall at "
+            + std::to_string(u) + "," + std::to_string(v) + ": "
+            + std::to_string(height));
+        else if (height <= 24.0f)
+          ++river_mouth_samples;
+      }
+      require(river_mouth_samples >= 2,
+              "objective pits must keep an open mouth onto the river");
+    }
+  }
   require(sampleHeight(.02f, .98f) >= lane_height + 1.0f,
           "base apron must rise above the lanes");
   require(sampleHeight(.10f, .85f) >= lane_height + 2.5f,
@@ -467,16 +692,24 @@ int main()
   require(std::any_of(vegetation.scatter->regions.begin(), vegetation.scatter->regions.end(),
             [](auto const& region) { return region.role == "rock"; }),
           "decorative rocks must be scattered inside the jungles");
-  std::set<std::string> jungle_layers;
+  std::map<std::string, std::size_t> jungle_layers;
+  auto vegetation_density = std::size_t{0};
+  auto canopy_density = std::size_t{0};
   for (auto const& region : vegetation.scatter->regions)
-    if (region.role == "canopy" || region.role == "understory" || region.role == "rock")
-      jungle_layers.insert(region.name);
-  for (auto const quadrant : {1, 2, 3, 4})
-    for (auto const* role : {"canopy", "understory", "rock"})
-      require(jungle_layers.contains("jungle_" + std::to_string(quadrant) + "_" + role),
-              "every jungle quadrant needs canopy, understory and rocks");
+  {
+    ++jungle_layers[region.role];
+    vegetation_density += region.density_per_tile;
+    if (region.role == "canopy") canopy_density += region.density_per_tile;
+  }
+  require(jungle_layers["canopy"] == jungle_wall_masses
+            && jungle_layers["understory"] == jungle_wall_masses
+            && jungle_layers["rock"] * 2 == jungle_wall_masses
+            && jungle_layers["detail"] * 2 == jungle_wall_masses,
+          "every wall island needs vegetation while rocks and details alternate");
+  require(canopy_density * 2 >= vegetation_density,
+          "the jungle scatter budget must primarily build a visible tree canopy");
   require(walls.scatter->exclusions.size() <= 96
-            && vegetation.scatter->exclusions.size() == 40,
+            && vegetation.scatter->exclusions.size() == 44,
           "base chains carry their own openings; only repair openings and the "
           "vegetation exclusions remain");
   // Openings and continuity are structural now: probe candidate positions.
@@ -498,13 +731,13 @@ int main()
             *vegetation.scatter, .50f, .50f, 1066.0f, 1066.0f),
           "middle lane and river crossing must be protected from decoration");
   require(!Noggit::Ai::proceduralScatterExcluded(
-            *vegetation.scatter, .40f, .34f, 1066.0f, 1066.0f),
+            *vegetation.scatter, .28f, .24f, 1066.0f, 1066.0f),
           "jungle interior should remain available for decoration");
   require(Noggit::Ai::proceduralScatterExcluded(
-            *vegetation.scatter, .50f, .30f, 1066.0f, 1066.0f),
-          "jungle paths must remain open through the vegetation bands");
+            *vegetation.scatter, .165f, .5925f, 1066.0f, 1066.0f),
+          "jungle routes must remain open through the vegetation bands");
   require(Noggit::Ai::proceduralScatterExcluded(
-            *vegetation.scatter, .50f, .22f, 1066.0f, 1066.0f),
+            *vegetation.scatter, .48f, .25f, 1066.0f, 1066.0f),
           "camp clearings must remain free of decoration");
   for (auto const* scatter : {&*walls.scatter})
     for (std::size_t region_index = 0;

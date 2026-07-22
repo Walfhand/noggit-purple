@@ -108,6 +108,8 @@ namespace
   {
     namespace fs = std::filesystem;
     constexpr auto minimum_iou = .80;
+    constexpr auto minimum_tolerant_overlap = .95;
+    constexpr auto boundary_tolerance_pixels = 4;
     constexpr auto minimum_reference_component_area = std::size_t{80};
 
     std::vector<unsigned char> pixels;
@@ -168,6 +170,7 @@ namespace
     std::uint64_t union_count = 0;
     std::uint64_t predicted_count = 0;
     std::uint64_t reference_count = 0;
+    std::vector<std::uint8_t> predicted_mask(width * height);
     std::vector<unsigned char> overlay(width * height * 4, 255);
     for (std::size_t y = 0; y < height; ++y)
       for (std::size_t x = 0; x < width; ++x)
@@ -182,6 +185,7 @@ namespace
           && audit.preview_rgba[panel_pixel + 1] < 45
           && audit.preview_rgba[panel_pixel + 2] < 35;
         auto const expected = reference[reference_pixel] != 0;
+        predicted_mask[reference_pixel] = predicted;
         intersection += predicted && expected;
         union_count += predicted || expected;
         predicted_count += predicted;
@@ -211,7 +215,44 @@ namespace
       ? static_cast<double>(intersection) / static_cast<double>(predicted_count) : 0.0;
     auto const recall = reference_count
       ? static_cast<double>(intersection) / static_cast<double>(reference_count) : 0.0;
-    if (iou >= minimum_iou) return;
+    auto const nearby = [&](std::vector<std::uint8_t> const& mask,
+                            std::size_t x, std::size_t y)
+    {
+      for (auto dy = -boundary_tolerance_pixels; dy <= boundary_tolerance_pixels; ++dy)
+        for (auto dx = -boundary_tolerance_pixels; dx <= boundary_tolerance_pixels; ++dx)
+        {
+          if (dx * dx + dy * dy > boundary_tolerance_pixels * boundary_tolerance_pixels)
+            continue;
+          auto const sample_x = static_cast<int>(x) + dx;
+          auto const sample_y = static_cast<int>(y) + dy;
+          if (sample_x >= 0 && sample_y >= 0
+              && sample_x < static_cast<int>(width)
+              && sample_y < static_cast<int>(height)
+              && mask[static_cast<std::size_t>(sample_y) * width
+                    + static_cast<std::size_t>(sample_x)])
+            return true;
+        }
+      return false;
+    };
+    auto tolerant_precision_count = std::uint64_t{0};
+    auto tolerant_recall_count = std::uint64_t{0};
+    for (std::size_t y = 0; y < height; ++y)
+      for (std::size_t x = 0; x < width; ++x)
+      {
+        auto const pixel = y * width + x;
+        tolerant_precision_count += predicted_mask[pixel] && nearby(reference, x, y);
+        tolerant_recall_count += reference[pixel] && nearby(predicted_mask, x, y);
+      }
+    auto const tolerant_precision = predicted_count
+      ? static_cast<double>(tolerant_precision_count)
+          / static_cast<double>(predicted_count) : 0.0;
+    auto const tolerant_recall = reference_count
+      ? static_cast<double>(tolerant_recall_count)
+          / static_cast<double>(reference_count) : 0.0;
+    if (iou >= minimum_iou
+        && tolerant_precision >= minimum_tolerant_overlap
+        && tolerant_recall >= minimum_tolerant_overlap)
+      return;
 
     auto const artifacts = fs::path{NOGGIT_TEST_ARTIFACT_DIR};
     fs::create_directories(artifacts);
@@ -221,6 +262,8 @@ namespace
       + std::to_string(iou) + " (minimum=" + std::to_string(minimum_iou)
       + "), precision="
       + std::to_string(precision) + ", recall=" + std::to_string(recall)
+      + ", tolerant_precision=" + std::to_string(tolerant_precision)
+      + ", tolerant_recall=" + std::to_string(tolerant_recall)
       + "; overlay: black=match, red=missing, blue=extra");
   }
 
@@ -454,6 +497,27 @@ int main(int argc, char** argv)
   require(terrain.layout && liquid.layout && walls.scatter
             && props.props && vegetation.scatter,
           "blueprint must compile to valid generic tool arguments");
+  auto wall_priority = -1;
+  auto wall_feature_count = std::size_t{0};
+  for (auto const& feature : terrain.layout->features)
+    if (feature.name.ends_with("_wall_mass"))
+    {
+      wall_priority = std::max(wall_priority, feature.priority);
+      ++wall_feature_count;
+    }
+  require(wall_feature_count > 0, "the canonical jungle wall mask is empty");
+  require(std::all_of(terrain.layout->features.begin(), terrain.layout->features.end(),
+            [&](auto const& feature)
+            {
+              auto const guaranteed_throat
+                = feature.name.ends_with("_spur_path")
+                  || feature.name.ends_with("_wall_cut")
+                  || feature.name == "jungle_2_lane_door_path"
+                  || feature.name == "jungle_4_lane_door_path";
+              return !guaranteed_throat
+                || feature.priority > wall_priority;
+            }),
+          "jungle cuts and guaranteed throats must carve the wall mask");
   // base_height 20 and river_depth 8 put the bed bottom at 12; the water
   // column must stay under WoW's swim threshold so the river is wadeable.
   require(liquid.layout->features.front().points.front().height <= 13.01f,
@@ -508,6 +572,11 @@ int main(int argc, char** argv)
               return region.role == "canopy" || region.role == "rock";
             }),
           "vegetation scatter must retain canopy or decorative rock regions");
+  auto const canopy_region_count = static_cast<std::size_t>(std::count_if(
+    vegetation.scatter->regions.begin(), vegetation.scatter->regions.end(),
+    [](auto const& region) { return region.role == "canopy"; }));
+  require(canopy_region_count * 5 >= wall_feature_count * 4,
+          "at least 80% of canonical jungle walls need canopy coverage");
   auto candidateCount = [](Noggit::Ai::ProceduralScatter const& scatter, int tiles)
   {
     auto count = std::size_t{0};
@@ -867,11 +936,15 @@ int main(int argc, char** argv)
     auto& bases = semantics.at("bases");
     bases.erase(bases.end() - 1);
   });
-  requireMutationIssues(mutation_baseline, {"manifest.unregistered"},
+  requireMutationIssues(mutation_baseline,
+    {"manifest.unregistered", "boundary.undeclared_opening"},
     [](nlohmann::json& corrupted)
   {
-    corrupted.at("moba_semantics").at("routes").erase(
-      corrupted.at("moba_semantics").at("routes").begin());
+    auto& routes = corrupted.at("moba_semantics").at("routes");
+    routes.erase(std::find_if(routes.begin(), routes.end(), [](auto const& route)
+    {
+      return route.at("name") == "jungle_2_upper_wall_cut";
+    }));
   });
   requireMutationIssues(mutation_baseline,
     {"scatter.route_exclusion", "scatter.camp_exclusion"},

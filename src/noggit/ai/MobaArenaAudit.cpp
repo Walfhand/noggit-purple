@@ -1673,6 +1673,26 @@ namespace Noggit::Ai
           contacts_by_boundary[boundary_name].push_back({u, v, route.feature});
       }
     }
+    auto undeclared_contacts_by_boundary
+      = std::map<std::string, std::vector<BoundaryContact>>{};
+    for (auto const& feature : layout.features)
+    {
+      auto const route_like = feature.name.starts_with("jungle_")
+        && (feature.name.ends_with("_path")
+            || feature.name.ends_with("_wall_cut"));
+      auto const registered = std::any_of(routes.begin(), routes.end(),
+        [&](auto const& route) { return route.name == feature.name; });
+      if (!route_like || registered) continue;
+      for (auto const* boundary_name : {
+             "top_lane", "bottom_lane", "middle_lane", "river_bed"})
+      {
+        auto const* boundary = findFeature(layout, boundary_name);
+        if (!boundary) continue;
+        for (auto const& [u, v] : boundaryContacts(feature, *boundary))
+          undeclared_contacts_by_boundary[boundary_name].push_back(
+            {u, v, &feature});
+      }
+    }
 
     // Measure the six useful jungle banks independently. A ray is open only
     // when no physical wall is found in the first .018 beyond the lane/river
@@ -1710,7 +1730,13 @@ namespace Noggit::Ai
       auto const* boundary = findFeature(layout, spec.boundary);
       if (!boundary || boundary->points.size() < 2) continue;
       auto const contacts = contacts_by_boundary.find(spec.boundary);
-      if (contacts == contacts_by_boundary.end()) continue;
+      auto const* boundary_contacts = contacts == contacts_by_boundary.end()
+        ? nullptr : &contacts->second;
+      auto const undeclared_contacts
+        = undeclared_contacts_by_boundary.find(spec.boundary);
+      auto const* physical_undeclared_contacts
+        = undeclared_contacts == undeclared_contacts_by_boundary.end()
+        ? nullptr : &undeclared_contacts->second;
       auto total_length = 0.0f;
       for (std::size_t segment = 1; segment < boundary->points.size(); ++segment)
         total_length += std::hypot(
@@ -1724,6 +1750,8 @@ namespace Noggit::Ai
       {
         float arc;
         bool eligible;
+        bool declared;
+        bool undeclared;
         bool open;
       };
       std::vector<Sample> samples;
@@ -1762,10 +1790,10 @@ namespace Noggit::Ai
           auto eligible = arc >= .03f && arc + .03f <= total_length;
           eligible = eligible && outer_u > 0.0f && outer_u < 1.0f
             && outer_v > 0.0f && outer_v < 1.0f;
-          if (eligible)
+          auto declared = false;
+          if (eligible && boundary_contacts)
           {
-            eligible = false;
-            for (auto const& contact : contacts->second)
+            for (auto const& contact : *boundary_contacts)
             {
               if (std::hypot(u - contact.u, v - contact.v)
                     > bank_contact_window)
@@ -1778,7 +1806,30 @@ namespace Noggit::Ai
                 opposite_u, opposite_v, 1.0f, 1.0f).distance;
               if (spec.side == 0 || outside_distance <= opposite_distance + .001f)
               {
-                eligible = true;
+                declared = true;
+                break;
+              }
+            }
+          }
+          auto undeclared = false;
+          if (eligible && physical_undeclared_contacts)
+          {
+            for (auto const& contact : *physical_undeclared_contacts)
+            {
+              auto const contact_window = contact.route->half_width_ratio
+                  * (1.0f + contact.route->width_variation_ratio)
+                + .5f * contact.route->transition_width_ratio + .003f;
+              if (std::hypot(u - contact.u, v - contact.v) > contact_window)
+                continue;
+              auto const outside_distance = distanceToProceduralShape(
+                contact.route->points, contact.route->shape,
+                outer_u, outer_v, 1.0f, 1.0f).distance;
+              auto const opposite_distance = distanceToProceduralShape(
+                contact.route->points, contact.route->shape,
+                opposite_u, opposite_v, 1.0f, 1.0f).distance;
+              if (spec.side == 0 || outside_distance <= opposite_distance + .001f)
+              {
+                undeclared = true;
                 break;
               }
             }
@@ -1804,7 +1855,7 @@ namespace Noggit::Ai
               v + normal_v * static_cast<float>(side) * distance);
             open = raw_walkable[index] != 0;
           }
-          samples.push_back({arc, eligible, open});
+          samples.push_back({arc, eligible, declared, undeclared, open});
         }
         preceding_length += length;
       }
@@ -1819,7 +1870,8 @@ namespace Noggit::Ai
       std::vector<Run> runs;
       for (auto const& sample : samples)
       {
-        auto const state = sample.eligible ? (sample.open ? 1 : 0) : -1;
+        auto const state = sample.eligible && sample.declared
+          ? (sample.open ? 1 : 0) : -1;
         if (runs.empty() || runs.back().state != state)
           runs.push_back({state, sample.arc, sample.arc, bank_sample_step});
         else
@@ -1832,6 +1884,27 @@ namespace Noggit::Ai
       auto narrowest_separator = std::numeric_limits<float>::infinity();
       auto opening_count = std::size_t{0};
       auto const subject = std::string{spec.boundary} + ":" + spec.label;
+      std::vector<Run> undeclared_runs;
+      for (auto const& sample : samples)
+      {
+        auto const state = sample.eligible && sample.open && sample.undeclared ? 1 : 0;
+        if (undeclared_runs.empty() || undeclared_runs.back().state != state)
+          undeclared_runs.push_back(
+            {state, sample.arc, sample.arc, bank_sample_step});
+        else
+        {
+          undeclared_runs.back().end = sample.arc;
+          undeclared_runs.back().width
+            = sample.arc - undeclared_runs.back().start + bank_sample_step;
+        }
+      }
+      auto const minimum_undeclared_opening = std::max(
+        .010f, 2.1f / static_cast<float>(cells));
+      for (auto const& run : undeclared_runs)
+        if (run.state == 1 && run.width > minimum_undeclared_opening)
+          addIssue(report, "boundary.undeclared_opening", "ouverture ["
+            + std::to_string(run.start) + "," + std::to_string(run.end)
+            + "]=" + std::to_string(run.width), subject);
       for (std::size_t run = 0; run < runs.size(); ++run)
       {
         if (runs[run].state == 1)

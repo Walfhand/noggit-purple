@@ -730,7 +730,16 @@ namespace Noggit::Ai
     }
     auto field_polygons = jungle_polygons;
     for (auto& polygon : field_polygons)
-      polygon = offsetLoopInward(polygon, .003, relief_top);
+    {
+      auto const candidate = offsetLoopInward(polygon, .003, relief_top);
+      auto points = std::vector<ProceduralLayoutPoint>{};
+      points.reserve(candidate.size());
+      for (auto const& value : candidate)
+        points.push_back({value.at("u").get<float>(),
+                          value.at("v").get<float>(),
+                          value.at("height").get<float>()});
+      if (isSimpleProceduralArea(points)) polygon = candidate;
+    }
     // Camps use Summoner's Rift's real normalized positions (both maps share
     // the same frame: blue base bottom-left, mid on the rising diagonal,
     // river on the falling one; see sr-jungle-reference.md). Three sizes
@@ -962,9 +971,8 @@ namespace Noggit::Ai
         wall_polygons[i], 0.0, .001, 0, 80,
         "absolute",
         roughness * .25, .8));
-    // Most routes only describe the open negative space between walls. Door
-    // and spur centerlines additionally guarantee a narrow playable throat at
-    // alias-sized target gaps; their cut stays much thinner than a lane.
+    // Most routes follow the open negative space between walls. Door and spur
+    // centerlines guarantee the few narrow throats that cross the traced mask.
     for (auto const& path : jungle_paths)
     {
       auto const spur_throat = std::string_view{path.role} == "spur";
@@ -975,12 +983,12 @@ namespace Noggit::Ai
       terrain_features.push_back(feature(path.name, "corridor",
         path.points, outer_loop_throat ? .009
           : (spur_throat ? .006 : .012),
-        guaranteed_throat ? .003 : .006, 0,
+        (spur_throat || outer_loop_throat) ? .003 : .006, 0,
         guaranteed_throat ? 85 : 55, "absolute", .4, .95, .18));
     }
     for (auto const& cut : jungle_wall_cuts)
       terrain_features.push_back(feature(cut.name, "corridor",
-        cut.points, .008, .005, 0, 54, "absolute", .25, .95, .12));
+        cut.points, .008, .005, 0, 85, "absolute", .25, .95, .12));
     // Narrow deep channel with long submerged banks: the shoreline lands on
     // the gentle underwater slope, so edge water is shallow and fades out
     // instead of meeting the bank at full depth.
@@ -1042,27 +1050,17 @@ namespace Noggit::Ai
       RoleScatter{"rock", 8.0, .001, 4.0, 0.0, 0, 90},
       RoleScatter{"detail", 8.0, .001, 7.0, 0.0, 0, 75}
     };
-    auto const polygonArea = [](nlohmann::json const& polygon)
-    {
-      auto twice_area = 0.0;
-      for (std::size_t i = 0; i < polygon.size(); ++i)
-      {
-        auto const& current = polygon[i];
-        auto const& next = polygon[(i + 1) % polygon.size()];
-        twice_area += current.at("u").get<double>() * next.at("v").get<double>()
-          - next.at("u").get<double>() * current.at("v").get<double>();
-      }
-      return std::abs(twice_area) * .5;
-    };
     auto const usesRole = [&](std::size_t polygon_index, char const* role)
     {
       auto const role_name = std::string{role};
       if (role_name == "canopy")
-        return polygonArea(jungle_polygons[polygon_index]) >= .0045;
-      if (role_name == "understory") return polygon_index < 2;
-      if (role_name == "rock") return polygon_index == 5 || polygon_index == 6;
-      return role_name == "detail"
-        && (polygon_index == 16 || polygon_index == 17);
+        return polygon_index != 0 && polygon_index != 5
+          && polygon_index != 22 && polygon_index != 26
+          && polygon_index != 30 && polygon_index != 35
+          && polygon_index != 38 && polygon_index != 44;
+      if (role_name == "understory") return polygon_index == 0;
+      if (role_name == "rock") return polygon_index == 5;
+      return false;
     };
     auto total_factor = 0.0;
     for (std::size_t i = 0; i < jungle_polygons.size(); ++i)

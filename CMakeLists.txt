@@ -412,6 +412,7 @@ if(NOGGIT_BUILD_TESTS)
 
   add_executable(noggit-moba-arena-blueprint-test
     tests/MobaArenaBlueprintTest.cpp
+    src/noggit/ai/MobaArenaAudit.cpp
     src/noggit/ai/MobaArenaBlueprint.cpp
     src/noggit/ai/ProceduralLayout.cpp
     src/noggit/ai/ProceduralLiquidLayout.cpp
@@ -419,7 +420,15 @@ if(NOGGIT_BUILD_TESTS)
     src/noggit/ai/ProceduralScatter.cpp
   )
   target_include_directories(noggit-moba-arena-blueprint-test PRIVATE "${CMAKE_SOURCE_DIR}/src")
-  target_link_libraries(noggit-moba-arena-blueprint-test nlohmann_json::nlohmann_json)
+  target_link_libraries(noggit-moba-arena-blueprint-test
+    lodepng
+    nlohmann_json::nlohmann_json
+  )
+  target_compile_definitions(noggit-moba-arena-blueprint-test PRIVATE
+    NOGGIT_MOBA_GOLDEN_PATH="${CMAKE_CURRENT_SOURCE_DIR}/tests/golden/moba-arena-semantic.png"
+    NOGGIT_MOBA_REFERENCE_MASK_PATH="${CMAKE_CURRENT_SOURCE_DIR}/tests/golden/moba-arena-reference-mask.png"
+    NOGGIT_TEST_ARTIFACT_DIR="${CMAKE_CURRENT_BINARY_DIR}/test-artifacts"
+  )
   add_test(NAME noggit-moba-arena-blueprint COMMAND noggit-moba-arena-blueprint-test)
 
   add_executable(noggit-ground-effect-preview-test
@@ -447,6 +456,37 @@ if(NOGGIT_BUILD_TESTS)
   )
   target_include_directories(noggit-blueprint-snapshot-test PRIVATE "${CMAKE_SOURCE_DIR}/src")
   add_test(NAME noggit-blueprint-snapshot COMMAND noggit-blueprint-snapshot-test)
+
+  add_executable(noggit-async-loader-test
+    tests/AsyncLoaderTest.cpp
+    src/math/bounding_box.cpp
+    src/noggit/AsyncLoader.cpp
+    src/noggit/AsyncObject.cpp
+    src/noggit/Log.cpp
+    src/noggit/Misc.cpp
+    src/noggit/SceneObject.cpp
+  )
+  target_include_directories(noggit-async-loader-test PRIVATE
+    "${CMAKE_SOURCE_DIR}/src"
+    "${CMAKE_SOURCE_DIR}/src/external/blizzard-archive-library/include"
+  )
+  target_link_libraries(noggit-async-loader-test
+    Qt5::Core
+    Qt5::Widgets
+    blizzard-archive-library
+    glm
+  )
+  if(UNIX)
+    target_link_libraries(noggit-async-loader-test
+      ${BZIP2_LIBRARIES}
+      StormLib
+      CascLib
+      z
+    )
+    set_property(TARGET noggit-async-loader-test APPEND_STRING PROPERTY
+      LINK_FLAGS " -Wl,--no-as-needed")
+  endif()
+  add_test(NAME noggit-async-loader COMMAND noggit-async-loader-test)
 
 endif()
 

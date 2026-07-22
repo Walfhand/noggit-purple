@@ -40,35 +40,95 @@ ModelInstance::ModelInstance(BlizzardArchive::Listfile::FileKey const& file_key
   _need_recalc_extents = true;
 }
 
-ModelInstance::ModelInstance(ModelInstance&& other) noexcept
-  : SceneObject(other._type, other._context)
-  , model(std::move(other.model))
-  , light_color(other.light_color)
-  , size_cat(other.size_cat)
-  , _need_recalc_extents(other._need_recalc_extents)
+ModelInstance::ModelInstance(ModelInstance const& other)
+  : SceneObject(other)
+  , model([&other]
+    {
+      std::lock_guard lock(other._extents_mutex);
+      return other.model;
+    }())
 {
+  std::lock_guard lock(other._extents_mutex);
+  light_color = other.light_color;
+  size_cat = other.size_cat;
+  _need_recalc_extents = other._need_recalc_extents;
+  _need_gpu_transform_update = other._need_gpu_transform_update;
+  _gpu_transform_uid = other._gpu_transform_uid;
+}
+
+ModelInstance& ModelInstance::operator=(ModelInstance const& other)
+{
+  if (this == &other)
+  {
+    return *this;
+  }
+
+  SceneObject::operator=(other);
+  std::scoped_lock lock(_extents_mutex, other._extents_mutex);
+  model = other.model;
+  light_color = other.light_color;
+  size_cat = other.size_cat;
+  _need_recalc_extents = other._need_recalc_extents;
+  _need_gpu_transform_update = other._need_gpu_transform_update;
+  _gpu_transform_uid = other._gpu_transform_uid;
+  return *this;
+}
+
+ModelInstance::ModelInstance(ModelInstance&& other) noexcept
+  : SceneObject(eMODEL, Noggit::MAP_VIEW)
+  , model([&other]
+    {
+      std::lock_guard lock(other._extents_mutex);
+      return std::move(other.model);
+    }())
+{
+  std::lock_guard lock(other._extents_mutex);
+  _grouped = other._grouped;
   pos = other.pos;
   dir = other.dir;
   scale = other.scale;
-  extents[0] = other.extents[0];
-  extents[1] = other.extents[1];
-  _transform_mat_inverted = other._transform_mat_inverted;
-  _context = other._context;
   uid = other.uid;
+  frame = other.frame;
+  _rendered_last_frame = other._rendered_last_frame;
+  _type = other._type;
+  _transform_mat = other._transform_mat;
+  _transform_mat_inverted = other._transform_mat_inverted;
+  extents = other.extents;
+  bounding_radius = other.bounding_radius;
+  _context = other._context;
+  light_color = other.light_color;
+  size_cat = other.size_cat;
+  _need_recalc_extents = other._need_recalc_extents;
+  _need_gpu_transform_update = other._need_gpu_transform_update;
+  _gpu_transform_uid = other._gpu_transform_uid;
 }
 
 ModelInstance& ModelInstance::operator= (ModelInstance&& other) noexcept
 {
+  if (this == &other)
+  {
+    return *this;
+  }
+
+  std::scoped_lock lock(_extents_mutex, other._extents_mutex);
   std::swap(model, other.model);
+  std::swap(_grouped, other._grouped);
   std::swap(pos, other.pos);
   std::swap(dir, other.dir);
   std::swap(light_color, other.light_color);
   std::swap(uid, other.uid);
+  std::swap(frame, other.frame);
+  std::swap(_rendered_last_frame, other._rendered_last_frame);
   std::swap(scale, other.scale);
   std::swap(size_cat, other.size_cat);
   std::swap(_need_recalc_extents, other._need_recalc_extents);
+  std::swap(_need_gpu_transform_update, other._need_gpu_transform_update);
+  std::swap(_gpu_transform_uid, other._gpu_transform_uid);
   std::swap(extents, other.extents);
+  std::swap(bounding_radius, other.bounding_radius);
+  std::swap(_transform_mat, other._transform_mat);
   std::swap(_transform_mat_inverted, other._transform_mat_inverted);
+  std::swap(_type, other._type);
   std::swap(_context, other._context);
   return *this;
 }
@@ -110,12 +170,13 @@ void ModelInstance::draw_box (glm::mat4x4 const& model_view
     // draw extents
     if (draw_aabb)
     {
+      auto const world_extents = getExtents();
       Noggit::Rendering::Primitives::WireBox::getInstance(_context).draw ( model_view
         , projection
         , glm::mat4x4(1)
         , {0.0f, 1.0f, 0.0f, 1.0f} // green
-        , extents[0]
-        , extents[1]
+        , world_extents[0]
+        , world_extents[1]
         );
     }
 
@@ -183,10 +244,17 @@ void ModelInstance::intersect (glm::mat4x4 const& model_view
   if (!finishedLoading() || model->loading_failed())
     return;
 
-  ensureExtents();
+  glm::mat4x4 transform_inverted;
+  float instance_scale;
+  {
+    std::lock_guard lock(_extents_mutex);
+    ensureExtents();
+    transform_inverted = _transform_mat_inverted;
+    instance_scale = scale;
+  }
 
   std::vector<std::tuple<int, int, int>> triangle_indices;
-  math::ray subray (_transform_mat_inverted, ray);
+  math::ray subray (transform_inverted, ray);
 
   if ( !subray.intersect_bounds ( fixCoordSystem (model->bounding_box_min)
                                 , fixCoordSystem (model->bounding_box_max)
@@ -200,7 +268,7 @@ void ModelInstance::intersect (glm::mat4x4 const& model_view
   {
     //! \todo why is only sc important? these are relative to subray,
     //! so should be inverted by model_matrix?
-    results->emplace_back (result.first * scale, this);
+    results->emplace_back (result.first * instance_scale, this);
     triangle_indices.emplace_back(result.second);
   }
   return;
@@ -209,12 +277,8 @@ void ModelInstance::intersect (glm::mat4x4 const& model_view
 
 bool ModelInstance::isInFrustum(const math::frustum& frustum)
 {
-  if (_need_recalc_extents)
-  {
-    recalcExtents();
-  }
-
-  if (!frustum.intersects(extents[1], extents[0]))
+  auto const world_extents = getExtents();
+  if (!frustum.intersects(world_extents[1], world_extents[0]))
     return false;
 
   return true;
@@ -222,6 +286,7 @@ bool ModelInstance::isInFrustum(const math::frustum& frustum)
 
 bool ModelInstance::isInRenderDist(const float cull_distance, const glm::vec3& camera, display_mode display)
 {
+  std::lock_guard lock(_extents_mutex);
   float dist;
 
   if (display == display_mode::in_3D)
@@ -258,6 +323,7 @@ bool ModelInstance::isInRenderDist(const float cull_distance, const glm::vec3& c
 
 bool ModelInstance::extentsDirty() const
 {
+  std::lock_guard lock(_extents_mutex);
   return _need_recalc_extents || !model->finishedLoading();
 }
 
@@ -269,6 +335,7 @@ glm::vec3 const& ModelInstance::get_pos() const
 
 void ModelInstance::recalcExtents()
 {
+  std::lock_guard lock(_extents_mutex);
   if (!model->finishedLoading())
   {
     _need_recalc_extents = true;
@@ -343,6 +410,7 @@ void ModelInstance::recalcExtents()
 
 void ModelInstance::ensureExtents()
 {
+  std::lock_guard lock(_extents_mutex);
   if (_need_recalc_extents && model->finishedLoading())
   {
     recalcExtents();
@@ -354,20 +422,23 @@ bool ModelInstance::finishedLoading()
   return model->finishedLoading();
 }
 
-std::array<glm::vec3, 2> const& ModelInstance::getExtents()
+std::array<glm::vec3, 2> ModelInstance::getExtents()
 {
+  std::lock_guard lock(_extents_mutex);
   ensureExtents();
 
   return extents;
 }
 
-std::array<glm::vec3, 2> const& ModelInstance::getLocalExtents() const
+std::array<glm::vec3, 2> ModelInstance::getLocalExtents() const
 {
+  std::lock_guard lock(_extents_mutex);
   return { model->bounding_box_min , model->bounding_box_max };
 }
 
 std::array<glm::vec3, 8> ModelInstance::getBoundingBox()
 {
+  std::lock_guard lock(_extents_mutex);
   // auto extents = getExtents();
   if (_need_recalc_extents)
     updateTransformMatrix();
@@ -437,6 +508,7 @@ void ModelInstance::updateDetails(Noggit::Ui::detail_infos* detail_widget)
 [[nodiscard]]
 std::uint32_t ModelInstance::gpuTransformUid() const
 {
+  std::lock_guard lock(_extents_mutex);
   return _gpu_transform_uid;
 }
 
@@ -478,10 +550,11 @@ wmo_doodad_instance::wmo_doodad_instance(BlizzardArchive::Listfile::FileKey cons
 wmo_doodad_instance::wmo_doodad_instance(wmo_doodad_instance const& other)
 // : ModelInstance(other.model->file_key(), other._context)
   : ModelInstance(other)  // titi : Use the copy constructor of ModelInstance instead
-  , doodad_orientation(other.doodad_orientation)
-  , world_pos(other.world_pos)
-  , _need_matrix_update(other._need_matrix_update)
 {
+  std::lock_guard lock(other._extents_mutex);
+  doodad_orientation = other.doodad_orientation;
+  world_pos = other.world_pos;
+  _need_matrix_update = other._need_matrix_update;
   // titi: added those.
   // pos = other.pos;
   // scale = other.scale;
@@ -490,15 +563,22 @@ wmo_doodad_instance::wmo_doodad_instance(wmo_doodad_instance const& other)
 
 wmo_doodad_instance::wmo_doodad_instance(wmo_doodad_instance&& other) noexcept
   : ModelInstance(reinterpret_cast<ModelInstance&&>(other))
-  , doodad_orientation(other.doodad_orientation)
-  , world_pos(other.world_pos)
-  , _need_matrix_update(other._need_matrix_update)
 {
+  std::lock_guard lock(other._extents_mutex);
+  doodad_orientation = other.doodad_orientation;
+  world_pos = other.world_pos;
+  _need_matrix_update = other._need_matrix_update;
 }
 
 wmo_doodad_instance& wmo_doodad_instance::operator= (wmo_doodad_instance&& other) noexcept
 {
+  if (this == &other)
+  {
+    return *this;
+  }
+
   ModelInstance::operator= (reinterpret_cast<ModelInstance&&>(other));
+  std::scoped_lock lock(_extents_mutex, other._extents_mutex);
   std::swap(doodad_orientation, other.doodad_orientation);
   std::swap(world_pos, other.world_pos);
   std::swap(_need_matrix_update, other._need_matrix_update);
@@ -508,6 +588,7 @@ wmo_doodad_instance& wmo_doodad_instance::operator= (wmo_doodad_instance&& other
 [[nodiscard]]
 bool wmo_doodad_instance::need_matrix_update() const
 {
+  std::lock_guard lock(_extents_mutex);
   return _need_matrix_update;
 }
 
@@ -516,10 +597,15 @@ void wmo_doodad_instance::update_transform_matrix_wmo(WMOInstance* wmo)
   if (!model->finishedLoading() || !wmo->finishedLoading())
   {
     return;
-  }  
+  }
+
+  // Keep the global WMO -> doodad lock order. If the WMO is already being
+  // recalculated, transformMatrix() recursively acquires its own lock.
+  auto const wmo_transform = wmo->transformMatrix();
+  std::lock_guard lock(_extents_mutex);
 
   // world_pos = wmo->transformMatrix() * glm::vec4(pos,0);
-  world_pos = wmo->transformMatrix() * glm::vec4(pos, 1.0f);
+  world_pos = wmo_transform * glm::vec4(pos, 1.0f);
 
   auto m2_mat = glm::mat4x4(1.0f);
 
@@ -528,7 +614,7 @@ void wmo_doodad_instance::update_transform_matrix_wmo(WMOInstance* wmo)
   m2_mat = m2_mat * glm::toMat4(glm::inverse(doodad_orientation));
   m2_mat = glm::scale(m2_mat, glm::vec3(scale));
 
-  _transform_mat = wmo->transformMatrix() * m2_mat;
+  _transform_mat = wmo_transform * m2_mat;
   _transform_mat_inverted = glm::inverse(_transform_mat);
 
   // to compute the size category (used in culling)
@@ -540,6 +626,7 @@ void wmo_doodad_instance::update_transform_matrix_wmo(WMOInstance* wmo)
 
 bool wmo_doodad_instance::isInRenderDist(const float cull_distance, const glm::vec3& camera, display_mode display)
 {
+  std::lock_guard lock(_extents_mutex);
   float dist;
 
   if (display == display_mode::in_3D)

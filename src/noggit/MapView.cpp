@@ -2962,6 +2962,12 @@ MapView::~MapView()
 
   _destroying = true;
 
+  // addDockWidget reparents the assistant to the main window. Destroy it
+  // while this MapView, its World, and the OpenGL context are still valid so
+  // an active map transaction can roll back safely.
+  delete _ai_assistant_dock;
+  _ai_assistant_dock = nullptr;
+
   _main_window->removeToolBar(_main_window->_app_toolbar);
 
   OpenGL::context::scoped_setter const _ (::gl, context());

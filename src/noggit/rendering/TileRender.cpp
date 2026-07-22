@@ -554,7 +554,8 @@ void TileRender::doTileOcclusionQuery(OpenGL::Scoped::use_program& occlusion_sha
 
   _tile_occlusion_query_in_use = true;
   gl.beginQuery(GL_ANY_SAMPLES_PASSED, _tile_occlusion_query);
-  occlusion_shader.uniform("aabb", _map_tile->getCombinedExtents().data(), _map_tile->getCombinedExtents().size());
+  auto const extents = _map_tile->getCombinedExtents();
+  occlusion_shader.uniform("aabb", extents.data(), extents.size());
   gl.drawElements(GL_TRIANGLES, 36, GL_UNSIGNED_SHORT, nullptr);
   gl.endQuery(GL_ANY_SAMPLES_PASSED);
 }

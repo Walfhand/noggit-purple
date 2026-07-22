@@ -75,24 +75,23 @@ MapTile::MapTile( int pX
 
 MapTile::~MapTile()
 {
+  auto const instances = getObjectInstances();
+  auto const tile_uids = get_uids();
+
+  for (auto const& pair : instances)
   {
-    std::lock_guard<std::mutex> const lock(_mutex);
-    
-    for (auto& pair : object_instances)
+    for (auto* instance : pair.second)
     {
-      for (auto& instance : pair.second)
-      {
-        instance->derefTile(this);
-      }
+      instance->derefTile(this);
     }
   }
 
-  _world->remove_models_if_needed(uids);
+  _world->remove_models_if_needed(tile_uids);
 }
 
 void MapTile::waitForChildrenLoaded()
 {
-  for (auto& instance : object_instances)
+  for (auto const& instance : getObjectInstances())
   {
     instance.first->wait_until_loaded();
     instance.first->waitForChildrenLoaded();
@@ -410,6 +409,7 @@ async_priority MapTile::loading_priority() const
 
 bool MapTile::has_model(uint32_t uid) const
 {
+  std::lock_guard const lock(_object_state_mutex);
   return std::find(uids.begin(), uids.end(), uid) != uids.end();
 }
 
@@ -579,7 +579,7 @@ void MapTile::save(World* world, bool save_using_mclq_liquids)
   lTileExtents[1] = glm::vec3(xbase + TILESIZE, 0.0f, zbase + TILESIZE);
 
   // get every models on the tile
-  for (std::uint32_t const uid : uids)
+  for (std::uint32_t const uid : get_uids())
   {
     auto model = world->get_model(uid);
 
@@ -866,13 +866,14 @@ void MapTile::save(World* world, bool save_using_mclq_liquids)
     lMODF_Data[lID].rot[1] = object->dir.y;
     lMODF_Data[lID].rot[2] = object->dir.z;
 
-    lMODF_Data[lID].extents[0][0] = object->getExtents()[0].x;
-    lMODF_Data[lID].extents[0][1] = object->getExtents()[0].y;
-    lMODF_Data[lID].extents[0][2] = object->getExtents()[0].z;
+    auto const object_extents = object->getExtents();
+    lMODF_Data[lID].extents[0][0] = object_extents[0].x;
+    lMODF_Data[lID].extents[0][1] = object_extents[0].y;
+    lMODF_Data[lID].extents[0][2] = object_extents[0].z;
 
-    lMODF_Data[lID].extents[1][0] = object->getExtents()[1].x;
-    lMODF_Data[lID].extents[1][1] = object->getExtents()[1].y;
-    lMODF_Data[lID].extents[1][2] = object->getExtents()[1].z;
+    lMODF_Data[lID].extents[1][0] = object_extents[1].x;
+    lMODF_Data[lID].extents[1][1] = object_extents[1].y;
+    lMODF_Data[lID].extents[1][2] = object_extents[1].z;
 
     lMODF_Data[lID].flags = object->mFlags;
     lMODF_Data[lID].doodadSet = object->doodadset();
@@ -981,129 +982,77 @@ void MapTile::CropWater()
 
 void MapTile::remove_model(uint32_t uid)
 {
-  std::lock_guard<std::mutex> const lock (_mutex);
+  auto const object = _world->get_model(uid);
+  if (!object || object->index() != eEntry_Object)
+    return;
 
-  auto it = std::find(uids.begin(), uids.end(), uid);
-
-  if (it != uids.end())
-  {
-    uids.erase(it);
-
-    const auto obj = _world->get_model(uid).value();
-    auto instance = std::get<selected_object_type>(obj);
-
-    auto& instances = object_instances[instance->instance_model()];
-    auto it2 = std::find(instances.begin(), instances.end(), instance);
-
-    if (it2 != instances.end())
-    {
-      instances.erase(it2);
-    }
-
-    if (instances.empty())
-    {
-      object_instances.erase(instance->instance_model());
-    }
-
-    instance->derefTile(this);
-    _requires_object_extents_recalc = true;
-  }
+  remove_model(std::get<selected_object_type>(*object));
 }
 
 void MapTile::remove_model(SceneObject* instance)
 {
-  std::lock_guard<std::mutex> const lock (_mutex);
+  auto* const model = instance->instance_model();
+  bool removed = false;
 
-  auto it = std::find(uids.begin(), uids.end(), instance->uid);
-
-  if (it != uids.end())
   {
-    uids.erase(it);
+    std::lock_guard const lock(_object_state_mutex);
+    auto const uid_it = std::find(uids.begin(), uids.end(), instance->uid);
+    if (uid_it == uids.end())
+      return;
 
-    auto& instances = object_instances[instance->instance_model()];
+    uids.erase(uid_it);
+    auto& instances = object_instances[model];
     auto it2 = std::find(instances.begin(), instances.end(), instance);
 
     if (it2 != instances.end())
     {
-      instance->derefTile(this);
       instances.erase(it2);
+      removed = true;
     }
 
     if (instances.empty())
     {
-      object_instances.erase(instance->instance_model());
+      object_instances.erase(model);
     }
 
     _requires_object_extents_recalc = true;
+    _combined_extents_dirty = true;
+    ++_object_state_generation;
   }
+
+  if (removed)
+    instance->derefTile(this);
 }
 
 void MapTile::add_model(uint32_t uid)
 {
-  std::lock_guard<std::mutex> const lock(_mutex);
+  auto const object = _world->get_model(uid);
+  if (!object || object->index() != eEntry_Object)
+    return;
 
-  if (std::find(uids.begin(), uids.end(), uid) == uids.end())
-  {
-    uids.push_back(uid);
-
-    const auto& obj = _world->get_model(uid).value();
-    auto instance = std::get<selected_object_type>(obj);
-    object_instances[instance->instance_model()].push_back(instance);
-
-    if (instance->finishedLoading())
-    {
-      instance->ensureExtents();
-
-      _object_instance_extents[0].x = std::min(_object_instance_extents[0].x, instance->getExtents()[0].x);
-      _object_instance_extents[0].y = std::min(_object_instance_extents[0].y, instance->getExtents()[0].y);
-      _object_instance_extents[0].z = std::min(_object_instance_extents[0].z, instance->getExtents()[0].z);
-
-      _object_instance_extents[1].x = std::max(_object_instance_extents[1].x, instance->getExtents()[1].x);
-      _object_instance_extents[1].y = std::max(_object_instance_extents[1].y, instance->getExtents()[1].y);
-      _object_instance_extents[1].z = std::max(_object_instance_extents[1].z, instance->getExtents()[1].z);
-
-      tagCombinedExtents(true);
-    }
-    else
-    {
-      _requires_object_extents_recalc = true;
-    }
-
-    instance->refTile(this);
-  }
+  add_model(std::get<selected_object_type>(*object));
 }
 
 void MapTile::add_model(SceneObject* instance)
 {
-  std::lock_guard<std::mutex> const lock(_mutex);
+  auto* const model = instance->instance_model();
+  bool added = false;
 
-  if (std::find(uids.begin(), uids.end(), instance->uid) == uids.end())
   {
+    std::lock_guard const lock(_object_state_mutex);
+    if (std::find(uids.begin(), uids.end(), instance->uid) != uids.end())
+      return;
+
     uids.push_back(instance->uid);
-
-    object_instances[instance->instance_model()].push_back(instance);
-
-    if (instance->finishedLoading())
-    {
-      instance->ensureExtents();
-
-      _object_instance_extents[0].x = std::min(_object_instance_extents[0].x, instance->getExtents()[0].x);
-      _object_instance_extents[0].y = std::min(_object_instance_extents[0].y, instance->getExtents()[0].y);
-      _object_instance_extents[0].z = std::min(_object_instance_extents[0].z, instance->getExtents()[0].z);
-
-      _object_instance_extents[1].x = std::max(_object_instance_extents[1].x, instance->getExtents()[1].x);
-      _object_instance_extents[1].y = std::max(_object_instance_extents[1].y, instance->getExtents()[1].y);
-      _object_instance_extents[1].z = std::max(_object_instance_extents[1].z, instance->getExtents()[1].z);
-
-      tagCombinedExtents(true);
-    }
-    else
-    {
-      _requires_object_extents_recalc = true;
-    }
-
-    instance->refTile(this);
+    object_instances[model].push_back(instance);
+    _requires_object_extents_recalc = true;
+    _combined_extents_dirty = true;
+    ++_object_state_generation;
+    added = true;
   }
+
+  if (added)
+    instance->refTile(this);
 }
 
 bool MapTile::tile_is_being_reloaded() const
@@ -1111,9 +1060,10 @@ bool MapTile::tile_is_being_reloaded() const
   return _tile_is_being_reloaded;
 }
 
-std::vector<uint32_t>* MapTile::get_uids()
+std::vector<uint32_t> MapTile::get_uids() const
 {
-  return &uids;
+  std::lock_guard const lock(_object_state_mutex);
+  return uids;
 }
 
 void MapTile::initEmptyChunks()
@@ -1762,58 +1712,67 @@ void MapTile::recalcExtents()
 
 void MapTile::recalcObjectInstanceExtents()
 {
-  if (!_requires_object_extents_recalc)
+  tsl::robin_map<AsyncObject*, std::vector<SceneObject*>> instances;
+  std::uint64_t generation;
   {
-    return;
+    std::lock_guard const lock(_object_state_mutex);
+    if (!_requires_object_extents_recalc)
+      return;
+    instances = object_instances;
+    generation = _object_state_generation;
   }
 
-  if (object_instances.empty())
-  {
-    _object_instance_extents[0] = {0.f, 0.f, 0.f};
-    _object_instance_extents[1] = {0.f, 0.f, 0.f};
+  std::array<glm::vec3, 2> object_extents;
+  bool retry_when_objects_finish_loading = false;
 
-    _requires_object_extents_recalc = false;
-    tagCombinedExtents(true);
-    return;
+  if (instances.empty())
+  {
+    object_extents[0] = {0.f, 0.f, 0.f};
+    object_extents[1] = {0.f, 0.f, 0.f};
   }
-
-  _object_instance_extents[0] = {std::numeric_limits<float>::max(),
-                                 std::numeric_limits<float>::max(),
-                                 std::numeric_limits<float>::max()};
-
-  _object_instance_extents[1] = {std::numeric_limits<float>::lowest(),
-                                 std::numeric_limits<float>::lowest(),
-                                 std::numeric_limits<float>::lowest()};
-
-  _requires_object_extents_recalc = false;
-
-  for (auto& pair : object_instances)
+  else
   {
-    for (auto& instance : pair.second)
+    object_extents[0] = {std::numeric_limits<float>::max(),
+                         std::numeric_limits<float>::max(),
+                         std::numeric_limits<float>::max()};
+    object_extents[1] = {std::numeric_limits<float>::lowest(),
+                         std::numeric_limits<float>::lowest(),
+                         std::numeric_limits<float>::lowest()};
+
+    for (auto const& pair : instances)
     {
-      if (!instance->finishedLoading())
+      for (auto* instance : pair.second)
       {
-        _requires_object_extents_recalc = true;
-        continue;
+        if (!instance->finishedLoading())
+        {
+          retry_when_objects_finish_loading = true;
+          continue;
+        }
+
+        instance->ensureExtents();
+        auto const instance_extents = instance->getExtents();
+
+        object_extents[0] = glm::min(object_extents[0], instance_extents[0]);
+        object_extents[1] = glm::max(object_extents[1], instance_extents[1]);
       }
+    }
 
-      instance->ensureExtents();
-
-      glm::vec3 min = instance->getExtents()[0];
-      glm::vec3 max = instance->getExtents()[1];
-
-      _object_instance_extents[0].x = std::min(_object_instance_extents[0].x, min.x);
-      _object_instance_extents[0].y = std::min(_object_instance_extents[0].y, min.y);
-      _object_instance_extents[0].z = std::min(_object_instance_extents[0].z, min.z);
-
-      _object_instance_extents[1].x = std::max(_object_instance_extents[1].x, max.x);
-      _object_instance_extents[1].y = std::max(_object_instance_extents[1].y, max.y);
-      _object_instance_extents[1].z = std::max(_object_instance_extents[1].z, max.z);
+    if (object_extents[0].x == std::numeric_limits<float>::max())
+    {
+      object_extents[0] = {0.f, 0.f, 0.f};
+      object_extents[1] = {0.f, 0.f, 0.f};
     }
   }
 
-  tagCombinedExtents(true);
-
+  std::lock_guard const lock(_object_state_mutex);
+  if (generation != _object_state_generation)
+  {
+    _requires_object_extents_recalc = true;
+    return;
+  }
+  _object_instance_extents = object_extents;
+  _requires_object_extents_recalc = retry_when_objects_finish_loading;
+  _combined_extents_dirty = true;
 }
 
 float MapTile::camDist() const
@@ -1833,6 +1792,7 @@ void MapTile::markExtentsDirty()
 
 void MapTile::tagCombinedExtents(bool state)
 {
+  std::lock_guard const lock(_object_state_mutex);
   _combined_extents_dirty = state;
 }
 
@@ -1902,22 +1862,22 @@ bool MapTile::texturesFinishedLoading()
 
 bool MapTile::objectsFinishedLoading()
 {
-  if (_objects_finished_loading)
-    return true;
-
-  for (auto& instance : object_instances)
+  for (auto const& instance : getObjectInstances())
   {
     if (!instance.first->finishedLoading())
       return false;
   }
 
-  return _objects_finished_loading = true;
+  return true;
 }
 
 void MapTile::recalcCombinedExtents()
 {
-  if (!_combined_extents_dirty)
-    return;
+  {
+    std::lock_guard const lock(_object_state_mutex);
+    if (!_combined_extents_dirty)
+      return;
+  }
 
   // ensure all extents are updated
   {
@@ -1931,26 +1891,28 @@ void MapTile::recalcCombinedExtents()
     recalcObjectInstanceExtents();
   }
 
-  _combined_extents = _extents;
+  auto combined_extents = _extents;
 
   auto& water_extents =  Water.getExtents();
-  _combined_extents[0].y = std::min(_combined_extents[0].y, water_extents[0].y);
-  _combined_extents[1].y = std::max(_combined_extents[1].y, water_extents[1].y);
+  combined_extents[0].y = std::min(combined_extents[0].y, water_extents[0].y);
+  combined_extents[1].y = std::max(combined_extents[1].y, water_extents[1].y);
 
+  std::lock_guard const lock(_object_state_mutex);
   if (!object_instances.empty())
   {
     for (int i = 0; i < 3; ++i)
     {
-      _combined_extents[0][i] = std::min(_combined_extents[0][i], _object_instance_extents[0][i]);
+      combined_extents[0][i] = std::min(combined_extents[0][i], _object_instance_extents[0][i]);
     }
 
     for (int i = 0; i < 3; ++i)
     {
-      _combined_extents[1][i] = std::max(_combined_extents[1][i], _object_instance_extents[1][i]);
+      combined_extents[1][i] = std::max(combined_extents[1][i], _object_instance_extents[1][i]);
     }
   }
 
-  _combined_extents_dirty = false;
+  _combined_extents = combined_extents;
+  _combined_extents_dirty = _requires_object_extents_recalc;
 }
 
 std::array<glm::vec3, 2>& MapTile::getExtents()
@@ -1958,9 +1920,11 @@ std::array<glm::vec3, 2>& MapTile::getExtents()
   recalcExtents(); return _extents;
 }
 
-std::array<glm::vec3, 2>& MapTile::getCombinedExtents()
+std::array<glm::vec3, 2> MapTile::getCombinedExtents()
 {
-  recalcCombinedExtents(); return _combined_extents;
+  recalcCombinedExtents();
+  std::lock_guard const lock(_object_state_mutex);
+  return _combined_extents;
 }
 
 World* MapTile::getWorld()
@@ -1969,7 +1933,8 @@ World* MapTile::getWorld()
 }
 
 [[nodiscard]]
-tsl::robin_map<AsyncObject*, std::vector<SceneObject*>> const& MapTile::getObjectInstances() const
+tsl::robin_map<AsyncObject*, std::vector<SceneObject*>> MapTile::getObjectInstances() const
 {
+  std::lock_guard const lock(_object_state_mutex);
   return object_instances;
 }

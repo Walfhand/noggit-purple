@@ -176,10 +176,35 @@ int main()
   require(!Noggit::Ai::parseProceduralLayout(bad_height).layout,
           "out-of-range height was accepted");
 
-  auto bad_width = validArguments();
-  bad_width["features"][0]["half_width_ratio"] = 0.0;
-  require(!Noggit::Ai::parseProceduralLayout(bad_width).layout,
-          "out-of-range feature width was accepted");
+  auto zero_width_area = validArguments();
+  zero_width_area["features"][0]["shape"] = "area";
+  zero_width_area["features"][0]["points"] = {
+    {{"u", 0.1}, {"v", 0.1}, {"height", 10.0}},
+    {{"u", 0.9}, {"v", 0.1}, {"height", 10.0}},
+    {{"u", 0.5}, {"v", 0.9}, {"height", 10.0}}
+  };
+  zero_width_area["features"][0]["half_width_ratio"] = 0.0;
+  auto const parsed_zero_width_area
+    = Noggit::Ai::parseProceduralLayout(zero_width_area);
+  require(parsed_zero_width_area.layout.has_value(),
+          "zero-width area was rejected");
+  requireClose(parsed_zero_width_area.layout->features.front().half_width_ratio,
+               0.0f, "zero-width area was not preserved");
+
+  auto zero_width_corridor = validArguments();
+  zero_width_corridor["features"][0]["half_width_ratio"] = 0.0;
+  require(!Noggit::Ai::parseProceduralLayout(zero_width_corridor).layout,
+          "zero-width corridor was accepted");
+
+  auto too_narrow_corridor = validArguments();
+  too_narrow_corridor["features"][0]["half_width_ratio"] = 0.004;
+  require(!Noggit::Ai::parseProceduralLayout(too_narrow_corridor).layout,
+          "corridor narrower than 0.005 was accepted");
+
+  auto minimum_width_corridor = validArguments();
+  minimum_width_corridor["features"][0]["half_width_ratio"] = 0.005;
+  require(Noggit::Ai::parseProceduralLayout(minimum_width_corridor).layout.has_value(),
+          "corridor at the 0.005 minimum was rejected");
 
   auto bad_priority = validArguments();
   bad_priority["features"][0]["priority"] = 101;

@@ -2,11 +2,13 @@
 #include <noggit/Log.h>
 
 #include <csignal>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
 #ifndef WIN32
   #include <execinfo.h>
+  #include <signal.h>
 #else
   #include <win/StackWalker.h>
   #include <errhandlingapi.h>
@@ -94,7 +96,17 @@ namespace Noggit
 
       printStacktrace();
 
-      exit (sig);
+      // Do not run Qt/C++ destructors after a fatal signal: the heap or an
+      // object graph may already be corrupted. Re-raise with the default
+      // disposition so the original signal and core dump are preserved.
+#ifndef WIN32
+      sigset_t blocked_signal;
+      sigemptyset(&blocked_signal);
+      sigaddset(&blocked_signal, sig);
+      sigprocmask(SIG_UNBLOCK, &blocked_signal, nullptr);
+#endif
+      std::raise(sig);
+      std::_Exit(128 + sig);
     }
 
 #ifdef _WIN32

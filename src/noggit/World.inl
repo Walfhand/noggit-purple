@@ -83,7 +83,7 @@ void World::for_tile_at(TileIndex const& pos, Fun&& fun)
 template<typename Fun>
 void World::for_tile_at_force(TileIndex const& pos, Fun&& fun)
 {
-    bool unload = !mapIndex.tileLoaded(pos) && !mapIndex.tileAwaitingLoading(pos);
+    bool unload = !mapIndex.tileResident(pos);
     MapTile* tile = mapIndex.loadTile(pos);
     if (tile)
     {

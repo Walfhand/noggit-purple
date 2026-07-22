@@ -30,9 +30,6 @@ void AsyncLoader::process()
 {
   AsyncObject* object = nullptr;
 
-  QSettings settings;
-  bool additional_log = settings.value("additional_file_loading_log", false).toBool();
-
   while (!_stop)
   {
     {    
@@ -70,7 +67,7 @@ void AsyncLoader::process()
 
     try
     {
-      if (additional_log)
+      if (_additional_log)
       {
         std::lock_guard<std::mutex> const lock(_guard);
         LogDebug << "Loading file '" << (object->file_key().hasFilepath() ? object->file_key().filepath()
@@ -79,7 +76,7 @@ void AsyncLoader::process()
 
       object->finishLoading();
 
-      if (additional_log)
+      if (_additional_log)
       {
         std::lock_guard<std::mutex> const lock(_guard);
         LogDebug << "Loaded  file '" << (object->file_key().hasFilepath() ? object->file_key().filepath()
@@ -127,6 +124,19 @@ void AsyncLoader::process()
 void AsyncLoader::queue_for_load (AsyncObject* object)
 {
   std::lock_guard<std::mutex> const lock (_guard);
+  auto const already_queued = std::any_of(
+    _to_load.begin(), _to_load.end(), [object](auto const& queue)
+    {
+      return std::find(queue.begin(), queue.end(), object) != queue.end();
+    });
+  auto const already_loading = std::find(
+    _currently_loading.begin(), _currently_loading.end(), object)
+      != _currently_loading.end();
+  if (already_queued || already_loading)
+  {
+    return;
+  }
+
   _to_load[(size_t)object->loading_priority()].push_back (object);
   _state_changed.notify_one();
 }
@@ -134,29 +144,23 @@ void AsyncLoader::queue_for_load (AsyncObject* object)
 void AsyncLoader::ensure_deletable (AsyncObject* object)
 {
   std::unique_lock<std::mutex> lock (_guard);
+  for (auto& queue : _to_load)
+  {
+    queue.remove(object);
+  }
   _state_changed.wait
   ( lock
   , [&]
     {
-      auto& to_load = _to_load[(size_t)object->loading_priority()];
-      auto const& it = std::find (to_load.begin(), to_load.end(), object);
-      
-      // don't load it if it's just to delete it afterward
-      if (it != to_load.end())
-      {
-        to_load.erase(it);
-        return true;
-      }
-      else
-      {
-        return std::find (_currently_loading.begin(), _currently_loading.end(), object) == _currently_loading.end();
-      }
+      return std::find(_currently_loading.begin(), _currently_loading.end(), object)
+        == _currently_loading.end();
     }
   );
 }
 
 AsyncLoader::AsyncLoader(int numThreads)
   : _stop (false)
+  , _additional_log(QSettings{}.value("additional_file_loading_log", false).toBool())
 {
   // use half of the available threads
   // unsigned int maxThreads = std::thread::hardware_concurrency() / 2; 

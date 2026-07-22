@@ -640,11 +640,13 @@ namespace Noggit::Ai
 
       if (!readFiniteFloat(feature_value.at("half_width_ratio"), feature.half_width_ratio)
           || !readFiniteFloat(feature_value.at("transition_width_ratio"), feature.transition_width_ratio)
-          || feature.half_width_ratio < 0.005f || feature.half_width_ratio > 0.25f
+          || feature.half_width_ratio
+               < (feature.shape == ProceduralLayoutShape::Area ? 0.0f : 0.005f)
+          || feature.half_width_ratio > 0.25f
           || feature.transition_width_ratio < 0.001f
           || feature.transition_width_ratio > 0.25f)
       {
-        return fail("half_width_ratio doit être dans [0.005,0.25] et transition_width_ratio dans [0.001,0.25].");
+        return fail("half_width_ratio doit être dans [0,0.25] pour area ou [0.005,0.25] pour corridor, et transition_width_ratio dans [0.001,0.25].");
       }
 
       auto const& texture_layer = feature_value.at("texture_layer");

@@ -410,14 +410,17 @@ void MapIndex::setFlag(bool to, glm::vec3 const& pos, uint32_t flag)
 
 MapTile* MapIndex::loadTile(const TileIndex& tile, bool reloading, bool load_models, bool load_textures)
 {
-  if (!hasTile(tile))
+  std::unique_lock<std::mutex> lock(_mutex);
+
+  if (!tile.is_valid() || !(mTiles[tile.z][tile.x].flags & 1))
   {
     return nullptr;
   }
 
-  if (tileLoaded(tile) || tileAwaitingLoading(tile))
+  auto& entry = mTiles[tile.z][tile.x];
+  if (entry.counted_as_loaded && entry.tile)
   {
-    return mTiles[tile.z][tile.x].tile.get();
+    return entry.tile.get();
   }
 
   std::stringstream filename;
@@ -434,17 +437,18 @@ MapTile* MapIndex::loadTile(const TileIndex& tile, bool reloading, bool load_mod
 
   MapTile* adt = mTiles[tile.z][tile.x].tile.get();
 
-  AsyncLoader::instance->queue_for_load(adt);
+  mTiles[tile.z][tile.x].counted_as_loaded = true;
   _n_loaded_tiles++;
+  AsyncLoader::instance->queue_for_load(adt);
 
   return adt;
 }
 
 void MapIndex::reloadTile(const TileIndex& tile)
 {
-  if (tileLoaded(tile))
+  if (tileResident(tile))
   {
-    mTiles[tile.z][tile.x].tile.reset();
+    unloadTile(tile);
     loadTile(tile, true);
   }
 }
@@ -480,17 +484,51 @@ void MapIndex::unloadTiles(const TileIndex& tile)
 
 void MapIndex::unloadTile(const TileIndex& tile)
 {
-  // unloads a tile with given cords
-  if (tileLoaded(tile))
-  {
-    // either log before or don't use a reference for the tile/make a copy
-    // otherwise it can be deleted before the log because it comes from the adt itself (see unloadTiles)
-    Log << "Unloading Tile " << tile.x << "-" << tile.z << std::endl;
+  if (!tile.is_valid()) return;
 
-    AsyncLoader::instance->ensure_deletable(mTiles[tile.z][tile.x].tile.get());
-    mTiles[tile.z][tile.x].tile.reset();
-    _n_loaded_tiles--;
+  auto resident_tiles = [&]
+  {
+    auto tiles = std::vector<MapTile*>{};
+    std::lock_guard<std::mutex> lock(_mutex);
+    for (auto& row : mTiles)
+      for (auto& entry : row)
+        if (entry.counted_as_loaded && entry.tile)
+          tiles.push_back(entry.tile.get());
+    return tiles;
+  };
+
+  auto loaded_tiles = resident_tiles();
+  if (std::find_if(loaded_tiles.begin(), loaded_tiles.end(), [&](MapTile* entry)
+        { return entry->index == tile; }) != loaded_tiles.end())
+  {
+    while (true)
+    {
+      // Object instances can span ADTs. Complete all loaders and their queued
+      // tile-reference updates before destroying any one MapTile.
+      for (auto* loaded_tile : loaded_tiles)
+      {
+        loaded_tile->wait_until_loaded();
+        AsyncLoader::instance->ensure_deletable(loaded_tile);
+      }
+      _world->wait_for_all_tile_updates();
+      auto expanded_tiles = resident_tiles();
+      if (expanded_tiles == loaded_tiles) break;
+      loaded_tiles = std::move(expanded_tiles);
+    }
   }
+
+  auto removed_tile = std::unique_ptr<MapTile>{};
+  {
+    std::lock_guard<std::mutex> lock(_mutex);
+    auto& entry = mTiles[tile.z][tile.x];
+    if (!entry.tile) return;
+    Log << "Unloading Tile " << tile.x << "-" << tile.z << std::endl;
+    removed_tile = std::move(entry.tile);
+    if (entry.counted_as_loaded) _n_loaded_tiles--;
+    entry.counted_as_loaded = false;
+  }
+  // MapTile::~MapTile touches World object storage, so do not hold _mutex.
+  removed_tile.reset();
 }
 
 void MapIndex::markOnDisc(const TileIndex& tile, bool mto)
@@ -598,33 +636,51 @@ bool MapIndex::hasAGlobalWMO() const
 
 bool MapIndex::hasTile(const TileIndex& tile) const
 {
+  std::lock_guard<std::mutex> lock(_mutex);
   return tile.is_valid() && (mTiles[tile.z][tile.x].flags & 1);
+}
+
+bool MapIndex::tileResident(const TileIndex& tile) const
+{
+  std::lock_guard<std::mutex> lock(_mutex);
+  return tile.is_valid() && mTiles[tile.z][tile.x].counted_as_loaded
+    && mTiles[tile.z][tile.x].tile;
 }
 
 bool MapIndex::tileAwaitingLoading(const TileIndex& tile) const
 {
-  return hasTile(tile) && mTiles[tile.z][tile.x].tile && !mTiles[tile.z][tile.x].tile->finishedLoading();
+  std::lock_guard<std::mutex> lock(_mutex);
+  return tile.is_valid() && (mTiles[tile.z][tile.x].flags & 1)
+    && mTiles[tile.z][tile.x].counted_as_loaded
+    && mTiles[tile.z][tile.x].tile
+    && !mTiles[tile.z][tile.x].tile->finishedLoading();
 }
 
 bool MapIndex::tileLoaded(const TileIndex& tile) const
 {
-  return hasTile(tile) && mTiles[tile.z][tile.x].tile && mTiles[tile.z][tile.x].tile->finishedLoading();
+  std::lock_guard<std::mutex> lock(_mutex);
+  return tile.is_valid() && (mTiles[tile.z][tile.x].flags & 1)
+    && mTiles[tile.z][tile.x].counted_as_loaded
+    && mTiles[tile.z][tile.x].tile
+    && mTiles[tile.z][tile.x].tile->finishedLoading();
 }
 
 MapTile* MapIndex::getTile(const TileIndex& tile) const
 {
+  std::lock_guard<std::mutex> lock(_mutex);
   return (tile.is_valid() ? mTiles[tile.z][tile.x].tile.get() : nullptr);
 }
 
 MapTile* MapIndex::getTileAbove(MapTile* tile) const
 {
   TileIndex above(tile->index.x, tile->index.z - 1);
-  if (tile->index.z == 0 || (!tileLoaded(above) && !tileAwaitingLoading(above)))
+  if (tile->index.z == 0 || !tileResident(above))
   {
     return nullptr;
   }
 
-  MapTile* tile_above = mTiles[tile->index.z - 1][tile->index.x].tile.get();
+  MapTile* tile_above = getTile(above);
+  if (!tile_above) return nullptr;
   tile_above->wait_until_loaded();
 
   return tile_above;
@@ -633,12 +689,13 @@ MapTile* MapIndex::getTileAbove(MapTile* tile) const
 MapTile* MapIndex::getTileLeft(MapTile* tile) const
 {
   TileIndex left(tile->index.x - 1, tile->index.z);
-  if (tile->index.x == 0 || (!tileLoaded(left) && !tileAwaitingLoading(left)))
+  if (tile->index.x == 0 || !tileResident(left))
   {
     return nullptr;
   }
 
-  MapTile* tile_left = mTiles[tile->index.z][tile->index.x - 1].tile.get();
+  MapTile* tile_left = getTile(left);
+  if (!tile_left) return nullptr;
   tile_left->wait_until_loaded();
 
   return tile_left;
@@ -674,6 +731,7 @@ void MapIndex::setBigAlpha(bool state)
 
 unsigned MapIndex::getNLoadedTiles() const
 {
+  std::lock_guard<std::mutex> lock(_mutex);
   return _n_loaded_tiles;
 }
 
@@ -1011,10 +1069,11 @@ uid_fix_status MapIndex::fixUIDs (World* world, bool cancel_on_model_loading_err
     loading_error |= instance.model->loading_failed();
 
     // to avoid going outside of bound
-    std::size_t sx = std::max((std::size_t)(instance.getExtents()[0].x / TILESIZE), (std::size_t)0);
-    std::size_t sz = std::max((std::size_t)(instance.getExtents()[0].z / TILESIZE), (std::size_t)0);
-    std::size_t ex = std::min((std::size_t)(instance.getExtents()[1].x / TILESIZE), (std::size_t)63);
-    std::size_t ez = std::min((std::size_t)(instance.getExtents()[1].z / TILESIZE), (std::size_t)63);
+    auto const instance_extents = instance.getExtents();
+    std::size_t sx = std::max((std::size_t)(instance_extents[0].x / TILESIZE), (std::size_t)0);
+    std::size_t sz = std::max((std::size_t)(instance_extents[0].z / TILESIZE), (std::size_t)0);
+    std::size_t ex = std::min((std::size_t)(instance_extents[1].x / TILESIZE), (std::size_t)63);
+    std::size_t ez = std::min((std::size_t)(instance_extents[1].z / TILESIZE), (std::size_t)63);
 
     auto const real_uid (world->add_model_instance (std::move(instance), false, false));
 
@@ -1038,10 +1097,11 @@ uid_fix_status MapIndex::fixUIDs (World* world, bool cancel_on_model_loading_err
     instance.recalcExtents();
     // no need to check if the loading is finished since the extents are stored inside the adt
     // to avoid going outside of bound
-    std::size_t sx = std::max((std::size_t)(instance.getExtents()[0].x / TILESIZE), (std::size_t)0);
-    std::size_t sz = std::max((std::size_t)(instance.getExtents()[0].z / TILESIZE), (std::size_t)0);
-    std::size_t ex = std::min((std::size_t)(instance.getExtents()[1].x / TILESIZE), (std::size_t)63);
-    std::size_t ez = std::min((std::size_t)(instance.getExtents()[1].z / TILESIZE), (std::size_t)63);
+    auto const instance_extents = instance.getExtents();
+    std::size_t sx = std::max((std::size_t)(instance_extents[0].x / TILESIZE), (std::size_t)0);
+    std::size_t sz = std::max((std::size_t)(instance_extents[0].z / TILESIZE), (std::size_t)0);
+    std::size_t ex = std::min((std::size_t)(instance_extents[1].x / TILESIZE), (std::size_t)63);
+    std::size_t ez = std::min((std::size_t)(instance_extents[1].z / TILESIZE), (std::size_t)63);
 
     auto const real_uid (world->add_wmo_instance (std::move(instance), false, false));
 
@@ -1263,6 +1323,9 @@ void MapIndex::saveMinimapMD5translate()
 
 void MapIndex::addTile(const TileIndex& tile)
 {
+  unloadTile(tile);
+  std::unique_lock<std::mutex> lock(_mutex);
+
   std::stringstream filename;
   filename << "World\\Maps\\" << basename << "\\" << basename << "_" << tile.x << "_" << tile.z << ".adt";
 
@@ -1279,6 +1342,9 @@ void MapIndex::addTile(const TileIndex& tile)
 
 void MapIndex::removeTile(const TileIndex &tile)
 {
+  unloadTile(tile);
+  std::unique_lock<std::mutex> lock(_mutex);
+
   mTiles[tile.z][tile.x].flags &= ~0x1;
 
   std::stringstream filename;
@@ -1479,5 +1545,6 @@ MapTileEntry::MapTileEntry()
   : flags(0)
   , tile(nullptr)
   , onDisc(false)
+  , counted_as_loaded(false)
 {
 }

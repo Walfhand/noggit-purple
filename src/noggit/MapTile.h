@@ -127,7 +127,8 @@ public:
 
   bool tile_is_being_reloaded() const;
 
-  std::vector<uint32_t>* get_uids();
+  [[nodiscard]]
+  std::vector<uint32_t> get_uids() const;
 
   void initEmptyChunks();
 
@@ -150,12 +151,12 @@ public:
   void recalcObjectInstanceExtents();
   void recalcCombinedExtents();
   std::array<glm::vec3, 2>& getExtents();;
-  std::array<glm::vec3, 2>& getCombinedExtents();;
+  std::array<glm::vec3, 2> getCombinedExtents();;
 
   World* getWorld();;
 
   [[nodiscard]]
-  tsl::robin_map<AsyncObject*, std::vector<SceneObject*>> const& getObjectInstances() const;;
+  tsl::robin_map<AsyncObject*, std::vector<SceneObject*>> getObjectInstances() const;;
 
   float camDist() const;
   void calcCamDist(glm::vec3 const& camera);
@@ -196,8 +197,6 @@ private:
   unsigned _chunk_update_flags;
 
   bool _textures_finished_loading = false;
-  bool _objects_finished_loading = false;
-
   // MHDR:
   int mFlags = 0;
   bool mBigAlpha;
@@ -210,6 +209,8 @@ private:
   
   std::vector<uint32_t> uids;
   tsl::robin_map<AsyncObject*, std::vector<SceneObject*>> object_instances; // only includes M2 and WMO. perhaps a medium common ancestor then?
+  mutable std::mutex _object_state_mutex;
+  std::uint64_t _object_state_generation = 0;
 
   std::unique_ptr<MapChunk> mChunks[16][16];
   std::array<float, 145 * 256 * 4> _chunk_heightmap_buffer;

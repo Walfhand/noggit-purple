@@ -320,8 +320,8 @@ namespace Noggit::Ai
           {"maxItems", 16}
         }},
         {"half_width_ratio", {
-          {"type", "number"}, {"minimum", 0.005}, {"maximum", 0.25},
-          {"description", "Demi-largeur du cœur, en proportion du plus petit côté de la carte."}
+          {"type", "number"}, {"minimum", 0.0}, {"maximum", 0.25},
+          {"description", "Demi-largeur du cœur, en proportion du plus petit côté de la carte. 0 est permis uniquement pour area ; corridor exige au moins 0.005."}
         }},
         {"transition_width_ratio", {
           {"type", "number"}, {"minimum", 0.001}, {"maximum", 0.25},
@@ -789,8 +789,15 @@ namespace Noggit::Ai
       },
       {
         {"type", "function"},
+        {"name", "validate_moba_footprint"},
+        {"description", "Préflight non destructif d'une arène MOBA : charge toute l'empreinte et refuse les trous de terrain, chunks infranchissables et placements M2/WMO préexistants avant la première mutation."},
+        {"parameters", context_parameters},
+        {"strict", true}
+      },
+      {
+        {"type", "function"},
         {"name", "create_moba_arena_blueprint"},
-        {"description", "Compile les choix esthétiques de l'IA en une topologie MOBA fixe et cohérente sur une carte carrée de 2x2 à 4x4 tuiles : exactement trois voies, deux bases fortifiées avec trois entrées, une rivière, quatre jungles élevées par des reliefs rocheux irréguliers, vingt chemins, douze camps de tailles variées et deux clairières d'objectif préservées du relief. Chaque quadrant possède cinq portes et un graphe centré sur le buff ; le camp moyen traverse la route principale et le petit camp forme un court cul-de-sac. Les murs M2 collidables sont réservés aux enceintes architecturales des bases ; la jungle est délimitée par le terrain, les rochers et la végétation d'une même famille visuelle récente du Patch-N. Ajoute une couche d'ambiance : fontaines ou statues de base, statues d'objectif, braziers de camps et d'entrées, lampadaires couplés aux lumières dynamiques de Patch-E, puis une skybox moderne de Patch-N. Retourne sept appels génériques à exécuter sans modifier leurs arguments."},
+        {"description", "Compile les choix esthétiques de l'IA en une topologie MOBA fixe et cohérente sur une carte carrée de 2x2 à 4x4 tuiles : exactement trois voies, deux bases fortifiées avec trois entrées, une rivière, quatre jungles élevées par des reliefs rocheux irréguliers, vingt chemins, douze camps de tailles variées et deux clairières d'objectif préservées du relief. Chaque quadrant possède cinq portes et un graphe centré sur le buff ; le camp moyen traverse la route principale et le petit camp forme un court cul-de-sac. Les murs M2 collidables sont réservés aux enceintes architecturales des bases ; la jungle est délimitée par le terrain, les rochers et la végétation d'une même famille visuelle récente du Patch-N. Ajoute une couche d'ambiance : fontaines ou statues de base, statues d'objectif, braziers de camps et d'entrées, lampadaires couplés aux lumières dynamiques de Patch-E, puis une skybox moderne de Patch-N. Retourne le préflight, les sept mutations et la validation finale à exécuter sans modifier leurs arguments."},
         {"parameters", std::move(moba_parameters)},
         {"strict", true}
       },

@@ -124,7 +124,7 @@ void WorldRender::draw (glm::mat4x4 const& model_view
 
     if (render_settings.minimap_render)
     {
-      auto& tile_extents = tile->getCombinedExtents();
+      auto const tile_extents = tile->getCombinedExtents();
       tile->calcCamDist(camera_pos);
       tile->renderer()->setFrustumCulled(false);
       tile->renderer()->setObjectsFrustumCullTest(2);
@@ -136,7 +136,7 @@ void WorldRender::draw (glm::mat4x4 const& model_view
       continue;
     }
 
-    auto& tile_extents = tile->getCombinedExtents();
+    auto const tile_extents = tile->getCombinedExtents();
     if (frustum.intersects(tile_extents[1], tile_extents[0]) || tile->getChunkUpdateFlags())
     {
       tile->calcCamDist(camera_pos);
@@ -207,10 +207,13 @@ void WorldRender::draw (glm::mat4x4 const& model_view
               {
                 if (wmo.wmo->finishedLoading() && wmo.wmo->skybox)
                 {
-                  if (wmo.getGroupExtents().empty())
+                  auto group_extents = wmo.getGroupExtents();
+                  if (group_extents.empty())
                   {
                     wmo.recalcExtents();
+                    group_extents = wmo.getGroupExtents();
                   }
+                  auto const wmo_extents = wmo.getExtents();
 
                   hadSky = wmo.wmo->renderer()->drawSkybox(model_view
                       , camera_pos
@@ -219,9 +222,9 @@ void WorldRender::draw (glm::mat4x4 const& model_view
                       , _cull_distance
                       , _world->animtime
                       , render_settings.draw_model_animations
-                      , wmo.getExtents()[0]
-                      , wmo.getExtents()[1]
-                      , wmo.getGroupExtents()
+                      , wmo_extents[0]
+                      , wmo_extents[1]
+                      , group_extents
                   );
                 }
 
@@ -560,7 +563,8 @@ void WorldRender::draw (glm::mat4x4 const& model_view
               render = true; // skip visibility checks
             }
           }
-          if (!render && tile->renderer()->objectsFrustumCullTest() > 1 || frustum.intersects(wmo_instance->getExtents()[1], wmo_instance->getExtents()[0]))
+          auto const wmo_extents = wmo_instance->getExtents();
+          if (!render && tile->renderer()->objectsFrustumCullTest() > 1 || frustum.intersects(wmo_extents[1], wmo_extents[0]))
           {
             render = true;
           }
@@ -572,50 +576,25 @@ void WorldRender::draw (glm::mat4x4 const& model_view
 
             if (render_settings.draw_wmo_doodads)
             {
-              // auto doodads = wmo_instance->get_visible_doodads(frustum, _cull_distance, camera_pos, draw_hidden_models, display);
-              // 
-              // for (auto& doodad : doodads)
-              // {
-              //     if (doodad->frame == frame)
-              //         continue;
-              //     doodad->frame = frame;
-              // 
-              //     auto& instances = models_to_draw[doodad->model.get()];
-              // 
-              //     instances.emplace_back(doodad->transformMatrix());
-              // }
-
-              // doodad->isInFrustum(frustum);
-
-              std::map<uint32_t, std::vector<wmo_doodad_instance>>* doodads = wmo_instance->get_doodads(render_settings.draw_hidden_models);
-              
-              if (!doodads)
-                continue;
-              
-              for (auto& pair : *doodads)
-              {
-                for (auto& doodad : pair.second)
+              wmo_instance->for_each_doodad(
+                render_settings.draw_hidden_models,
+                [&](wmo_doodad_instance& doodad)
                 {
-                    if (doodad.frame == frame)
-                        continue;
-                    doodad.frame = frame;
+                  if (doodad.frame == frame)
+                    return;
+                  doodad.frame = frame;
 
-                    // skip no geometry boxes for WMO doodads
-                    if (doodad.model->use_fake_geometry())
-                      continue;
+                  // skip no geometry boxes for WMO doodads
+                  if (doodad.model->use_fake_geometry())
+                    return;
 
-                    // apply size culling to wmo doodads?
-                    float dist = glm::distance(camera_pos, doodad.world_pos) - (doodad.model->bounding_box_radius * doodad.scale);
+                  if (!doodad.isInRenderDist(
+                        _cull_distance, camera_pos, render_settings.display_mode))
+                    return;
 
-                    if (!doodad.isInRenderDist(_cull_distance, camera_pos, render_settings.display_mode))
-                      continue;
-                    // TODO can check if in indoor group & exterior not hidden for further optimization. possibly check portals relations
-              
-                    auto& instances = models_to_draw[doodad.model.get()];
-              
-                    instances.emplace_back(doodad.transformMatrix());
-                }
-              }
+                  models_to_draw[doodad.model.get()].emplace_back(
+                    doodad.transformMatrix());
+                });
             }
           }
         }
@@ -791,7 +770,7 @@ void WorldRender::draw (glm::mat4x4 const& model_view
       }
 
       glm::mat4x4 identity_mtx = glm::mat4x4{1};
-      auto& extents = tile->getCombinedExtents();
+      auto const extents = tile->getCombinedExtents();
       Noggit::Rendering::Primitives::WireBox::getInstance(_world->_context).draw ( model_view
           , projection
           , identity_mtx
@@ -911,41 +890,6 @@ void WorldRender::draw (glm::mat4x4 const& model_view
 
         }
 
-        /*
-        if (draw_doodads_wmo)
-        {
-          _model_instance_storage.for_each_wmo_instance([&] (WMOInstance& wmo)
-            {
-              auto doodads = wmo.get_doodads(draw_hidden_models);
-
-              if (!doodads)
-                return;
-
-              static std::vector<ModelInstance*> instance_temp = {nullptr};
-              for (auto& pair : *doodads)
-              {
-                for (auto& doodad : pair.second)
-                {
-                  instance_temp[0] = &doodad;
-                  doodad.model->draw( model_view
-                    , instance_temp
-                    , m2_shader
-                    , model_render_state
-                    , frustum
-                    , culldistance
-                    , camera_pos
-                    , animtime
-                    , draw_models_with_box
-                    , model_boxes_to_draw
-                    , display
-                  );
-                }
-
-              }
-            });
-        }
-
-                  */
       }
 
     }
@@ -1544,6 +1488,17 @@ void WorldRender::upload()
 
 }
 
+void WorldRender::reloadHorizon()
+{
+  if (_world->mapIndex.hasAGlobalWMO())
+  {
+    _horizon_render.reset();
+    return;
+  }
+  _horizon_render = std::make_unique<Noggit::map_horizon::render>(
+    _world->horizon);
+}
+
 void WorldRender::unload()
 {
   ZoneScoped;
@@ -2004,7 +1959,7 @@ bool WorldRender::saveMinimap(TileIndex const& tile_idx, MinimapRenderSettings* 
   // Load tile
   bool unload = !_world->mapIndex.has_unsaved_changes(tile_idx);
 
-  if (!_world->mapIndex.tileLoaded(tile_idx) && !_world->mapIndex.tileAwaitingLoading(tile_idx))
+  if (!_world->mapIndex.tileResident(tile_idx))
   {
     MapTile* tile = _world->mapIndex.loadTile(tile_idx);
     tile->wait_until_loaded();

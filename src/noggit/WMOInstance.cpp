@@ -69,44 +69,106 @@ WMOInstance::WMOInstance(BlizzardArchive::Listfile::FileKey const& file_key, Nog
   updateTransformMatrix();
 }
 
-WMOInstance::WMOInstance(WMOInstance&& other) noexcept
-  : SceneObject(other._type, other._context)
-  , wmo(std::move(other.wmo))
-  , group_extents(other.group_extents)
-  , mFlags(other.mFlags)
-  , mNameset(other.mNameset)
-  , _doodadset(other._doodadset)
-  , _doodads_per_group(other._doodads_per_group)
-  , _need_doodadset_update(other._need_doodadset_update)
-  , _need_recalc_extents(other._need_recalc_extents)
+WMOInstance::WMOInstance(WMOInstance const& other)
+  : SceneObject(other)
+  , wmo([&other]
+    {
+      std::lock_guard lock(other._extents_mutex);
+      return other.wmo;
+    }())
 {
-  std::swap(extents, other.extents);
+  std::lock_guard lock(other._extents_mutex);
+  mFlags = other.mFlags;
+  mNameset = other.mNameset;
+  _doodadset = other._doodadset;
+  group_extents = other.group_extents;
+  _doodads_per_group = other._doodads_per_group;
+  _need_doodadset_update = other._need_doodadset_update;
+  _update_group_extents = other._update_group_extents;
+  _need_recalc_extents = other._need_recalc_extents;
+}
+
+WMOInstance& WMOInstance::operator=(WMOInstance const& other)
+{
+  if (this == &other)
+  {
+    return *this;
+  }
+
+  SceneObject::operator=(other);
+  std::scoped_lock lock(_extents_mutex, other._extents_mutex);
+  wmo = other.wmo;
+  mFlags = other.mFlags;
+  mNameset = other.mNameset;
+  _doodadset = other._doodadset;
+  group_extents = other.group_extents;
+  _doodads_per_group = other._doodads_per_group;
+  _need_doodadset_update = other._need_doodadset_update;
+  _update_group_extents = other._update_group_extents;
+  _need_recalc_extents = other._need_recalc_extents;
+  return *this;
+}
+
+WMOInstance::WMOInstance(WMOInstance&& other) noexcept
+  : SceneObject(eWMO, Noggit::MAP_VIEW)
+  , wmo([&other]
+    {
+      std::lock_guard lock(other._extents_mutex);
+      return std::move(other.wmo);
+    }())
+{
+  std::lock_guard lock(other._extents_mutex);
+  _grouped = other._grouped;
   pos = other.pos;
   scale = other.scale;
   dir = other.dir;
-  _context = other._context;
   uid = other.uid;
-
+  frame = other.frame;
+  _rendered_last_frame = other._rendered_last_frame;
+  _type = other._type;
   _transform_mat = other._transform_mat;
   _transform_mat_inverted = other._transform_mat_inverted;
+  extents = other.extents;
+  bounding_radius = other.bounding_radius;
+  _context = other._context;
+  mFlags = other.mFlags;
+  mNameset = other.mNameset;
+  _doodadset = other._doodadset;
+  group_extents = std::move(other.group_extents);
+  _doodads_per_group = std::move(other._doodads_per_group);
+  _need_doodadset_update = other._need_doodadset_update;
+  _update_group_extents = other._update_group_extents;
+  _need_recalc_extents = other._need_recalc_extents;
 }
 
 WMOInstance& WMOInstance::operator= (WMOInstance&& other) noexcept
 {
+  if (this == &other)
+  {
+    return *this;
+  }
+
+  std::scoped_lock lock(_extents_mutex, other._extents_mutex);
   std::swap(wmo, other.wmo);
+  std::swap(_grouped, other._grouped);
   std::swap(pos, other.pos);
   std::swap(extents, other.extents);
+  std::swap(bounding_radius, other.bounding_radius);
   std::swap(group_extents, other.group_extents);
   std::swap(dir, other.dir);
   std::swap(uid, other.uid);
+  std::swap(frame, other.frame);
+  std::swap(_rendered_last_frame, other._rendered_last_frame);
   std::swap(scale, other.scale);
   std::swap(mFlags, other.mFlags);
   std::swap(mNameset, other.mNameset);
   std::swap(_doodadset, other._doodadset);
   std::swap(_doodads_per_group, other._doodads_per_group);
   std::swap(_need_doodadset_update, other._need_doodadset_update);
+  std::swap(_update_group_extents, other._update_group_extents);
   std::swap(_transform_mat, other._transform_mat);
   std::swap(_transform_mat_inverted, other._transform_mat_inverted);
+  std::swap(_type, other._type);
   std::swap(_context, other._context);
   std::swap(_need_recalc_extents, other._need_recalc_extents);
   return *this;
@@ -136,7 +198,14 @@ void WMOInstance::draw ( OpenGL::Scoped::use_program& wmo_shader
     return;
   }
 
-  ensureExtents();
+  std::array<glm::vec3, 2> world_extents;
+  glm::mat4x4 world_transform;
+  {
+    std::lock_guard lock(_extents_mutex);
+    ensureExtents();
+    world_extents = extents;
+    world_transform = _transform_mat;
+  }
 
   {
     unsigned region_visible = 0;
@@ -155,17 +224,17 @@ void WMOInstance::draw ( OpenGL::Scoped::use_program& wmo_shader
       }
     }
 
-    if (!no_cull && (!region_visible || (region_visible <= 1 && !frustum.intersects(extents[1], extents[0]))))
+    if (!no_cull && (!region_visible || (region_visible <= 1 && !frustum.intersects(world_extents[1], world_extents[0]))))
     {
       return;
     }
 
-    wmo_shader.uniform("transform", _transform_mat);
+    wmo_shader.uniform("transform", world_transform);
 
     wmo->renderer()->draw( wmo_shader
               , model_view
               , projection
-              , _transform_mat
+              , world_transform
               , is_selected || _grouped
               , frustum
               , cull_distance
@@ -194,8 +263,8 @@ void WMOInstance::draw ( OpenGL::Scoped::use_program& wmo_shader
        , projection
        , glm::mat4x4(glm::mat4x4(1))
        , color
-       , extents[0]
-       , extents[1]);
+       , world_extents[0]
+       , world_extents[1]);
   }
 }
 
@@ -204,14 +273,21 @@ void WMOInstance::intersect (math::ray const& ray, selection_result* results, bo
   if (!finishedLoading() || wmo->loading_failed())
     return;
 
-  ensureExtents();
+  std::array<glm::vec3, 2> world_extents;
+  glm::mat4x4 transform_inverted;
+  {
+    std::lock_guard lock(_extents_mutex);
+    ensureExtents();
+    world_extents = extents;
+    transform_inverted = _transform_mat_inverted;
+  }
 
-  if (!ray.intersect_bounds (extents[0], extents[1]))
+  if (!ray.intersect_bounds (world_extents[0], world_extents[1]))
   {
     return;
   }
 
-  math::ray subray(_transform_mat_inverted, ray);
+  math::ray subray(transform_inverted, ray);
 
   for (auto&& result : wmo->intersect(subray, do_exterior))
   {
@@ -219,21 +295,23 @@ void WMOInstance::intersect (math::ray const& ray, selection_result* results, bo
   }
 }
 
-std::array<glm::vec3, 2> const& WMOInstance::getExtents()
+std::array<glm::vec3, 2> WMOInstance::getExtents()
 {
+  std::lock_guard lock(_extents_mutex);
   ensureExtents();
 
   return extents;
 }
 
-std::array<glm::vec3, 2> const& WMOInstance::getLocalExtents() const
+std::array<glm::vec3, 2> WMOInstance::getLocalExtents() const
 {
-
+  std::lock_guard lock(_extents_mutex);
   return { wmo->extents[0], wmo->extents[1] };
 }
 
 std::array<glm::vec3, 8> WMOInstance::getBoundingBox()
 {
+  std::lock_guard lock(_extents_mutex);
   // auto extents = getExtents();
   if (_need_recalc_extents)
     updateTransformMatrix();
@@ -248,11 +326,13 @@ std::array<glm::vec3, 8> WMOInstance::getBoundingBox()
 // not axis aligned
 bool WMOInstance::extentsDirty() const
 {
+  std::lock_guard lock(_extents_mutex);
   return _need_recalc_extents || !wmo->finishedLoading();
 }
 
 void WMOInstance::ensureExtents()
 {
+  std::lock_guard lock(_extents_mutex);
   if ( (_need_recalc_extents || _update_group_extents) && wmo->finishedLoading())
   {
     recalcExtents();
@@ -315,6 +395,7 @@ AsyncObject* WMOInstance::instance_model() const
 
 void WMOInstance::recalcExtents()
 {
+  std::lock_guard lock(_extents_mutex);
   // keep the old extents since they are saved in the adt
   if (!wmo->finishedLoading())
   {
@@ -338,6 +419,7 @@ void WMOInstance::recalcExtents()
 
   points.insert(points.end(), adjustedPoints.begin(), adjustedPoints.end());
 
+  auto const update_all_group_extents = _update_group_extents;
   for (int i = 0; i < (int)wmo->groups.size(); ++i)
   {
     auto const& group = wmo->groups[i];
@@ -352,15 +434,15 @@ void WMOInstance::recalcExtents()
 
     points.insert(points.end(), adjustedGroupPoints.begin(), adjustedGroupPoints.end());
 
-    if (group.has_skybox() || _update_group_extents)
+    if (group.has_skybox() || update_all_group_extents)
     {
       math::aabb const group_aabb(std::vector<glm::vec3>(adjustedGroupPoints.begin()
                                   , adjustedGroupPoints.end()));
 
       group_extents[i] = {group_aabb.min, group_aabb.max};
-      _update_group_extents = false;
     }
   }
+  _update_group_extents = false;
 
   math::aabb const wmo_aabb(points);
 
@@ -374,16 +456,19 @@ void WMOInstance::recalcExtents()
 
 void WMOInstance::change_nameset(uint16_t name_set)
 {
+    std::lock_guard lock(_extents_mutex);
     mNameset = name_set;
 }
 
 uint16_t WMOInstance::doodadset() const
 {
+  std::lock_guard lock(_extents_mutex);
   return _doodadset;
 }
 
 void WMOInstance::change_doodadset(uint16_t doodad_set)
 {
+  std::lock_guard lock(_extents_mutex);
   if (!wmo->finishedLoading())
   {
     _need_doodadset_update = true;
@@ -405,8 +490,9 @@ void WMOInstance::change_doodadset(uint16_t doodad_set)
 }
 
 [[nodiscard]]
-std::map<int, std::pair<glm::vec3, glm::vec3>> const& WMOInstance::getGroupExtents()
+std::map<int, std::pair<glm::vec3, glm::vec3>> WMOInstance::getGroupExtents()
 {
+  std::lock_guard lock(_extents_mutex);
   _update_group_extents = true;
   ensureExtents();
   return group_extents;
@@ -414,6 +500,7 @@ std::map<int, std::pair<glm::vec3, glm::vec3>> const& WMOInstance::getGroupExten
 
 void WMOInstance::update_doodads()
 {
+  std::lock_guard lock(_extents_mutex);
   for (auto& group_doodads : _doodads_per_group)
   {
     for (auto& doodad : group_doodads.second)
@@ -426,78 +513,29 @@ void WMOInstance::update_doodads()
   }
 }
 
-std::vector<wmo_doodad_instance*> WMOInstance::get_visible_doodads
-  ( math::frustum const& frustum
-  , float const& cull_distance
-  , glm::vec3 const& camera
-  , bool draw_hidden_models
-  , display_mode display
-  )
+void WMOInstance::for_each_doodad(
+  bool draw_hidden_models,
+  std::function<void(wmo_doodad_instance&)> const& function)
 {
-  std::vector<wmo_doodad_instance*> doodads;
+  std::lock_guard lock(_extents_mutex);
 
   if (!wmo->finishedLoading() || wmo->loading_failed())
-  {
-    return doodads;
-  }
+    return;
 
   if (_need_doodadset_update)
-  {
     change_doodadset(_doodadset);
-  }
-
-  if (!wmo->is_hidden() || draw_hidden_models)
-  {
-    for (int i = 0; i < wmo->groups.size(); ++i)
-    {
-      if (wmo->groups[i].is_visible(_transform_mat, frustum, cull_distance, camera, display))
-      {
-        for (auto& doodad : _doodads_per_group[i])
-        {
-          if (doodad.need_matrix_update())
-          {
-            doodad.update_transform_matrix_wmo(this);
-          }
-
-          doodads.push_back(&doodad);
-        }
-      }
-    }
-  } 
-
-  return doodads;
-}
-
-std::map<uint32_t, std::vector<wmo_doodad_instance>>* WMOInstance::get_doodads(bool draw_hidden_models)
-{
-
-  if (!wmo->finishedLoading() || wmo->loading_failed())
-  {
-    return nullptr;
-  }
-
-  if (_need_doodadset_update)
-  {
-    change_doodadset(_doodadset);
-  }
 
   if (wmo->is_hidden() && !draw_hidden_models)
+    return;
+
+  for (auto& group_doodads : _doodads_per_group)
   {
-    return nullptr;
-  }
-  else
-  {
-    for (int i = 0; i < wmo->groups.size(); ++i)
+    for (auto& doodad : group_doodads.second)
     {
-      for (auto& doodad : _doodads_per_group[i])
-      {
-        if (doodad.finishedLoading() && doodad.need_matrix_update())
-        {
-          doodad.update_transform_matrix_wmo(this);
-        }
-      }
+      if (doodad.finishedLoading() && doodad.need_matrix_update())
+        doodad.update_transform_matrix_wmo(this);
+
+      function(doodad);
     }
   }
-
-  return &_doodads_per_group;
 }

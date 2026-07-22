@@ -32,6 +32,7 @@ private:
   uint32_t flags;
   std::unique_ptr<MapTile> tile;
   bool onDisc;
+  bool counted_as_loaded;
 
   MapTileEntry();
 
@@ -179,6 +180,7 @@ public:
 
   bool hasAGlobalWMO() const;
   bool hasTile(const TileIndex& index) const;
+  bool tileResident(const TileIndex& tile) const;
   bool tileAwaitingLoading(const TileIndex& tile) const;
   bool tileLoaded(const TileIndex& tile) const;
 
@@ -269,5 +271,5 @@ private:
 
   Noggit::NoggitRenderContext _context;
 
-  std::mutex _mutex;
+  mutable std::mutex _mutex;
 };

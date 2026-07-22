@@ -1,20 +1,25 @@
 // This file is part of Noggit3, licensed under GNU General Public License (version 3).
 
 #include <noggit/ai/MobaArenaBlueprint.hpp>
+#include <noggit/ai/MobaArenaAudit.hpp>
 #include <noggit/ai/ProceduralLayout.hpp>
 #include <noggit/ai/ProceduralLiquidLayout.hpp>
 #include <noggit/ai/ProceduralProps.hpp>
 #include <noggit/ai/ProceduralScatter.hpp>
 
 #include <nlohmann/json.hpp>
+#include <lodepng.h>
 
 #include <algorithm>
-#include <array>
 #include <cmath>
-#include <map>
+#include <cstdint>
+#include <filesystem>
+#include <initializer_list>
+#include <iostream>
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -25,60 +30,288 @@ namespace
     if (!condition) throw std::runtime_error(message);
   }
 
+  void requireAudit(Noggit::Ai::MobaArenaAuditReport const& audit)
+  {
+    if (audit.ok()) return;
+    auto const artifacts = std::filesystem::path{NOGGIT_TEST_ARTIFACT_DIR};
+    std::filesystem::create_directories(artifacts);
+    lodepng::encode((artifacts / "moba-arena-structural.actual.png").string(),
+                    audit.preview_rgba, audit.preview_width, audit.preview_height);
+    auto message = std::string{"MOBA structural audit failed:"};
+    for (auto const& issue : audit.issues)
+    {
+      message += "\n- " + issue.code;
+      if (!issue.subject.empty()) message += " [" + issue.subject + "]";
+      message += ": " + issue.message;
+    }
+    throw std::runtime_error(message);
+  }
+
+  void verifyGolden(Noggit::Ai::MobaArenaAuditReport const& audit, bool update)
+  {
+    namespace fs = std::filesystem;
+    auto const golden = fs::path{NOGGIT_MOBA_GOLDEN_PATH};
+    if (update)
+    {
+      fs::create_directories(golden.parent_path());
+      auto const error = lodepng::encode(
+        golden.string(), audit.preview_rgba, audit.preview_width, audit.preview_height);
+      if (error) throw std::runtime_error("cannot write MOBA golden: "
+        + std::string{lodepng_error_text(error)});
+      return;
+    }
+
+    std::vector<unsigned char> expected;
+    unsigned width = 0;
+    unsigned height = 0;
+    auto const decode_error = lodepng::decode(expected, width, height, golden.string());
+    if (decode_error)
+      throw std::runtime_error("missing or unreadable MOBA golden; run "
+        "noggit-moba-arena-blueprint-test --update-golden");
+    if (width != audit.preview_width || height != audit.preview_height
+        || expected.size() != audit.preview_rgba.size())
+      throw std::runtime_error("MOBA golden dimensions changed");
+    if (expected == audit.preview_rgba) return;
+
+    std::uint64_t absolute_error = 0;
+    std::size_t changed_pixels = 0;
+    std::vector<unsigned char> diff(expected.size(), 255);
+    for (std::size_t pixel = 0; pixel < width * height; ++pixel)
+    {
+      auto maximum_delta = 0;
+      for (std::size_t channel = 0; channel < 3; ++channel)
+      {
+        auto const index = pixel * 4 + channel;
+        auto const delta = std::abs(static_cast<int>(expected[index])
+                                  - static_cast<int>(audit.preview_rgba[index]));
+        absolute_error += static_cast<std::uint64_t>(delta);
+        maximum_delta = std::max(maximum_delta, delta);
+        diff[index] = static_cast<unsigned char>(std::min(255, delta * 8));
+      }
+      changed_pixels += maximum_delta > 4;
+    }
+    auto const score = 1.0 - static_cast<double>(absolute_error)
+      / static_cast<double>(255ULL * 3ULL * width * height);
+
+    auto const artifacts = fs::path{NOGGIT_TEST_ARTIFACT_DIR};
+    fs::create_directories(artifacts);
+    lodepng::encode((artifacts / "moba-arena-semantic.actual.png").string(),
+                    audit.preview_rgba, width, height);
+    lodepng::encode((artifacts / "moba-arena-semantic.diff.png").string(),
+                    diff, width, height);
+    throw std::runtime_error("MOBA semantic golden changed: score="
+      + std::to_string(score) + ", changed_pixels="
+      + std::to_string(changed_pixels));
+  }
+
+  void verifyReferenceSimilarity(Noggit::Ai::MobaArenaAuditReport const& audit)
+  {
+    namespace fs = std::filesystem;
+    constexpr auto minimum_iou = .80;
+    constexpr auto minimum_reference_component_area = std::size_t{80};
+
+    std::vector<unsigned char> pixels;
+    unsigned width = 0;
+    unsigned height = 0;
+    auto const decode_error = lodepng::decode(
+      pixels, width, height, NOGGIT_MOBA_REFERENCE_MASK_PATH);
+    if (decode_error)
+      throw std::runtime_error("missing or unreadable MOBA reference mask: "
+        + std::string{lodepng_error_text(decode_error)});
+    if (width == 0 || height == 0 || pixels.size() != width * height * 4)
+      throw std::runtime_error("MOBA reference mask dimensions are invalid");
+
+    // The checked-in 1-bit mask is the target screenshot thresholded at
+    // arithmetic RGB mean < 35. Keep only sizeable, internal 4-connected
+    // regions so the bases and screenshot background are not scored as walls.
+    std::vector<std::uint8_t> raw(width * height);
+    std::vector<std::uint8_t> reference(width * height);
+    std::vector<std::uint8_t> visited(width * height);
+    for (std::size_t pixel = 0; pixel < raw.size(); ++pixel)
+      raw[pixel] = pixels[pixel * 4] >= 128;
+    std::vector<std::size_t> component;
+    for (std::size_t root = 0; root < raw.size(); ++root)
+    {
+      if (!raw[root] || visited[root]) continue;
+      component.clear();
+      component.push_back(root);
+      visited[root] = true;
+      auto touches_boundary = false;
+      for (std::size_t cursor = 0; cursor < component.size(); ++cursor)
+      {
+        auto const pixel = component[cursor];
+        auto const x = pixel % width;
+        auto const y = pixel / width;
+        touches_boundary |= x == 0 || y == 0 || x + 1 == width || y + 1 == height;
+        auto visit = [&](std::size_t neighbor)
+        {
+          if (!raw[neighbor] || visited[neighbor]) return;
+          visited[neighbor] = true;
+          component.push_back(neighbor);
+        };
+        if (x > 0) visit(pixel - 1);
+        if (x + 1 < width) visit(pixel + 1);
+        if (y > 0) visit(pixel - width);
+        if (y + 1 < height) visit(pixel + width);
+      }
+      if (!touches_boundary && component.size() >= minimum_reference_component_area)
+        for (auto const pixel : component) reference[pixel] = true;
+    }
+
+    auto const panel_width = audit.preview_width / 2;
+    auto const panel_height = audit.preview_height;
+    if (panel_width == 0 || panel_height == 0
+        || audit.preview_rgba.size() != audit.preview_width * panel_height * 4)
+      throw std::runtime_error("MOBA semantic wall panel dimensions are invalid");
+
+    std::uint64_t intersection = 0;
+    std::uint64_t union_count = 0;
+    std::uint64_t predicted_count = 0;
+    std::uint64_t reference_count = 0;
+    std::vector<unsigned char> overlay(width * height * 4, 255);
+    for (std::size_t y = 0; y < height; ++y)
+      for (std::size_t x = 0; x < width; ++x)
+      {
+        auto const reference_pixel = y * width + x;
+        auto const panel_x = std::min<std::size_t>(
+          panel_width - 1, (2 * x + 1) * panel_width / (2 * width));
+        auto const panel_y = std::min<std::size_t>(
+          panel_height - 1, (2 * y + 1) * panel_height / (2 * height));
+        auto const panel_pixel = (panel_y * audit.preview_width + panel_x) * 4;
+        auto const predicted = audit.preview_rgba[panel_pixel] < 30
+          && audit.preview_rgba[panel_pixel + 1] < 45
+          && audit.preview_rgba[panel_pixel + 2] < 35;
+        auto const expected = reference[reference_pixel] != 0;
+        intersection += predicted && expected;
+        union_count += predicted || expected;
+        predicted_count += predicted;
+        reference_count += expected;
+
+        auto const overlay_pixel = reference_pixel * 4;
+        if (predicted && expected)
+          overlay[overlay_pixel] = overlay[overlay_pixel + 1]
+            = overlay[overlay_pixel + 2] = 0;
+        else if (expected)
+        {
+          overlay[overlay_pixel] = 220;
+          overlay[overlay_pixel + 1] = 50;
+          overlay[overlay_pixel + 2] = 47;
+        }
+        else if (predicted)
+        {
+          overlay[overlay_pixel] = 52;
+          overlay[overlay_pixel + 1] = 120;
+          overlay[overlay_pixel + 2] = 246;
+        }
+      }
+
+    auto const iou = union_count
+      ? static_cast<double>(intersection) / static_cast<double>(union_count) : 1.0;
+    auto const precision = predicted_count
+      ? static_cast<double>(intersection) / static_cast<double>(predicted_count) : 0.0;
+    auto const recall = reference_count
+      ? static_cast<double>(intersection) / static_cast<double>(reference_count) : 0.0;
+    if (iou >= minimum_iou) return;
+
+    auto const artifacts = fs::path{NOGGIT_TEST_ARTIFACT_DIR};
+    fs::create_directories(artifacts);
+    lodepng::encode((artifacts / "moba-arena-reference.overlay.png").string(),
+                    overlay, width, height);
+    throw std::runtime_error("MOBA wall reference similarity regressed: IoU="
+      + std::to_string(iou) + " (minimum=" + std::to_string(minimum_iou)
+      + "), precision="
+      + std::to_string(precision) + ", recall=" + std::to_string(recall)
+      + "; overlay: black=match, red=missing, blue=extra");
+  }
+
+  nlohmann::json& callArguments(nlohmann::json& blueprint,
+                                std::string_view name,
+                                std::size_t occurrence = 0)
+  {
+    for (auto& call : blueprint.at("next_calls"))
+      if (call.at("name").get_ref<std::string const&>() == name
+          && occurrence-- == 0)
+        return call.at("arguments");
+    throw std::runtime_error("missing blueprint call: " + std::string{name});
+  }
+
+  nlohmann::json& terrainFeature(nlohmann::json& blueprint,
+                                 std::string_view name)
+  {
+    auto& features = callArguments(
+      blueprint, "apply_terrain_layout_on_map").at("features");
+    auto const found = std::find_if(features.begin(), features.end(),
+      [&](nlohmann::json const& feature)
+      {
+        return feature.at("name").get_ref<std::string const&>() == name;
+      });
+    if (found == features.end())
+      throw std::runtime_error("missing terrain feature: " + std::string{name});
+    return *found;
+  }
+
+  nlohmann::json& placedProp(nlohmann::json& blueprint,
+                             std::string_view name)
+  {
+    auto& props = callArguments(blueprint, "place_props_on_map").at("props");
+    auto const found = std::find_if(props.begin(), props.end(),
+      [&](nlohmann::json const& prop)
+      {
+        return prop.at("name").get_ref<std::string const&>() == name;
+      });
+    if (found == props.end())
+      throw std::runtime_error("missing placed prop: " + std::string{name});
+    return *found;
+  }
+
+  void replaceWallMass(nlohmann::json& blueprint, std::size_t ordinal,
+                       nlohmann::json replacement)
+  {
+    terrainFeature(blueprint,
+      "jungle_" + std::to_string(ordinal) + "_wall_mass")
+      = std::move(replacement);
+  }
+
+  template<typename Mutation>
+  void requireMutationIssues(nlohmann::json const& blueprint,
+                             std::initializer_list<std::string_view> codes,
+                             Mutation mutation)
+  {
+    auto corrupted = blueprint;
+    mutation(corrupted);
+    auto const audit = Noggit::Ai::auditMobaArenaBlueprint(corrupted, 2, 64);
+    for (auto const code : codes)
+    {
+      if (audit.hasIssue(code)) continue;
+      auto message = "corruption did not report " + std::string{code} + "; got:";
+      for (auto const& issue : audit.issues)
+        message += " " + issue.code + "(" + issue.message + ")";
+      if (audit.metrics.contains("boundary_openings"))
+        message += "; boundary_openings="
+          + audit.metrics.at("boundary_openings").dump();
+      if (audit.metrics.contains("corridor_width_ratio"))
+        message += "; corridor_width_ratio="
+          + audit.metrics.at("corridor_width_ratio").dump();
+      if (audit.metrics.contains("corridor_width_by_route"))
+        message += "; corridor_width_by_route="
+          + audit.metrics.at("corridor_width_by_route").dump();
+      throw std::runtime_error(message);
+    }
+  }
+
   nlohmann::json specification()
   {
-    return {
-      {"texture_paths", {"tileset/grass.blp", "tileset/dirt.blp",
-                         "tileset/mud.blp", "tileset/rock.blp"}},
-      {"liquid_type_id", 1},
-      {"assets", nlohmann::json::array({
-        {{"path", "world/tree-a.m2"}, {"role", "canopy"}, {"weight", 3},
-         {"min_scale", .8}, {"max_scale", 1.2}, {"spacing_multiplier", 1.2}},
-        {{"path", "world/tree-b.m2"}, {"role", "canopy"}, {"weight", 2},
-         {"min_scale", .7}, {"max_scale", 1.1}, {"spacing_multiplier", 1.0}},
-        {{"path", "world/tree-c.m2"}, {"role", "canopy"}, {"weight", 2},
-         {"min_scale", .8}, {"max_scale", 1.3}, {"spacing_multiplier", 1.1}},
-        {{"path", "world/bush.m2"}, {"role", "understory"}, {"weight", 2},
-         {"min_scale", .7}, {"max_scale", 1.2}, {"spacing_multiplier", .6}},
-        {{"path", "world/sapling.m2"}, {"role", "understory"}, {"weight", 2},
-         {"min_scale", .6}, {"max_scale", 1.1}, {"spacing_multiplier", .5}},
-        {{"path", "world/expansion07/doodads/bloodtroll/8tr_ancientblood_walltall01.m2"},
-         {"role", "wall"}, {"weight", 2},
-         {"min_scale", 1.5}, {"max_scale", 1.7}, {"spacing_multiplier", 1.0}},
-        {{"path", "world/expansion07/doodads/bloodtroll/8tr_ancientblood_walltall02.m2"},
-         {"role", "wall"}, {"weight", 1},
-         {"min_scale", 1.5}, {"max_scale", 1.7}, {"spacing_multiplier", 1.0}},
-        {{"path", "world/rock-a.m2"}, {"role", "rock"}, {"weight", 1},
-         {"min_scale", .9}, {"max_scale", 1.4}, {"spacing_multiplier", .9}},
-        {{"path", "world/rock-b.m2"}, {"role", "rock"}, {"weight", 1},
-         {"min_scale", .8}, {"max_scale", 1.3}, {"spacing_multiplier", .8}},
-        {{"path", "world/fern.m2"}, {"role", "detail"}, {"weight", 2},
-         {"min_scale", .6}, {"max_scale", 1.0}, {"spacing_multiplier", .4}}
-      })},
-      {"prop_paths", {
-        {"base_landmark", "world/expansion07/doodads/human/8hu_kultiras_fountain01.m2"},
-        {"objective_landmark", "world/expansion06/doodads/dungeon/doodads/7du_tombofsargeras_elunestatue01.m2"},
-        {"camp_marker", "world/expansion08/doodads/oribos/9ob_oribos_brazier01.m2"},
-        {"lane_lamp", "world/expansion06/doodads/nightelf/7ne_nightelf_streetlight01.m2"},
-        {"team_left_light", "world/noggit/lights/noggit_light_deepskyblue01.m2"},
-        {"team_right_light", "world/noggit/lights/noggit_light_orange01.m2"},
-        {"river_light", "world/noggit/lights/noggit_light_purple_withshadows01.m2"},
-        {"flame_light", "world/noggit/lights/noggit_light_orange_withshadows01.m2"},
-        {"lamp_light", "world/noggit/lights/noggit_light_dimwhite01.m2"}
-      }},
-      {"seed", "moba-test"}, {"base_height", 20}, {"river_depth", 8},
-      {"lane_width_ratio", .04}, {"river_width_ratio", .03},
-      {"lane_curvature", .6}, {"river_curvature", .5},
-      {"jungle_roughness", 5}, {"vegetation_density_per_tile", 64},
-      {"ground_effect_texture_id", 17},
-      {"skybox_path", "environments/stars/tanaan_patch_junglesky01.m2"},
-      {"skybox_flags", 1}
-    };
+    return Noggit::Ai::defaultMobaArenaSpecification();
   }
 }
 
-int main()
+int main(int argc, char** argv)
 {
+  auto const update_golden = argc == 2 && std::string_view{argv[1]} == "--update-golden";
+  auto const dump_audit = argc == 2 && std::string_view{argv[1]} == "--dump-audit";
+  if (argc > 2 || (argc == 2 && !update_golden && !dump_audit))
+    throw std::runtime_error(
+      "usage: noggit-moba-arena-blueprint-test [--update-golden|--dump-audit]");
   auto footprint = [](std::size_t width, std::size_t height)
   {
     std::vector<std::pair<std::size_t, std::size_t>> tiles;
@@ -103,58 +336,116 @@ int main()
   require(Noggit::Ai::validateMobaArenaFootprint(incomplete).has_value(),
           "a footprint with a missing tile was accepted");
 
-  auto const first = Noggit::Ai::compileMobaArenaBlueprint(specification(), 4);
-  auto const second = Noggit::Ai::compileMobaArenaBlueprint(specification(), 4);
+  auto const spec = specification();
+  auto const first = Noggit::Ai::compileMobaArenaBlueprint(spec, 4);
+  if (dump_audit)
+  {
+    auto const audit = Noggit::Ai::auditMobaArenaBlueprint(first, 4);
+    requireAudit(audit);
+    verifyReferenceSimilarity(audit);
+    auto const artifacts = std::filesystem::path{NOGGIT_TEST_ARTIFACT_DIR};
+    std::filesystem::create_directories(artifacts);
+    auto const write_error = lodepng::encode(
+      (artifacts / "moba-arena-semantic.actual.png").string(),
+      audit.preview_rgba, audit.preview_width, audit.preview_height);
+    if (write_error)
+      throw std::runtime_error("cannot write MOBA audit preview");
+    std::cout << audit.metrics.dump(2) << '\n';
+    return 0;
+  }
+  auto const second = Noggit::Ai::compileMobaArenaBlueprint(spec, 4);
   require(first == second, "blueprint must be deterministic");
-  require(first.at("topology").at("lanes") == 3
-          && first.at("topology").at("bases") == 2
-          && first.at("topology").at("objective_pits") == 2
-          && first.at("topology").at("fortified_bases") == 2
-          && first.at("topology").at("jungle_camps") == 12
-          && first.at("topology").at("camp_alcoves") == 12
-          && first.at("topology").at("camp_entrances") == 32
-          && first.at("topology").at("jungle_clear_routes") == 4
-          && first.at("topology").at("river_branch_paths") == 4
-          && first.at("topology").at("jungle_floors") == 4
-          && first.at("topology").at("jungle_wall_bands") == 0
-          && first.at("topology").at("base_wall_bands") == 2
-          && first.at("topology").at("jungle_path_wall_bands") == 0
-          && first.at("topology").at("jungle_paths") == 16
-          && first.at("topology").at("jungle_wall_cuts") == 8
-          && first.at("topology").at("door_paths") == 4
-          && first.at("topology").at("jungle_doors") == 20
-          && first.at("topology").at("camp_rings") == 0
-          && first.at("topology").at("public_entrances_per_base") == 3
-          && first.at("topology").at("landmarks") == 4
-          && first.at("topology").at("camp_braziers") == 12
-          && first.at("topology").at("entrance_braziers") == 12,
-          "fixed MOBA topology changed");
-  require(first.at("topology").at("jungle_wall_masses").get<std::size_t>() == 16,
-          "the jungle needs four separate wall islands per quadrant");
-  require(first.at("topology").at("lane_lamps").get<std::size_t>() >= 30
-            && first.at("topology").at("dynamic_lights").get<std::size_t>() >= 40,
-          "the ambience layer lost its lamps or dynamic lights");
+  auto const mutation_baseline = Noggit::Ai::compileMobaArenaBlueprint(spec, 2);
+  auto const three_tile_blueprint = Noggit::Ai::compileMobaArenaBlueprint(spec, 3);
+  auto const translated_blueprint = Noggit::Ai::compileMobaArenaBlueprint(
+    spec, 4, 20, 20);
+  require(mutation_baseline.at("audit").at("ok") == true
+            && three_tile_blueprint.at("audit").at("ok") == true
+            && translated_blueprint.at("audit").at("ok") == true,
+          "every supported footprint size and translated tile origin must pass the production audit");
+  require(translated_blueprint.at("audit").at("metrics")
+              .at("scatter").at("tile_origin").at("min_tile_x") == 20
+            && translated_blueprint.at("audit").at("metrics")
+              .at("scatter").at("tile_origin").at("min_tile_z") == 20,
+          "the production audit ignored the map's absolute tile origin");
+  auto const audit = Noggit::Ai::auditMobaArenaBlueprint(first, 4);
+  requireAudit(audit);
+  verifyReferenceSimilarity(audit);
+  require(audit.preview_width == audit.preview_resolution * 2
+            && audit.preview_height == audit.preview_resolution
+            && audit.preview_rgba.size()
+              == audit.preview_width * audit.preview_height * 4,
+          "structural audit must emit a deterministic two-panel preview");
+  require(audit.metrics.at("preview_overlays").at("liquid_cells")
+              == audit.metrics.at("liquid").at("active_mh2o_cells")
+            && audit.metrics.at("preview_overlays").at("scatter_candidates")
+              .get<std::size_t>() > 0
+            && audit.metrics.at("preview_overlays").at("props")
+              == audit.metrics.at("props").at("count"),
+          "the golden preview must cover liquid, scatter candidates and props");
+  require(audit.metrics.at("liquid").at("river_connected") == true
+            && audit.metrics.at("liquid").at("connected_mh2o_cells")
+              == audit.metrics.at("liquid").at("active_mh2o_cells")
+            && audit.metrics.at("liquid").at("maximum_water_column")
+                 .get<double>() <= 1.01
+            && audit.metrics.at("props").at("anchored")
+              == audit.metrics.at("props").at("count"),
+          "liquid continuity, per-cell wading depth or prop anchors regressed");
+
+  auto const compact_audit = Noggit::Ai::auditMobaArenaBlueprint(
+    mutation_baseline, 2, 64);
+  requireAudit(compact_audit);
+  auto requirePreviewChange = [&](char const* subject, auto mutation)
+  {
+    auto corrupted = mutation_baseline;
+    mutation(corrupted);
+    auto const changed = Noggit::Ai::auditMobaArenaBlueprint(corrupted, 2, 64);
+    if (changed.preview_rgba == compact_audit.preview_rgba)
+      throw std::runtime_error(std::string{"preview ignored "} + subject);
+  };
+  requirePreviewChange("liquid mask", [](nlohmann::json& corrupted)
+  {
+    auto& width = callArguments(corrupted, "apply_liquid_layout_on_map")
+      .at("features").front().at("half_width_ratio");
+    width = width.get<double>() + .01;
+  });
+  requirePreviewChange("scatter candidates", [](nlohmann::json& corrupted)
+  {
+    auto& seed = callArguments(corrupted, "scatter_assets_on_map", 1).at("seed");
+    seed = seed.get<std::string>() + "-preview-mutation";
+  });
+  requirePreviewChange("props", [](nlohmann::json& corrupted)
+  {
+    auto& prop = placedProp(corrupted, "team_left_glow");
+    prop["u"] = prop.at("u").get<double>() + .01;
+  });
 
   auto const& calls = first.at("next_calls");
-  require(calls.size() == 7
-          && calls[0].at("name") == "apply_terrain_layout_on_map"
-          && calls[1].at("name") == "apply_liquid_layout_on_map"
-          && calls[2].at("name") == "apply_ground_effect_on_map"
-          && calls[2].at("arguments").at("texture_path") == "tileset/grass.blp"
-          && calls[2].at("arguments").at("effect_id") == 17
-          && calls[3].at("name") == "scatter_assets_on_map"
-          && calls[4].at("name") == "place_props_on_map"
-          && calls[5].at("name") == "scatter_assets_on_map"
-          && calls[6].at("name") == "apply_skybox_on_map"
-          && calls[6].at("arguments").at("skybox_path")
-            == "environments/stars/tanaan_patch_junglesky01.m2"
-          && calls[6].at("arguments").at("flags") == 1,
+  require(calls.size() == 9
+          && calls[0].at("name") == "validate_moba_footprint"
+          && calls[0].at("arguments").empty()
+          && calls[1].at("name") == "apply_terrain_layout_on_map"
+          && calls[2].at("name") == "apply_liquid_layout_on_map"
+          && calls[3].at("name") == "apply_ground_effect_on_map"
+          && calls[3].at("arguments").at("texture_path")
+            == spec.at("texture_paths").at(0)
+          && calls[3].at("arguments").at("effect_id")
+            == spec.at("ground_effect_texture_id")
+          && calls[4].at("name") == "scatter_assets_on_map"
+          && calls[5].at("name") == "place_props_on_map"
+          && calls[6].at("name") == "scatter_assets_on_map"
+          && calls[7].at("name") == "apply_skybox_on_map"
+          && calls[7].at("arguments").at("skybox_path")
+            == spec.at("skybox_path")
+          && calls[7].at("arguments").at("flags") == spec.at("skybox_flags")
+          && calls[8].at("name") == "validate_map"
+          && calls[8].at("arguments").empty(),
           "generic execution pipeline changed");
-  auto const terrain = Noggit::Ai::parseProceduralLayout(calls[0].at("arguments"));
-  auto const liquid = Noggit::Ai::parseProceduralLiquidLayout(calls[1].at("arguments"));
-  auto const walls = Noggit::Ai::parseProceduralScatter(calls[3].at("arguments"));
-  auto const props = Noggit::Ai::parseProceduralProps(calls[4].at("arguments"));
-  auto const vegetation = Noggit::Ai::parseProceduralScatter(calls[5].at("arguments"));
+  auto const terrain = Noggit::Ai::parseProceduralLayout(calls[1].at("arguments"));
+  auto const liquid = Noggit::Ai::parseProceduralLiquidLayout(calls[2].at("arguments"));
+  auto const walls = Noggit::Ai::parseProceduralScatter(calls[4].at("arguments"));
+  auto const props = Noggit::Ai::parseProceduralProps(calls[5].at("arguments"));
+  auto const vegetation = Noggit::Ai::parseProceduralScatter(calls[6].at("arguments"));
   if (!terrain.layout) throw std::runtime_error("terrain: " + terrain.error);
   if (!liquid.layout) throw std::runtime_error("liquid: " + liquid.error);
   if (!walls.scatter) throw std::runtime_error("walls: " + walls.error);
@@ -167,600 +458,56 @@ int main()
   // column must stay under WoW's swim threshold so the river is wadeable.
   require(liquid.layout->features.front().points.front().height <= 13.01f,
           "the river water column must stay wadeable on foot");
-
-  for (auto const footprint_side : {std::size_t{2}, std::size_t{3}, std::size_t{4}})
+  auto const& liquid_feature = liquid.layout->features.front();
+  auto minimum_u = 1.0f;
+  auto maximum_u = 0.0f;
+  auto minimum_v = 1.0f;
+  auto maximum_v = 0.0f;
+  for (auto const& point : liquid_feature.points)
   {
-    auto const blueprint = Noggit::Ai::compileMobaArenaBlueprint(
-      specification(), footprint_side);
-    require(blueprint.at("connectivity").at("unreachable_pois").empty(),
-            "every camp, objective and base court must stay reachable "
-            "from the lane network");
-    require(blueprint.at("connectivity").at("enclosed_jungle_cells")
-              .get<std::size_t>() == 0,
-            "walls must not seal any walkable jungle pocket");
-    for (auto const call_index : {std::size_t{3}})
-    {
-      auto const parsed = Noggit::Ai::parseProceduralScatter(
-        blueprint.at("next_calls").at(call_index).at("arguments"));
-      require(parsed.scatter.has_value(), "footprint wall scatter is invalid");
-      for (std::size_t region_index = 0;
-           region_index < parsed.scatter->regions.size(); ++region_index)
-      {
-        auto const& region = parsed.scatter->regions[region_index];
-        auto const density = region.density_per_tile;
-        require(density > 0, "a footprint wall chain is empty");
-        auto candidates = std::vector<Noggit::Ai::ProceduralScatterCandidate>{};
-        candidates.reserve(density);
-        for (std::size_t index = 0; index < density; ++index)
-          candidates.push_back(Noggit::Ai::proceduralScatterCandidate(
-            *parsed.scatter, region_index, 0, 0, index,
-            0.0f, 1.0f, 0.0f, 1.0f));
-        auto const world_size = static_cast<float>(footprint_side) * (1600.0f / 3.0f);
-        require(std::all_of(candidates.begin(), candidates.end(),
-                            [](auto const& candidate) { return candidate.active; }),
-                "wall density produced an inactive perimeter candidate");
-        require(region.name.find("_chain") != std::string::npos,
-                "every wall region must be an open graph-derived chain");
-        for (std::size_t edge = 0; edge < region.points.size(); ++edge)
-        {
-          auto const& start = region.points[edge];
-          auto const& end = region.points[(edge + 1) % region.points.size()];
-          auto const du = end.u - start.u;
-          auto const dv = end.v - start.v;
-          auto const length = std::hypot(du, dv);
-          if (length <= .000001f) continue;
-          auto progresses = std::vector<float>{};
-          for (auto const& candidate : candidates)
-          {
-            auto const offset_u = candidate.u - start.u;
-            auto const offset_v = candidate.v - start.v;
-            auto const cross = std::abs(offset_u * dv - offset_v * du) / length;
-            auto const progress = (offset_u * du + offset_v * dv) / (length * length);
-            if (cross > .0001f || progress < -.0001f || progress > 1.0001f) continue;
-            progresses.push_back(progress);
-          }
-          if (edge + 1 == region.points.size()) continue;
-          if (candidates.size() < region.points.size()) continue;
-          require(!progresses.empty(), "a wall edge received no candidates");
-          std::sort(progresses.begin(), progresses.end());
-          require(progresses.front() * length * world_size <= 16.01f
-                    && (1.0f - progresses.back()) * length * world_size <= 16.01f,
-                  "every wall edge must reach both corners within 16 metres");
-          for (std::size_t i = 1; i < progresses.size(); ++i)
-            require((progresses[i] - progresses[i - 1]) * length * world_size <= 32.01f,
-                    "wall density must keep physical gaps within 32 metres");
-        }
-      }
-    }
+    minimum_u = std::min(minimum_u, point.u);
+    maximum_u = std::max(maximum_u, point.u);
+    minimum_v = std::min(minimum_v, point.v);
+    maximum_v = std::max(maximum_v, point.v);
   }
-
-  std::size_t lanes = 0;
-  for (auto const& feature : terrain.layout->features)
-    if (feature.name.ends_with("_lane")) ++lanes;
-  require(lanes == 3, "terrain topology is incomplete");
-  require(terrain.layout->features.front().name == "arena_ground",
-          "the whole arena needs a flat textured background feature");
-  std::size_t base_aprons = 0;
-  std::size_t base_inner_courts = 0;
-  std::size_t jungle_paths = 0;
-  std::size_t jungle_wall_cuts = 0;
-  std::size_t jungle_wall_masses = 0;
-  std::size_t camp_floors = 0;
-  for (auto const& feature : terrain.layout->features)
-  {
-    if (feature.name.ends_with("_base_apron")) ++base_aprons;
-    if (feature.name.ends_with("_inner_court")) ++base_inner_courts;
-    if (feature.name.starts_with("jungle_") && feature.name.ends_with("_path"))
-    {
-      ++jungle_paths;
-      auto const influence = feature.half_width_ratio
-        * (1.0f + feature.width_variation_ratio)
-        + feature.transition_width_ratio;
-      require(feature.half_width_ratio >= .010f
-                && influence <= .023f
-                && feature.texture_layer == 0
-                && feature.texture_strength >= .90f,
-              "jungle paths must stay narrow and visually legible");
-    }
-    if (feature.name.starts_with("jungle_")
-        && feature.name.ends_with("_wall_cut"))
-    {
-      ++jungle_wall_cuts;
-      require(feature.shape == Noggit::Ai::ProceduralLayoutShape::Corridor
-                && feature.half_width_ratio >= .007f
-                && feature.half_width_ratio <= .009f
-                && feature.transition_width_ratio <= .005f
-                && feature.texture_layer == 0
-                && feature.texture_strength >= .90f,
-              "wall cuts must form thin grass passages through broad masses");
-    }
-    if (feature.name.starts_with("jungle_")
-        && feature.name.ends_with("_wall_mass"))
-    {
-      ++jungle_wall_masses;
-      auto twice_area = 0.0f;
-      for (std::size_t i = 0; i < feature.points.size(); ++i)
-      {
-        auto const& a = feature.points[i];
-        auto const& b = feature.points[(i + 1) % feature.points.size()];
-        twice_area += a.u * b.v - b.u * a.v;
-      }
-      auto const area = std::abs(twice_area) * .5f;
-      require(feature.shape == Noggit::Ai::ProceduralLayoutShape::Area
-                && feature.transition_width_ratio <= .015f
-                && area >= .010f && area <= .070f
-                && feature.points.front().height >= 33.0f
-                && feature.points.front().height <= 35.0f,
-              "jungle walls must be medium irregular islands");
-    }
-    require(!feature.name.starts_with("jungle_strand_")
-              && !feature.name.ends_with("_ring"),
-            "isolated wall strands and repeated rings must not shape the jungle");
-    require(!feature.name.ends_with("_camp_relief")
-              && !feature.name.ends_with("_camp_access"),
-            "the wall-by-default relief encloses camps without per-camp "
-            "capsules or access cuts");
-    if (feature.name.ends_with("_camp_floor"))
-    {
-      ++camp_floors;
-      require(feature.priority > 65 && feature.priority < 70
-                && feature.transition_width_ratio <= .011f
-                && feature.points.size() == 6
-                && std::hypot(feature.points[0].u - feature.points[3].u,
-                              feature.points[0].v - feature.points[3].v) >= .04f
-                && feature.points.front().height >= 21.0f
-                && feature.points.front().height <= 22.0f
-                && feature.texture_layer == 0
-                && feature.texture_strength >= .90f,
-              "camp floors must cut compact, playable clearings");
-    }
-    require(!feature.name.ends_with("_defender_gate"),
-            "bases must not rely on artificial defender ridges");
-  }
-  require(base_aprons == 2 && base_inner_courts == 2,
-          "fortified base topology is incomplete");
-  require(jungle_paths == 16,
-          "jungle routes or gank furrows are incomplete");
-  require(jungle_wall_cuts == 8,
-          "each jungle quadrant needs two thin cuts through broad wall masses");
-  require(jungle_wall_masses == 16,
-          "the jungle needs four separate wall islands per quadrant");
-  require(camp_floors == 12,
-          "every jungle camp needs one flat clearing carved from the wall");
-  auto longest_wall_segment = 0.0f;
-  auto longest_path_segment = 0.0f;
-  for (auto const& feature : terrain.layout->features)
-  {
-    auto const wall = feature.name.starts_with("jungle_")
-      && feature.name.ends_with("_wall_mass");
-    auto const path = feature.name.starts_with("jungle_")
-      && feature.name.ends_with("_path");
-    if ((!wall && !path) || feature.points.size() < 2) continue;
-    if (wall)
-      require(feature.points.size() >= 12,
-              "jungle wall silhouettes must use articulated organic loops");
-    auto const edge_count = feature.points.size() - (path ? 1 : 0);
-    for (std::size_t i = 0; i < edge_count; ++i)
-    {
-      auto const& a = feature.points[i];
-      auto const& b = feature.points[(i + 1) % feature.points.size()];
-      auto const length = std::hypot(b.u - a.u, b.v - a.v);
-      (wall ? longest_wall_segment : longest_path_segment)
-        = std::max(wall ? longest_wall_segment : longest_path_segment, length);
-    }
-  }
-  require(longest_wall_segment <= .11f && longest_path_segment <= .13f,
-          "jungle walls and routes must not contain long straight spokes");
-  std::vector<std::size_t> feature_cores(terrain.layout->features.size());
-  std::array<std::size_t, Noggit::Ai::procedural_layout_max_texture_paths>
-    strong_texture_pixels{};
-  for (int z = 0; z < 256; ++z)
-    for (int x = 0; x < 256; ++x)
-    {
-      auto const sample = Noggit::Ai::sampleProceduralLayout(
-        *terrain.layout, (x + .5f) / 256.0f, (z + .5f) / 256.0f,
-        0.0f, 0.0f, 1066.0f, 1066.0f);
-      for (std::size_t i = 0; i < feature_cores.size(); ++i)
-        feature_cores[i] += sample.feature_masks[i] >= .999f;
-      for (std::size_t layer = 0; layer < terrain.layout->texture_paths.size(); ++layer)
-        strong_texture_pixels[layer] += sample.quantized_weights[layer] >= 64;
-    }
-  // The in-app apply_terrain_layout_on_map aborts the whole blueprint chain
-  // when ANY feature keeps no effective core pixel, so this check must stay
-  // exemption-free.
-  for (std::size_t i = 0; i < feature_cores.size(); ++i)
-    if (feature_cores[i] == 0)
-      throw std::runtime_error("missing effective core: " + terrain.layout->features[i].name);
-  for (std::size_t layer = 0; layer < terrain.layout->texture_paths.size(); ++layer)
-    require(strong_texture_pixels[layer] >= 64,
-            "a terrain texture cannot satisfy the runtime visibility check");
-  auto sampleHeight = [&](float u, float v)
-  {
-    return Noggit::Ai::sampleProceduralLayout(
-      *terrain.layout, u, v, 0.0f, 0.0f, 1600.0f, 1600.0f).height;
-  };
-  auto requireFlat = [&](float u, float v, char const* message)
-  {
-    auto const height = sampleHeight(u, v);
-    if (height < 12.0f || height > 28.0f)
-      throw std::runtime_error(std::string{message} + ": " + std::to_string(height));
-  };
-  auto const lane_height = sampleHeight(.50f, .50f);
-  auto const jungle_height = sampleHeight(.4302f, .2788f);
-  auto const path_height = sampleHeight(.165f, .5925f);
-  auto const path_core = Noggit::Ai::sampleProceduralLayout(
-    *terrain.layout, .2775f, .5375f, 0.0f, 0.0f, 1600.0f, 1600.0f);
-  require(lane_height >= 17.0f && lane_height <= 23.0f,
-          "mid lane must stay at playable base height");
-  require(jungle_height >= lane_height + 8.0f
-            && jungle_height <= lane_height + 32.0f,
-          "jungle floor must rise above the lanes");
-  if (path_height < lane_height + .5f || path_height > lane_height + 3.0f)
-    throw std::runtime_error("jungle trails must stay level with the open floor: "
-      + std::to_string(path_height));
-  require(path_core.height >= lane_height + .5f
-            && path_core.height <= lane_height + 3.0f
-            && path_core.quantized_weights[0] >= 200
-            && path_core.quantized_weights[1] <= 32,
-          "internal jungle paths must remain low and visually legible");
-  {
-    auto framed_samples = std::size_t{0};
-    auto route_samples = std::size_t{0};
-    for (auto const& path : terrain.layout->features)
-    {
-      if (!path.name.starts_with("jungle_") || !path.name.ends_with("_path"))
-        continue;
-      for (std::size_t part = 1; part < path.points.size(); ++part)
-      {
-        auto const du = path.points[part].u - path.points[part - 1].u;
-        auto const dv = path.points[part].v - path.points[part - 1].v;
-        auto const length = std::hypot(du, dv);
-        if (length <= .000001f) continue;
-        for (int step = 1; step < 8; ++step)
-        {
-          auto const t = static_cast<float>(step) / 8.0f;
-          auto const u = path.points[part - 1].u + du * t;
-          auto const v = path.points[part - 1].v + dv * t;
-          auto const normal_u = -dv / length * .04f;
-          auto const normal_v = du / length * .04f;
-          ++route_samples;
-          framed_samples += sampleHeight(u + normal_u, v + normal_v)
-                >= lane_height + 8.0f
-            || sampleHeight(u - normal_u, v - normal_v)
-                >= lane_height + 8.0f;
-        }
-      }
-    }
-    require(framed_samples * 5 >= route_samples * 3,
-            "jungle walls must frame routes instead of floating as islands");
-  }
-  struct CampProbe { float u; float v; int kind; };
-  auto const camps = std::array{
-    CampProbe{.50f, .335f, 1}, CampProbe{.48f, .25f, 2},
-    CampProbe{.435f, .18f, 0},
-    CampProbe{.745f, .435f, 1}, CampProbe{.74f, .53f, 2},
-    CampProbe{.85f, .565f, 0},
-    CampProbe{.50f, .665f, 1}, CampProbe{.52f, .75f, 2},
-    CampProbe{.565f, .82f, 0},
-    CampProbe{.255f, .565f, 1}, CampProbe{.26f, .47f, 2},
-    CampProbe{.15f, .435f, 0}
-  };
-
-  for (auto const& camp : camps)
-  {
-    auto const center = sampleHeight(camp.u, camp.v);
-    require(center >= lane_height + .5f && center <= lane_height + 3.0f,
-            "camp clearings must stay flat below their surrounding relief");
-    std::array<bool, 16> open{};
-    auto raised_rim_samples = std::size_t{0};
-    for (std::size_t i = 0; i < open.size(); ++i)
-    {
-      auto const angle = static_cast<float>(i) * 6.283185307f / 16.0f;
-      auto const rim_height = sampleHeight(
-        camp.u + std::cos(angle) * .06f,
-        camp.v + std::sin(angle) * .06f);
-      raised_rim_samples += rim_height >= center + 8.0f;
-      open[i] = rim_height <= center + 4.0f;
-    }
-    auto access_groups = std::size_t{0};
-    for (std::size_t i = 0; i < open.size(); ++i)
-      access_groups += open[i] && !open[(i + open.size() - 1) % open.size()];
-    if (raised_rim_samples
-          < static_cast<std::size_t>(camp.kind == 0 ? 3 : camp.kind == 2 ? 4 : 5))
-      throw std::runtime_error("camp clearing lacks surrounding relief at "
-        + std::to_string(camp.u) + "," + std::to_string(camp.v) + ": "
-        + std::to_string(raised_rim_samples));
-    if (camp.kind == 0 ? (access_groups < 1 || access_groups > 3)
-          : camp.kind == 1 ? (access_groups < 2 || access_groups > 3)
-          : (access_groups < 2 || access_groups > 4))
-      throw std::runtime_error("camp accesses must match the route flow at "
-        + std::to_string(camp.u) + "," + std::to_string(camp.v) + ": "
-        + std::to_string(access_groups));
-    // Buffs and medium camps form the through-route; small camps are spurs.
-    auto on_clear_route = false;
-    auto on_spur = false;
-    auto incident_paths = std::size_t{0};
-    auto path_ends_at_camp = false;
-    for (auto const& feature : terrain.layout->features)
-      if (feature.name.starts_with("jungle_") && feature.name.ends_with("_path"))
-      {
-        auto const on_path = Noggit::Ai::distanceToProceduralShape(
-          feature.points, feature.shape, camp.u, camp.v, 1, 1).distance < .001f;
-        incident_paths += on_path;
-        if (on_path)
-          path_ends_at_camp = std::hypot(feature.points.front().u - camp.u,
-                                        feature.points.front().v - camp.v) < .001f
-            || std::hypot(feature.points.back().u - camp.u,
-                          feature.points.back().v - camp.v) < .001f;
-        on_clear_route = on_clear_route
-          || (on_path && feature.name.ends_with("_clear_path"));
-        on_spur = on_spur || (on_path && feature.name.ends_with("_spur_path"));
-      }
-    require(incident_paths == 1 && !path_ends_at_camp,
-            "camp routes must pass through clearings without star hubs or lollipops");
-    require(camp.kind == 0 ? (!on_clear_route && on_spur) : on_clear_route,
-            "small camps must be spurs while hubs and medium camps stay on the clear route");
-  }
-  // Full-clear invariant: the hub/medium stretch never touches a lane;
-  // the small camp remains reachable as its short internal spur.
-  {
-    std::vector<std::vector<Noggit::Ai::ProceduralLayoutPoint>> lane_lines;
-    for (auto const& feature : terrain.layout->features)
-      if (feature.name.ends_with("_lane"))
-        lane_lines.push_back(feature.points);
-    auto const laneDistance = [&](float u, float v)
-    {
-      auto best = 10.0f;
-      for (auto const& lane : lane_lines)
-        for (std::size_t i = 1; i < lane.size(); ++i)
-        {
-          auto const du = lane[i].u - lane[i - 1].u;
-          auto const dv = lane[i].v - lane[i - 1].v;
-          auto const length_squared = du * du + dv * dv;
-          auto const t = length_squared > 0.0f
-            ? std::clamp(((u - lane[i - 1].u) * du + (v - lane[i - 1].v) * dv)
-                           / length_squared, 0.0f, 1.0f)
-            : 0.0f;
-          best = std::min(best, static_cast<float>(std::hypot(
-            u - (lane[i - 1].u + du * t), v - (lane[i - 1].v + dv * t))));
-        }
-      return best;
-    };
-    auto clear_routes = std::size_t{0};
-    for (auto const& feature : terrain.layout->features)
-    {
-      if (!feature.name.ends_with("_clear_path")) continue;
-      ++clear_routes;
-      require(feature.points.size() >= 4 && feature.points.size() <= 7,
-              "a clear route must chain lane entrance, medium camp, hub and exit");
-      auto first_camp = feature.points.size();
-      auto last_camp = std::size_t{0};
-      auto camp_vertices = std::size_t{0};
-      for (std::size_t point_index = 0;
-           point_index < feature.points.size(); ++point_index)
-        for (auto const& camp : camps)
-          if (camp.kind != 0
-              && std::hypot(feature.points[point_index].u - camp.u,
-                            feature.points[point_index].v - camp.v) < .001f)
-          {
-            first_camp = std::min(first_camp, point_index);
-            last_camp = std::max(last_camp, point_index);
-            ++camp_vertices;
-          }
-      require(camp_vertices == 2 && first_camp < last_camp,
-              "each clear route must visit exactly one medium camp and one hub");
-      for (std::size_t i = first_camp; i < last_camp; ++i)
-        for (int step = 0; step <= 16; ++step)
-        {
-          auto const t = static_cast<float>(step) / 16.0f;
-          auto const u = feature.points[i].u
-            + (feature.points[i + 1].u - feature.points[i].u) * t;
-          auto const v = feature.points[i].v
-            + (feature.points[i + 1].v - feature.points[i].v) * t;
-          require(laneDistance(u, v) > .04f + feature.half_width_ratio,
-                  "the inter-camp clear route must stay clear of every lane");
-        }
-    }
-    require(clear_routes == 4, "every jungle quadrant needs one clear route");
-  }
-  auto const objective_centers = std::array{
-    std::pair{.35f, .31f}, std::pair{.65f, .69f}};
-  auto const objective_offsets = std::array{
-    std::pair{0.0f, 0.0f}, std::pair{-.055f, 0.0f},
-    std::pair{-.0275f, -.0473f}, std::pair{.0275f, -.0473f},
-    std::pair{.055f, 0.0f}, std::pair{.0275f, .0473f},
-    std::pair{-.0275f, .0473f}};
-  for (auto const& objective : objective_centers)
-    for (auto const& offset : objective_offsets)
-    {
-      auto const sample = Noggit::Ai::sampleProceduralLayout(
-        *terrain.layout, objective.first + offset.first,
-        objective.second + offset.second,
-        0.0f, 0.0f, 1600.0f, 1600.0f);
-      require(std::abs(sample.height - (lane_height - 1.0f)) <= .75f
-                && sample.quantized_weights[2] >= 240,
-              "objective pits must keep their full flat, muddy footprint");
-    }
-  // Drake and nashor pits open onto the river only: every rim sample away
-  // from the river bed must be sealed by the jungle wall, while the river
-  // side keeps an open mouth.
-  {
-    std::vector<Noggit::Ai::ProceduralLayoutPoint> river_line;
-    for (auto const& feature : terrain.layout->features)
-      if (feature.name == "river_bed") river_line = feature.points;
-    require(!river_line.empty(), "the river bed feature is missing");
-    auto const riverDistance = [&](float u, float v)
-    {
-      auto best = 10.0f;
-      for (std::size_t i = 1; i < river_line.size(); ++i)
-      {
-        auto const du = river_line[i].u - river_line[i - 1].u;
-        auto const dv = river_line[i].v - river_line[i - 1].v;
-        auto const length_squared = du * du + dv * dv;
-        auto const t = length_squared > 0.0f
-          ? std::clamp(((u - river_line[i - 1].u) * du
-                        + (v - river_line[i - 1].v) * dv) / length_squared,
-                       0.0f, 1.0f)
-          : 0.0f;
-        best = std::min(best, static_cast<float>(std::hypot(
-          u - (river_line[i - 1].u + du * t),
-          v - (river_line[i - 1].v + dv * t))));
-      }
-      return best;
-    };
-    for (auto const& objective : objective_centers)
-    {
-      auto river_mouth_samples = std::size_t{0};
-      for (std::size_t i = 0; i < 16; ++i)
-      {
-        auto const angle = static_cast<float>(i) * 6.283185307f / 16.0f;
-        auto const u = objective.first + std::cos(angle) * .085f;
-        auto const v = objective.second + std::sin(angle) * .085f;
-        auto const height = sampleHeight(u, v);
-        if (riverDistance(u, v) > .105f && height < 32.25f)
-          throw std::runtime_error("objective pits must be sealed by the jungle wall at "
-            + std::to_string(u) + "," + std::to_string(v) + ": "
-            + std::to_string(height));
-        else if (height <= 24.0f)
-          ++river_mouth_samples;
-      }
-      require(river_mouth_samples >= 2,
-              "objective pits must keep an open mouth onto the river");
-    }
-  }
-  require(sampleHeight(.02f, .98f) >= lane_height + 1.0f,
-          "base apron must rise above the lanes");
-  require(sampleHeight(.10f, .85f) >= lane_height + 2.5f,
-          "base court must rise above the lanes");
-  requireFlat(.02f, .98f, "base apron must stay flat without relief walls");
-  requireFlat(.12f, .78f, "former defender gate relief must be flattened");
-  require(sampleHeight(.26f, .3275f) < 15.0f,
-          "the river bed must stay carved below the flat arena");
-
-  require(walls.scatter->regions.size() >= 2
-            && walls.scatter->regions.size() <= 16,
-          "the two base perimeters must yield wall chains");
-  std::set<std::string> base_chain_sides;
-  for (auto const& region : walls.scatter->regions)
-  {
-    require(region.role == "wall", "wall chains must use the dedicated wall role");
-    require(Noggit::Ai::proceduralScatterIsWallRegion(region),
-            "wall chains must be detected as aligned wall chains");
-    require(region.name.find("_chain") != std::string::npos
-              && region.name.ends_with("_wall"),
-            "collidable wall assets must be reserved for named wall chains");
-    require(region.name.starts_with("team_"),
-            "constructed walls must be reserved for fortified bases");
-    if (region.name.starts_with("team_"))
-      base_chain_sides.insert(region.name.substr(0, 9));
-    require(region.density_per_tile > 0
-              && region.min_height <= 5.0f && region.max_height >= 40.0f
-              && region.min_spacing_ratio <= .0021f
-              && region.cluster_strength == 0.0f,
-            "wall chains must be dense, uninterrupted and anchored to flat ground");
-  }
-  require(base_chain_sides.size() == 2,
-          "base wall chains are incomplete");
-  auto const wallCandidates = [](Noggit::Ai::ProceduralScatter const& scatter)
-  {
-    std::vector<std::pair<float, float>> positions;
-    for (std::size_t region_index = 0;
-         region_index < scatter.regions.size(); ++region_index)
-      for (std::size_t index = 0;
-           index < scatter.regions[region_index].density_per_tile; ++index)
-      {
-        auto const candidate = Noggit::Ai::proceduralScatterCandidate(
-          scatter, region_index, 0, 0, index, 0.0f, 1.0f, 0.0f, 1.0f);
-        positions.emplace_back(candidate.u, candidate.v);
-      }
-    return positions;
-  };
-  auto const wall_positions = wallCandidates(*walls.scatter);
-  require(std::all_of(walls.scatter->assets.begin(), walls.scatter->assets.end(),
-            [](auto const& asset)
-            {
-              return asset.role == "wall"
-                && std::abs(asset.min_scale - 1.5f) < .001f
-                && std::abs(asset.max_scale - 1.7f) < .001f;
-          })
-          && walls.scatter->assets.size() == 2
+  require(maximum_u - minimum_u + 2.0f * liquid_feature.half_width_ratio
+              >= Noggit::Ai::moba_arena_minimum_liquid_span_u
+            && maximum_v - minimum_v + 2.0f * liquid_feature.half_width_ratio
+              >= Noggit::Ai::moba_arena_minimum_liquid_span_v,
+          "the canonical river can never satisfy its runtime span contract");
+  auto expected_wall_paths = std::set<std::string>{};
+  auto expected_vegetation_paths = std::set<std::string>{};
+  for (auto const& asset : spec.at("assets"))
+    (asset.at("role") == "wall" ? expected_wall_paths : expected_vegetation_paths)
+      .insert(asset.at("path").get<std::string>());
+  auto actual_wall_paths = std::set<std::string>{};
+  auto actual_vegetation_paths = std::set<std::string>{};
+  for (auto const& asset : walls.scatter->assets)
+    actual_wall_paths.insert(asset.path);
+  for (auto const& asset : vegetation.scatter->assets)
+    actual_vegetation_paths.insert(asset.path);
+  require(expected_wall_paths == actual_wall_paths
+          && expected_vegetation_paths == actual_vegetation_paths
+          && std::all_of(walls.scatter->assets.begin(), walls.scatter->assets.end(),
+            [](auto const& asset) { return asset.role == "wall"; })
           && std::none_of(vegetation.scatter->assets.begin(), vegetation.scatter->assets.end(),
             [](auto const& asset) { return asset.role == "wall"; })
           && std::any_of(vegetation.scatter->assets.begin(), vegetation.scatter->assets.end(),
             [](auto const& asset) { return asset.role == "rock"; }),
           "wall and vegetation assets must be isolated in separate batches");
+  require(!walls.scatter->regions.empty()
+            && std::all_of(walls.scatter->regions.begin(), walls.scatter->regions.end(),
+              [](auto const& region)
+              {
+                return region.role == "wall" && region.density_per_tile > 0;
+              }),
+          "wall scatter must keep non-empty dedicated regions");
   require(std::any_of(vegetation.scatter->regions.begin(), vegetation.scatter->regions.end(),
-            [](auto const& region) { return region.role == "rock"; }),
-          "decorative rocks must be scattered inside the jungles");
-  std::map<std::string, std::size_t> jungle_layers;
-  auto vegetation_density = std::size_t{0};
-  auto canopy_density = std::size_t{0};
-  for (auto const& region : vegetation.scatter->regions)
-  {
-    ++jungle_layers[region.role];
-    vegetation_density += region.density_per_tile;
-    if (region.role == "canopy") canopy_density += region.density_per_tile;
-  }
-  require(jungle_layers["canopy"] == jungle_wall_masses
-            && jungle_layers["understory"] == jungle_wall_masses
-            && jungle_layers["rock"] * 2 == jungle_wall_masses
-            && jungle_layers["detail"] * 2 == jungle_wall_masses,
-          "every wall island needs vegetation while rocks and details alternate");
-  require(canopy_density * 2 >= vegetation_density,
-          "the jungle scatter budget must primarily build a visible tree canopy");
-  require(walls.scatter->exclusions.size() <= 96
-            && vegetation.scatter->exclusions.size() == 44,
-          "base chains carry their own openings; only repair openings and the "
-          "vegetation exclusions remain");
-  // Openings and continuity are structural now: probe candidate positions.
-  auto const nearestWallDistance = [&](float u, float v)
-  {
-    auto best = 10.0f;
-    for (auto const& [candidate_u, candidate_v] : wall_positions)
-      best = std::min(best, static_cast<float>(
-        std::hypot(candidate_u - u, candidate_v - v)));
-    return best;
-  };
-  require(nearestWallDistance(.075f, .695f) >= .018f,
-          "the top lane must keep a public entrance through the base wall");
-  require(nearestWallDistance(.015f, .85f) <= .02f,
-          "the base rear wall chain must stay continuous");
-  require(nearestWallDistance(.27f, .84f) <= .02f,
-          "the jungle path breach into the base must be sealed by the wall chain");
-  require(Noggit::Ai::proceduralScatterExcluded(
-            *vegetation.scatter, .50f, .50f, 1066.0f, 1066.0f),
-          "middle lane and river crossing must be protected from decoration");
-  require(!Noggit::Ai::proceduralScatterExcluded(
-            *vegetation.scatter, .28f, .24f, 1066.0f, 1066.0f),
-          "jungle interior should remain available for decoration");
-  require(Noggit::Ai::proceduralScatterExcluded(
-            *vegetation.scatter, .165f, .5925f, 1066.0f, 1066.0f),
-          "jungle routes must remain open through the vegetation bands");
-  require(Noggit::Ai::proceduralScatterExcluded(
-            *vegetation.scatter, .48f, .25f, 1066.0f, 1066.0f),
-          "camp clearings must remain free of decoration");
-  for (auto const* scatter : {&*walls.scatter})
-    for (std::size_t region_index = 0;
-         region_index < scatter->regions.size(); ++region_index)
-    {
-      auto const& region = scatter->regions[region_index];
-      auto viable = std::size_t{0};
-      for (std::size_t index = 0; index < region.density_per_tile; ++index)
-      {
-        auto const candidate = Noggit::Ai::proceduralScatterCandidate(
-          *scatter, region_index, 0, 0, index, 0.0f, 1.0f, 0.0f, 1.0f);
-        auto const is_clear = !Noggit::Ai::proceduralScatterExcluded(
-          *scatter, candidate.u, candidate.v, 1600.0f, 1600.0f);
-        auto const height = sampleHeight(candidate.u, candidate.v);
-        if (candidate.active && is_clear
-            && height >= region.min_height && height <= region.max_height)
-          ++viable;
-      }
-      // Chains bake their openings in, so nearly every candidate must place.
-      if (viable * 4 < region.density_per_tile * 3)
-        throw std::runtime_error("insufficient deterministic wall chain for "
-          + region.name + ": " + std::to_string(viable));
-    }
+            [](auto const& region)
+            {
+              return region.role == "canopy" || region.role == "rock";
+            }),
+          "vegetation scatter must retain canopy or decorative rock regions");
   auto candidateCount = [](Noggit::Ai::ProceduralScatter const& scatter, int tiles)
   {
     auto count = std::size_t{0};
@@ -784,10 +531,10 @@ int main()
   }
 
   auto sparse_vegetation = specification();
-  sparse_vegetation["vegetation_density_per_tile"] = 1;
+  sparse_vegetation["vegetation_density_per_tile"] = 80;
   auto const sparse_blueprint = Noggit::Ai::compileMobaArenaBlueprint(sparse_vegetation, 4);
   auto const sparse_walls = Noggit::Ai::parseProceduralScatter(
-    sparse_blueprint.at("next_calls").at(3).at("arguments"));
+    sparse_blueprint.at("next_calls").at(4).at("arguments"));
   require(sparse_walls.scatter
             && sparse_walls.scatter->regions.size() == walls.scatter->regions.size()
             && std::equal(sparse_walls.scatter->regions.begin(),
@@ -815,15 +562,332 @@ int main()
             && prop_names.contains("objective_north_landmark")
             && prop_names.contains("objective_south_landmark"),
           "base and objective landmarks are missing");
-  require(lamp_props == first.at("topology").at("lane_lamps").get<std::size_t>()
-            && lamp_props >= 30,
+  require(lamp_props >= 30,
           "lane lamp chains are incomplete");
-  require(light_props == first.at("topology").at("dynamic_lights").get<std::size_t>(),
+  require(light_props >= 40,
           "every ambience light must come from the Patch-E light pack");
 
-  auto single_wall = specification();
-  single_wall["assets"].erase(single_wall["assets"].begin() + 6);
-  static_cast<void>(Noggit::Ai::compileMobaArenaBlueprint(single_wall, 4));
+  requireMutationIssues(mutation_baseline, {"poi.unreachable"}, [](nlohmann::json& corrupted)
+  {
+    for (auto& point : terrainFeature(corrupted, "objective_north").at("points"))
+      point["height"] = 100.0;
+  });
+  requireMutationIssues(mutation_baseline, {"navigation.boundary_continuity"},
+    [](nlohmann::json& corrupted)
+  {
+    auto barrier = terrainFeature(corrupted, "objective_north");
+    barrier["name"] = "top_lane_cut";
+    barrier["priority"] = 100;
+    barrier["half_width_ratio"] = .005;
+    barrier["transition_width_ratio"] = .001;
+    barrier["points"] = nlohmann::json::array({
+      {{"u", .47}, {"v", .025}, {"height", 100.0}},
+      {{"u", .53}, {"v", .025}, {"height", 100.0}},
+      {{"u", .53}, {"v", .09}, {"height", 100.0}},
+      {{"u", .47}, {"v", .09}, {"height", 100.0}}
+    });
+    replaceWallMass(corrupted, 46, std::move(barrier));
+  });
+  requireMutationIssues(mutation_baseline, {"boundary.opening_width"},
+    [](nlohmann::json& corrupted)
+  {
+    auto& breach = terrainFeature(corrupted, "jungle_2_upper_wall_cut");
+    breach["priority"] = 100;
+    breach["half_width_ratio"] = .20;
+    breach["transition_width_ratio"] = .001;
+    breach["width_variation_ratio"] = 0.0;
+  });
+  requireMutationIssues(mutation_baseline, {"boundary.separator_width"},
+    [](nlohmann::json& corrupted)
+  {
+    auto& breach = terrainFeature(corrupted, "jungle_2_upper_wall_cut");
+    breach["priority"] = 99;
+    breach["half_width_ratio"] = .20;
+    breach["transition_width_ratio"] = .001;
+    breach["width_variation_ratio"] = 0.0;
+    auto separator = terrainFeature(corrupted, "objective_north");
+    separator["name"] = "middle_lane_thin_separator";
+    separator["priority"] = 100;
+    separator["half_width_ratio"] = 0.0;
+    separator["transition_width_ratio"] = .001;
+    separator["points"] = nlohmann::json::array({
+      {{"u", .6650}, {"v", .2843}, {"height", 26.5}},
+      {{"u", .6680}, {"v", .2817}, {"height", 26.5}},
+      {{"u", .7350}, {"v", .3557}, {"height", 26.5}},
+      {{"u", .7320}, {"v", .3583}, {"height", 26.5}}
+    });
+    replaceWallMass(corrupted, 46, std::move(separator));
+  });
+  requireMutationIssues(mutation_baseline, {"quadrant.loop"},
+    [](nlohmann::json& corrupted)
+  {
+    auto barrier = terrainFeature(corrupted, "objective_north");
+    barrier["name"] = "north_top_door_block";
+    barrier["priority"] = 100;
+    barrier["half_width_ratio"] = .005;
+    barrier["transition_width_ratio"] = .001;
+    barrier["points"] = nlohmann::json::array({
+      {{"u", .71}, {"v", .03}, {"height", 100.0}},
+      {{"u", .79}, {"v", .03}, {"height", 100.0}},
+      {{"u", .79}, {"v", .10}, {"height", 100.0}},
+      {{"u", .71}, {"v", .10}, {"height", 100.0}}
+    });
+    replaceWallMass(corrupted, 46, std::move(barrier));
+  });
+  requireMutationIssues(mutation_baseline, {"corridor.declared_width"},
+    [](nlohmann::json& corrupted)
+  {
+    for (auto& feature : callArguments(
+           corrupted, "apply_terrain_layout_on_map").at("features"))
+    {
+      auto const& name = feature.at("name").get_ref<std::string const&>();
+      if (!name.starts_with("jungle_") || !name.ends_with("_path")) continue;
+      feature["half_width_ratio"] = .005;
+      feature["transition_width_ratio"] = .001;
+      feature["width_variation_ratio"] = 0.0;
+    }
+  });
+  requireMutationIssues(mutation_baseline, {"corridor.physical_width"},
+    [](nlohmann::json& corrupted)
+  {
+    auto first_wall = terrainFeature(corrupted, "objective_north");
+    first_wall["name"] = "narrow_door_first_wall";
+    first_wall["shape"] = "corridor";
+    first_wall["priority"] = 100;
+    first_wall["half_width_ratio"] = .005;
+    first_wall["transition_width_ratio"] = .001;
+    first_wall["points"] = nlohmann::json::array({
+      {{"u", .9336}, {"v", .3809}, {"height", 26.5}},
+      {{"u", .8925}, {"v", .5254}, {"height", 26.5}},
+      {{"u", .9258}, {"v", .6367}, {"height", 26.5}},
+      {{"u", .9336}, {"v", .6797}, {"height", 26.5}}
+    });
+    auto second_wall = first_wall;
+    second_wall["name"] = "narrow_door_second_wall";
+    second_wall["points"] = nlohmann::json::array({
+      {{"u", .9176}, {"v", .3809}, {"height", 26.5}},
+      {{"u", .8765}, {"v", .5254}, {"height", 26.5}},
+      {{"u", .9098}, {"v", .6367}, {"height", 26.5}},
+      {{"u", .9176}, {"v", .6797}, {"height", 26.5}}
+    });
+    replaceWallMass(corrupted, 45, std::move(first_wall));
+    replaceWallMass(corrupted, 46, std::move(second_wall));
+  });
+  requireMutationIssues(mutation_baseline,
+    {"manifest.kind", "camp.route_mouth_count"},
+    [](nlohmann::json& corrupted)
+  {
+    auto& camps = corrupted.at("moba_semantics").at("camps");
+    auto const hub = std::find_if(camps.begin(), camps.end(),
+      [](nlohmann::json const& camp)
+    {
+      return camp.at("kind") == "hub";
+    });
+    auto const medium = std::find_if(camps.begin(), camps.end(),
+      [](nlohmann::json const& camp)
+    {
+      return camp.at("kind") == "medium";
+    });
+    if (hub == camps.end() || medium == camps.end())
+      throw std::runtime_error("missing camp kinds in mutation fixture");
+    (*hub)["kind"] = "spur";
+    (*medium)["kind"] = "invalid";
+  });
+  requireMutationIssues(mutation_baseline, {"camp.mouth_count"},
+    [](nlohmann::json& corrupted)
+  {
+    auto ring = terrainFeature(corrupted, "objective_north");
+    ring["name"] = "north_red_blocked_ring";
+    ring["priority"] = 100;
+    ring["half_width_ratio"] = 0.0;
+    ring["transition_width_ratio"] = .001;
+    ring["points"] = nlohmann::json::array({
+      {{"u", .4055}, {"v", .2637}, {"height", 26.5}},
+      {{"u", .4405}, {"v", .2031}, {"height", 26.5}},
+      {{"u", .5105}, {"v", .2031}, {"height", 26.5}},
+      {{"u", .5455}, {"v", .2637}, {"height", 26.5}},
+      {{"u", .5105}, {"v", .3243}, {"height", 26.5}},
+      {{"u", .4405}, {"v", .3243}, {"height", 26.5}}
+    });
+    replaceWallMass(corrupted, 46, std::move(ring));
+  });
+  requireMutationIssues(mutation_baseline, {"manifest.boundaries"},
+    [](nlohmann::json& corrupted)
+  {
+    auto& boundaries = corrupted.at("moba_semantics").at("boundaries");
+    boundaries.erase(boundaries.begin());
+  });
+  requireMutationIssues(mutation_baseline,
+    {"route.boundary_contacts", "quadrant.door_count"},
+    [](nlohmann::json& corrupted)
+  {
+    auto& points = terrainFeature(
+      corrupted, "jungle_1_lane_door_path").at("points");
+    points = nlohmann::json::array({points.at(1)});
+  });
+  requireMutationIssues(mutation_baseline, {"wall.too_thick"},
+    [](nlohmann::json& corrupted)
+  {
+    for (auto& feature : callArguments(
+           corrupted, "apply_terrain_layout_on_map").at("features"))
+    {
+      auto const& name = feature.at("name").get_ref<std::string const&>();
+      if (!name.starts_with("jungle_") || !name.ends_with("_wall_mass")) continue;
+      feature["half_width_ratio"] = .25;
+      feature["transition_width_ratio"] = .001;
+    }
+  });
+  requireMutationIssues(mutation_baseline, {"symmetry.geometry"},
+    [](nlohmann::json& corrupted)
+  {
+    terrainFeature(corrupted, "objective_north")["half_width_ratio"] = .006;
+  });
+  requireMutationIssues(mutation_baseline, {"symmetry.rotation_mask"},
+    [](nlohmann::json& corrupted)
+  {
+    for (auto& feature : callArguments(
+           corrupted, "apply_terrain_layout_on_map").at("features"))
+    {
+      auto const& name = feature.at("name").get_ref<std::string const&>();
+      if (!name.starts_with("jungle_") || !name.ends_with("_wall_mass"))
+        continue;
+      auto u = 0.0;
+      auto v = 0.0;
+      for (auto const& point : feature.at("points"))
+      {
+        u += point.at("u").get<double>();
+        v += point.at("v").get<double>();
+      }
+      u /= static_cast<double>(feature.at("points").size());
+      v /= static_cast<double>(feature.at("points").size());
+      if (u + v >= 1.0) continue;
+      for (auto& point : feature.at("points")) point["height"] = 20.0;
+    }
+  });
+  requireMutationIssues(mutation_baseline, {"texture.jungle_identity"},
+    [](nlohmann::json& corrupted)
+  {
+    auto& paths = callArguments(
+      corrupted, "apply_terrain_layout_on_map").at("texture_paths");
+    std::swap(paths.at(0), paths.at(2));
+  });
+  requireMutationIssues(mutation_baseline, {"liquid.river_alignment"},
+    [](nlohmann::json& corrupted)
+  {
+    auto& points = callArguments(
+      corrupted, "apply_liquid_layout_on_map").at("features").front().at("points");
+    for (auto& point : points) point["v"] = point.at("v").get<double>() + .05;
+  });
+  requireMutationIssues(mutation_baseline, {"liquid.river_continuity"},
+    [](nlohmann::json& corrupted)
+  {
+    auto& points = terrainFeature(corrupted, "river_bed").at("points");
+    points.at(points.size() / 2)["height"] = 80.0;
+  });
+  requireMutationIssues(mutation_baseline, {"liquid.wadeable"},
+    [](nlohmann::json& corrupted)
+  {
+    auto trench = terrainFeature(corrupted, "objective_north");
+    trench["name"] = "liquid_depth_corruption";
+    trench["priority"] = 100;
+    trench["half_width_ratio"] = .005;
+    trench["transition_width_ratio"] = .001;
+    trench["points"] = nlohmann::json::array({
+      {{"u", .485}, {"v", .49}, {"height", 0.0}},
+      {{"u", .50}, {"v", .48}, {"height", 0.0}},
+      {{"u", .515}, {"v", .49}, {"height", 0.0}},
+      {{"u", .515}, {"v", .51}, {"height", 0.0}},
+      {{"u", .50}, {"v", .52}, {"height", 0.0}},
+      {{"u", .485}, {"v", .51}, {"height", 0.0}}
+    });
+    replaceWallMass(corrupted, 46, std::move(trench));
+  });
+  requireMutationIssues(mutation_baseline,
+    {"props.missing", "props.name_contract"}, [](nlohmann::json& corrupted)
+  {
+    placedProp(corrupted, "team_left_landmark")["name"] = "orphan_landmark";
+  });
+  requireMutationIssues(mutation_baseline,
+    {"props.anchor", "props.liquid"}, [](nlohmann::json& corrupted)
+  {
+    auto& prop = placedProp(corrupted, "north_red_brazier");
+    prop["u"] = .5;
+    prop["v"] = .5;
+  });
+  requireMutationIssues(mutation_baseline,
+    {"props.anchor", "props.light_pair"}, [](nlohmann::json& corrupted)
+  {
+    auto& prop = placedProp(corrupted, "team_left_glow");
+    prop["u"] = prop.at("u").get<double>() + .01;
+  });
+  requireMutationIssues(mutation_baseline, {"props.unwalkable"},
+    [](nlohmann::json& corrupted)
+  {
+    auto const& wall = terrainFeature(corrupted, "jungle_5_wall_mass");
+    auto u = 0.0;
+    auto v = 0.0;
+    for (auto const& point : wall.at("points"))
+    {
+      u += point.at("u").get<double>();
+      v += point.at("v").get<double>();
+    }
+    u /= static_cast<double>(wall.at("points").size());
+    v /= static_cast<double>(wall.at("points").size());
+    auto& prop = placedProp(corrupted, "north_red_brazier");
+    prop["u"] = u;
+    prop["v"] = v;
+  });
+  requireMutationIssues(mutation_baseline, {"props.spatial_duplicate"},
+    [](nlohmann::json& corrupted)
+  {
+    auto& duplicate = placedProp(corrupted, "north_raptors_brazier");
+    auto const& existing = placedProp(corrupted, "north_red_brazier");
+    duplicate["u"] = existing.at("u");
+    duplicate["v"] = existing.at("v");
+  });
+  requireMutationIssues(mutation_baseline, {"symmetry.props"},
+    [](nlohmann::json& corrupted)
+  {
+    for (auto const name : {"north_red_brazier", "north_red_flame"})
+    {
+      auto& prop = placedProp(corrupted, name);
+      prop["u"] = prop.at("u").get<double>() + .005;
+    }
+  });
+  requireMutationIssues(mutation_baseline, {"manifest.missing"},
+    [](nlohmann::json& corrupted)
+  {
+    corrupted.erase("moba_semantics");
+  });
+  requireMutationIssues(mutation_baseline,
+    {"manifest.objectives", "manifest.bases"}, [](nlohmann::json& corrupted)
+  {
+    auto& semantics = corrupted.at("moba_semantics");
+    semantics.at("objectives").front()["name"] = "objective_unknown";
+    auto& bases = semantics.at("bases");
+    bases.erase(bases.end() - 1);
+  });
+  requireMutationIssues(mutation_baseline, {"manifest.unregistered"},
+    [](nlohmann::json& corrupted)
+  {
+    corrupted.at("moba_semantics").at("routes").erase(
+      corrupted.at("moba_semantics").at("routes").begin());
+  });
+  requireMutationIssues(mutation_baseline,
+    {"scatter.route_exclusion", "scatter.camp_exclusion"},
+    [](nlohmann::json& corrupted)
+  {
+    callArguments(corrupted, "scatter_assets_on_map", 1)["exclusions"]
+      = nlohmann::json::array();
+  });
+  requireMutationIssues(mutation_baseline, {"feature.core_missing"},
+    [](nlohmann::json& corrupted)
+  {
+    auto cover = terrainFeature(corrupted, "arena_ground");
+    cover["name"] = "arena_ground_cover";
+    cover["priority"] = 6;
+    replaceWallMass(corrupted, 46, std::move(cover));
+  });
 
   auto missing_walls = specification();
   for (auto& asset : missing_walls["assets"])
@@ -847,4 +911,6 @@ int main()
   catch (std::invalid_argument const&)
   {
   }
+
+  verifyGolden(audit, update_golden);
 }

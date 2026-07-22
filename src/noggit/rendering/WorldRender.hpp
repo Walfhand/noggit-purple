@@ -78,6 +78,7 @@ namespace Noggit::Rendering
 
     void upload() override;
     void unload() override;
+    void reloadHorizon();
 
     void draw (glm::mat4x4 const& model_view
         , glm::mat4x4 const& projection

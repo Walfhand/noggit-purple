@@ -47,7 +47,7 @@ int main()
 {
   auto const tools = Noggit::Ai::toolDefinitions();
   require(tools.is_array(), "tools must be an array");
-  require(tools.size() == 22, "unexpected tool count");
+  require(tools.size() == 23, "unexpected tool count");
 
   std::set<std::string> tool_names;
   nlohmann::json const* terrain_layout = nullptr;
@@ -118,6 +118,8 @@ int main()
   require(tool_names.count("search_assets") == 1, "search_assets tool is missing");
   require(tool_names.count("scatter_assets_on_map") == 1,
           "scatter_assets_on_map tool is missing");
+  require(tool_names.count("validate_moba_footprint") == 1,
+          "validate_moba_footprint tool is missing");
   require(tool_names.count("create_moba_arena_blueprint") == 1,
           "create_moba_arena_blueprint tool is missing");
   require(tool_names.count("apply_ground_effect_on_map") == 1,
@@ -165,6 +167,8 @@ int main()
             == nlohmann::json::array({"corridor", "area"})
             && feature_properties.at("height_mode").at("enum")
               == nlohmann::json::array({"absolute", "offset"})
+            && feature_properties.at("half_width_ratio").at("minimum") == 0.0
+            && feature_properties.at("half_width_ratio").at("maximum") == 0.25
             && feature_properties.at("texture_layer").at("maximum") == 15
             && feature_properties.at("roughness_amplitude").at("minimum") == 0.0
             && feature_properties.at("roughness_amplitude").at("maximum") == 100.0

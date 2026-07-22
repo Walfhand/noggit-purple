@@ -5,6 +5,7 @@
 #include <noggit/ContextObject.hpp>
 
 #include <cstdint>
+#include <functional>
 
 namespace math
 {
@@ -25,7 +26,7 @@ public:
   void change_doodadset(uint16_t doodad_set);
 
   [[nodiscard]]
-  std::map<int, std::pair<glm::vec3, glm::vec3>> const& getGroupExtents();
+  std::map<int, std::pair<glm::vec3, glm::vec3>> getGroupExtents();
 
 private:
   void update_doodads();
@@ -42,8 +43,8 @@ public:
 
   explicit WMOInstance(BlizzardArchive::Listfile::FileKey const& file_key, Noggit::NoggitRenderContext context);
 
-  WMOInstance(WMOInstance const& other) = default;
-  WMOInstance& operator=(WMOInstance const& other) = default;
+  WMOInstance(WMOInstance const& other);
+  WMOInstance& operator=(WMOInstance const& other);
 
   WMOInstance (WMOInstance&& other) noexcept;
 
@@ -70,8 +71,8 @@ public:
 
   void intersect (math::ray const&, selection_result*, bool do_exterior = true);
 
-  std::array<glm::vec3, 2> const& getExtents() override; // axis aligned
-  std::array<glm::vec3, 2> const& getLocalExtents() const;
+  std::array<glm::vec3, 2> getExtents() override; // axis aligned snapshot
+  std::array<glm::vec3, 2> getLocalExtents() const;
   std::array<glm::vec3, 8> getBoundingBox() override; // not axis aligned
   bool extentsDirty() const;;
   void recalcExtents() override;
@@ -83,12 +84,7 @@ public:
   [[nodiscard]]
   AsyncObject* instance_model() const override;;
 
-  std::vector<wmo_doodad_instance*> get_visible_doodads( math::frustum const& frustum
-                                                       , float const& cull_distance
-                                                       , glm::vec3 const& camera
-                                                       , bool draw_hidden_models
-                                                       , display_mode display
-                                                       );
-
-  std::map<uint32_t, std::vector<wmo_doodad_instance>>* get_doodads(bool draw_hidden_models);
+  void for_each_doodad(
+    bool draw_hidden_models,
+    std::function<void(wmo_doodad_instance&)> const& function);
 };

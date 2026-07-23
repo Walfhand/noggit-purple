@@ -149,6 +149,15 @@ int main()
   bad_max_slope["max_slope_degrees"] = 4.9;
   require(!Noggit::Ai::parseProceduralLayout(bad_max_slope).layout,
           "out-of-range maximum slope was accepted");
+  auto compact_max_slope = validArguments();
+  compact_max_slope["max_slope_degrees"] = 80.5;
+  require(Noggit::Ai::parseProceduralLayout(compact_max_slope)
+            .layout.has_value(),
+          "a valid compact-arena slope was rejected");
+  auto excessive_max_slope = validArguments();
+  excessive_max_slope["max_slope_degrees"] = 89.1;
+  require(!Noggit::Ai::parseProceduralLayout(excessive_max_slope).layout,
+          "an excessive maximum slope was accepted");
 
   auto bad_smoothing = validArguments();
   bad_smoothing["smoothing_strength"] = 1.1;
@@ -197,14 +206,22 @@ int main()
           "zero-width corridor was accepted");
 
   auto too_narrow_corridor = validArguments();
-  too_narrow_corridor["features"][0]["half_width_ratio"] = 0.004;
+  too_narrow_corridor["features"][0]["half_width_ratio"] = 0.00124;
   require(!Noggit::Ai::parseProceduralLayout(too_narrow_corridor).layout,
-          "corridor narrower than 0.005 was accepted");
+          "corridor narrower than 0.00125 was accepted");
 
   auto minimum_width_corridor = validArguments();
-  minimum_width_corridor["features"][0]["half_width_ratio"] = 0.005;
+  minimum_width_corridor["features"][0]["half_width_ratio"] = 0.00125;
   require(Noggit::Ai::parseProceduralLayout(minimum_width_corridor).layout.has_value(),
-          "corridor at the 0.005 minimum was rejected");
+          "corridor at the compact 0.00125 minimum was rejected");
+
+  auto minimum_transition = validArguments();
+  minimum_transition["features"][0]["transition_width_ratio"] = 0.00025;
+  require(Noggit::Ai::parseProceduralLayout(minimum_transition).layout.has_value(),
+          "transition at the compact 0.00025 minimum was rejected");
+  minimum_transition["features"][0]["transition_width_ratio"] = 0.00024;
+  require(!Noggit::Ai::parseProceduralLayout(minimum_transition).layout,
+          "transition narrower than 0.00025 was accepted");
 
   auto bad_priority = validArguments();
   bad_priority["features"][0]["priority"] = 101;
@@ -304,7 +321,7 @@ int main()
     too_many_segments["features"].push_back(std::move(feature));
   }
   require(!Noggit::Ai::parseProceduralLayout(too_many_segments).layout,
-          "layout with more than 512 segments was accepted");
+          "layout with more than 516 segments was accepted");
 
   auto bad_name = validArguments();
   bad_name["features"][0]["name"] = "bad\nname";

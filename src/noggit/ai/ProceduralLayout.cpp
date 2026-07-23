@@ -18,7 +18,7 @@ namespace Noggit::Ai
   namespace
   {
     constexpr std::size_t max_points_per_feature = 16;
-    constexpr std::size_t max_total_segments = 512;
+    constexpr std::size_t max_total_segments = 516;
     constexpr float minimum_layout_height = -500.0f;
     constexpr float maximum_layout_height = 5000.0f;
 
@@ -514,9 +514,9 @@ namespace Noggit::Ai
     if (!max_slope.is_null())
     {
       float degrees = 0.0f;
-      if (!readFiniteFloat(max_slope, degrees) || degrees < 5.0f || degrees > 60.0f)
+      if (!readFiniteFloat(max_slope, degrees) || degrees < 5.0f || degrees > 89.0f)
       {
-        return fail("max_slope_degrees doit être null ou compris dans [5,60].");
+        return fail("max_slope_degrees doit être null ou compris dans [5,89].");
       }
       layout.max_slope_degrees = degrees;
     }
@@ -603,7 +603,7 @@ namespace Noggit::Ai
         ? points.size() : points.size() - 1;
       if (total_segments > max_total_segments)
       {
-        return fail("Le layout ne peut pas dépasser 512 segments au total.");
+        return fail("Le layout ne peut pas dépasser 516 segments au total.");
       }
       for (auto const& point_value : points)
       {
@@ -641,12 +641,12 @@ namespace Noggit::Ai
       if (!readFiniteFloat(feature_value.at("half_width_ratio"), feature.half_width_ratio)
           || !readFiniteFloat(feature_value.at("transition_width_ratio"), feature.transition_width_ratio)
           || feature.half_width_ratio
-               < (feature.shape == ProceduralLayoutShape::Area ? 0.0f : 0.005f)
+               < (feature.shape == ProceduralLayoutShape::Area ? 0.0f : 0.00125f)
           || feature.half_width_ratio > 0.25f
-          || feature.transition_width_ratio < 0.001f
+          || feature.transition_width_ratio < 0.00025f
           || feature.transition_width_ratio > 0.25f)
       {
-        return fail("half_width_ratio doit être dans [0,0.25] pour area ou [0.005,0.25] pour corridor, et transition_width_ratio dans [0.001,0.25].");
+        return fail("half_width_ratio doit être dans [0,0.25] pour area ou [0.00125,0.25] pour corridor, et transition_width_ratio dans [0.00025,0.25].");
       }
 
       auto const& texture_layer = feature_value.at("texture_layer");
@@ -758,7 +758,7 @@ namespace Noggit::Ai
     auto const slope_widening_gradient = layout.max_slope_degrees
         && std::isfinite(*layout.max_slope_degrees)
         && *layout.max_slope_degrees >= 5.0f
-        && *layout.max_slope_degrees <= 60.0f
+        && *layout.max_slope_degrees <= 89.0f
       ? std::optional<float>(std::tan(
           *layout.max_slope_degrees * degrees_to_radians_gradient))
       : std::nullopt;
@@ -823,7 +823,7 @@ namespace Noggit::Ai
       if (layout.max_slope_degrees
           && std::isfinite(*layout.max_slope_degrees)
           && *layout.max_slope_degrees >= 5.0f
-          && *layout.max_slope_degrees <= 60.0f)
+          && *layout.max_slope_degrees <= 89.0f)
       {
         constexpr float degrees_to_radians = 0.017453292519943295f;
         auto const maximum_gradient = std::tan(

@@ -321,10 +321,10 @@ namespace Noggit::Ai
         }},
         {"half_width_ratio", {
           {"type", "number"}, {"minimum", 0.0}, {"maximum", 0.25},
-          {"description", "Demi-largeur du cœur, en proportion du plus petit côté de la carte. 0 est permis uniquement pour area ; corridor exige au moins 0.005."}
+          {"description", "Demi-largeur du cœur, en proportion du plus petit côté de la carte. 0 est permis uniquement pour area ; corridor exige au moins 0.00125."}
         }},
         {"transition_width_ratio", {
-          {"type", "number"}, {"minimum", 0.001}, {"maximum", 0.25},
+          {"type", "number"}, {"minimum", 0.00025}, {"maximum", 0.25},
           {"description", "Largeur de la transition douce jusqu'au terrain existant, selon le plus petit côté."}
         }},
         {"texture_layer", {
@@ -381,7 +381,7 @@ namespace Noggit::Ai
           {"description", "Variation déterministe des bordures selon le plus petit côté ; 0 désactive, 0.003 à 0.012 donne un rendu naturel."}
         }},
         {"max_slope_degrees", {
-          {"type", {"number", "null"}}, {"minimum", 5.0}, {"maximum", 60.0},
+          {"type", {"number", "null"}}, {"minimum", 5.0}, {"maximum", 89.0},
           {"description", "Élargit automatiquement les transitions trop abruptes ; 25 à 35 convient aux zones jouables, null désactive."}
         }},
         {"smoothing_strength", {
@@ -442,11 +442,11 @@ namespace Noggit::Ai
           {"maxItems", 16}
         }},
         {"half_width_ratio", {
-          {"type", "number"}, {"minimum", 0.005}, {"maximum", 0.25},
+          {"type", "number"}, {"minimum", 0.00125}, {"maximum", 0.25},
           {"description", "Demi-largeur du cœur liquide, relative au plus petit côté de la carte."}
         }},
         {"transition_width_ratio", {
-          {"type", "number"}, {"minimum", 0.001}, {"maximum", 0.25},
+          {"type", "number"}, {"minimum", 0.00025}, {"maximum", 0.25},
           {"description", "Largeur où la profondeur visuelle décroît jusqu'à zéro au rivage."}
         }},
         {"liquid_type_id", {
@@ -524,7 +524,7 @@ namespace Noggit::Ai
           {"minItems", 3}, {"maxItems", 16}
         }},
         {"density_per_tile", {{"type", "integer"}, {"minimum", 1}, {"maximum", 512}}},
-        {"min_spacing_ratio", {{"type", "number"}, {"minimum", 0.001}, {"maximum", 0.25}}},
+        {"min_spacing_ratio", {{"type", "number"}, {"minimum", 0.00025}, {"maximum", 0.25}}},
         {"min_height", {{"type", "number"}, {"minimum", -500.0}, {"maximum", 5000.0}}},
         {"max_height", {{"type", "number"}, {"minimum", -500.0}, {"maximum", 5000.0}}},
         {"min_slope_degrees", {{"type", "number"}, {"minimum", 0.0}, {"maximum", 90.0}}},
@@ -547,7 +547,7 @@ namespace Noggit::Ai
           {"type", "array"}, {"items", scatter_point_parameters},
           {"minItems", 1}, {"maxItems", 16}
         }},
-        {"half_width_ratio", {{"type", "number"}, {"minimum", 0.001}, {"maximum", 0.25}}}
+        {"half_width_ratio", {{"type", "number"}, {"minimum", 0.00025}, {"maximum", 0.25}}}
       }},
       {"required", {"shape", "points", "half_width_ratio"}},
       {"additionalProperties", false}
@@ -633,6 +633,10 @@ namespace Noggit::Ai
         {"assets", scatter_parameters["properties"]["assets"]},
         {"seed", {{"type", "string"}, {"minLength", 1}, {"maxLength", 64}}},
         {"base_height", {{"type", "number"}, {"minimum", -450.0}, {"maximum", 4950.0}}},
+        {"arena_scale_ratio", {
+          {"type", "number"}, {"minimum", 0.25}, {"maximum", 1.0},
+          {"description", "Échelle horizontale de l'arène dans l'empreinte ; 0.32 reproduit environ le temps de traversée de Summoner's Rift sur une carte 2x2."}
+        }},
         {"river_depth", {{"type", "number"}, {"minimum", 2.0}, {"maximum", 30.0}}},
         {"lane_width_ratio", {{"type", "number"}, {"minimum", 0.012}, {"maximum", 0.055},
           {"description", "Demi-largeur normalisée des voies ; utiliser 0.032 par défaut."}}},
@@ -656,7 +660,8 @@ namespace Noggit::Ai
       }},
       {"required", {
         "texture_paths", "liquid_type_id", "assets", "seed", "base_height",
-        "river_depth", "lane_width_ratio", "river_width_ratio", "lane_curvature",
+        "arena_scale_ratio", "river_depth", "lane_width_ratio",
+        "river_width_ratio", "lane_curvature",
         "river_curvature", "jungle_roughness", "vegetation_density_per_tile",
         "ground_effect_texture_id", "prop_paths", "skybox_path", "skybox_flags"
       }},
@@ -801,7 +806,7 @@ namespace Noggit::Ai
       {
         {"type", "function"},
         {"name", "create_moba_arena_blueprint"},
-        {"description", "Compile les choix esthétiques de l'IA en une topologie MOBA fixe et cohérente sur une carte carrée de 2x2 à 4x4 tuiles : exactement trois voies, deux bases fortifiées avec trois entrées, une rivière, quatre jungles élevées par des reliefs rocheux irréguliers, vingt chemins, douze camps de tailles variées et deux clairières d'objectif préservées du relief. Chaque quadrant possède cinq portes et un graphe centré sur le buff ; le camp moyen traverse la route principale et le petit camp forme un court cul-de-sac. Les murs M2 collidables sont réservés aux enceintes architecturales des bases ; la jungle est délimitée par le terrain, les rochers et la végétation d'une même famille visuelle récente du Patch-N. Ajoute une couche d'ambiance : fontaines ou statues de base, statues d'objectif, braziers de camps et d'entrées, lampadaires couplés aux lumières dynamiques de Patch-E, puis une skybox moderne de Patch-N. Retourne le préflight, les sept mutations et la validation finale à exécuter sans modifier leurs arguments."},
+        {"description", "Compile les choix esthétiques de l'IA en une topologie MOBA fixe et cohérente, compactée au centre d'une carte carrée de 2x2 à 4x4 tuiles et fermée par un relief rocheux périphérique : exactement trois voies, deux bases fortifiées avec trois entrées, une rivière, quatre jungles élevées par des reliefs rocheux irréguliers, vingt chemins, douze camps de tailles variées et deux clairières d'objectif préservées du relief. Chaque quadrant possède cinq portes et un graphe centré sur le buff ; le camp moyen traverse la route principale et le petit camp forme un court cul-de-sac. Les murs M2 collidables sont réservés aux enceintes architecturales des bases ; la jungle est délimitée par le terrain, les rochers et la végétation d'une même famille visuelle récente du Patch-N. Ajoute une couche d'ambiance : fontaines ou statues de base, statues d'objectif, braziers de camps et d'entrées, lampadaires couplés aux lumières dynamiques de Patch-E, puis une skybox moderne de Patch-N. Retourne le préflight, les sept mutations et la validation finale à exécuter sans modifier leurs arguments."},
         {"parameters", std::move(moba_parameters)},
         {"strict", true}
       },

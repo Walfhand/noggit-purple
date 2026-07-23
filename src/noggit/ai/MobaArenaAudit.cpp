@@ -1,6 +1,7 @@
 // This file is part of Noggit3, licensed under GNU General Public License (version 3).
 
 #include <noggit/ai/MobaArenaAudit.hpp>
+#include <noggit/ai/MobaArenaBlueprint.hpp>
 #include <noggit/ai/ProceduralLayout.hpp>
 #include <noggit/ai/ProceduralLiquidLayout.hpp>
 #include <noggit/ai/ProceduralProps.hpp>
@@ -379,6 +380,11 @@ namespace Noggit::Ai
     std::size_t min_tile_x,
     std::size_t min_tile_z)
   {
+    if (blueprint.contains("arena_fit"))
+      return auditMobaArenaBlueprint(
+        canonicalMobaArenaBlueprint(blueprint), footprint_side_tiles,
+        preview_resolution, min_tile_x, min_tile_z);
+
     MobaArenaAuditReport report;
     report.preview_resolution = preview_resolution;
     report.preview_width = preview_resolution * 2;
@@ -2720,7 +2726,7 @@ namespace Noggit::Ai
       for (auto const& region : vegetation_scatter->regions)
         region_roles.insert(region.role);
       static auto const required_vegetation_roles = std::set<std::string>{
-        "canopy", "understory", "rock"};
+        "understory", "rock"};
       if (std::any_of(vegetation_scatter->assets.begin(),
                       vegetation_scatter->assets.end(),
             [](auto const& asset) { return asset.role == "wall"; })
@@ -2731,7 +2737,7 @@ namespace Noggit::Ai
                             required_vegetation_roles.begin(),
                             required_vegetation_roles.end()))
         addIssue(report, "scatter.vegetation_assets",
-          "la végétation doit isoler canopy, understory et rock sans wall");
+          "la végétation doit isoler understory et rock sans wall");
       auto const corridorExcluded = [&](ProceduralLayoutFeature const& feature)
       {
         for (std::size_t segment = 1; segment < feature.points.size(); ++segment)

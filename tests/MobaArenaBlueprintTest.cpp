@@ -394,7 +394,11 @@ int main(int argc, char** argv)
               == "environments/stars/legionnexus_netherskybox01.m2"
             && spec.at("skybox_flags") == 0,
           "the map's selected skybox is not the MOBA default");
-  auto const first = Noggit::Ai::compileMobaArenaBlueprint(spec, 4);
+  require(std::abs(spec.at("arena_scale_ratio").get<double>() - .32) < .0001,
+          "the default 2x2 MOBA arena must target Summoner's Rift traversal time");
+  auto reference_spec = spec;
+  reference_spec["arena_scale_ratio"] = 1.0;
+  auto first = Noggit::Ai::compileMobaArenaBlueprint(reference_spec, 4);
   if (dump_audit)
   {
     auto const audit = Noggit::Ai::auditMobaArenaBlueprint(first, 4);
@@ -410,12 +414,12 @@ int main(int argc, char** argv)
     std::cout << audit.metrics.dump(2) << '\n';
     return 0;
   }
-  auto const second = Noggit::Ai::compileMobaArenaBlueprint(spec, 4);
+  auto const second = Noggit::Ai::compileMobaArenaBlueprint(reference_spec, 4);
   require(first == second, "blueprint must be deterministic");
-  auto const mutation_baseline = Noggit::Ai::compileMobaArenaBlueprint(spec, 2);
-  auto const three_tile_blueprint = Noggit::Ai::compileMobaArenaBlueprint(spec, 3);
+  auto mutation_baseline = Noggit::Ai::compileMobaArenaBlueprint(reference_spec, 2);
+  auto const three_tile_blueprint = Noggit::Ai::compileMobaArenaBlueprint(reference_spec, 3);
   auto const translated_blueprint = Noggit::Ai::compileMobaArenaBlueprint(
-    spec, 4, 20, 20);
+    reference_spec, 4, 20, 20);
   require(mutation_baseline.at("audit").at("ok") == true
             && three_tile_blueprint.at("audit").at("ok") == true
             && translated_blueprint.at("audit").at("ok") == true,
@@ -425,6 +429,241 @@ int main(int argc, char** argv)
             && translated_blueprint.at("audit").at("metrics")
               .at("scatter").at("tile_origin").at("min_tile_z") == 20,
           "the production audit ignored the map's absolute tile origin");
+
+  auto fitted = Noggit::Ai::compileMobaArenaBlueprint(spec, 2);
+  require(std::abs(fitted.at("arena_fit").at("playable_side_world_units")
+                       .get<double>() - 341.333333) < .001
+            && fitted.at("arena_fit").at("estimated_base_to_base_run_seconds")
+                 .get<double>() > 50.0
+            && fitted.at("arena_fit").at("estimated_base_to_base_run_seconds")
+                 .get<double>() < 53.0,
+          "the compact 2x2 arena no longer matches the target traversal time");
+  auto const& fitted_ground = terrainFeature(fitted, "arena_ground");
+  auto fitted_min_u = 1.0;
+  auto fitted_max_u = 0.0;
+  for (auto const& point : fitted_ground.at("points"))
+  {
+    fitted_min_u = std::min(fitted_min_u, point.at("u").get<double>());
+    fitted_max_u = std::max(fitted_max_u, point.at("u").get<double>());
+  }
+  auto const& perimeter = terrainFeature(fitted, "arena_perimeter_relief");
+  auto const base_height = fitted_ground.at("points").front().at("height").get<double>();
+  auto const& reference_relief
+    = terrainFeature(mutation_baseline, "jungle_1_wall_mass");
+  auto const& fitted_relief = terrainFeature(fitted, "jungle_1_wall_mass");
+  auto const reference_relief_height
+    = reference_relief.at("points").front().at("height").get<double>();
+  auto const fitted_relief_height
+    = fitted_relief.at("points").front().at("height").get<double>();
+  require(std::abs(fitted_min_u - .34) < .0001
+            && std::abs(fitted_max_u - .66) < .0001
+            && perimeter.at("points").front().at("u") == 0
+            && perimeter.at("points").front().at("v") == 0
+            && std::abs(perimeter.at("points").front().at("height").get<double>()
+                  - (base_height + 24.0)) < .0001
+            && std::abs(fitted_relief_height - base_height
+                  - (reference_relief_height - base_height)) < .0001
+            && std::abs(fitted_relief.at("roughness_amplitude").get<double>()
+                  - reference_relief.at("roughness_amplitude").get<double>())
+              < .0001
+            && callArguments(fitted, "apply_terrain_layout_on_map")
+                 .at("features").size()
+              == callArguments(first, "apply_terrain_layout_on_map")
+                   .at("features").size() + 1
+            && fitted.at("moba_semantics").at("camps").size()
+              == first.at("moba_semantics").at("camps").size()
+            && callArguments(fitted, "place_props_on_map").at("props").size()
+              == callArguments(first, "place_props_on_map").at("props").size(),
+          "fitting the arena must preserve its generated content inside a raised perimeter");
+  auto const fitted_liquid = Noggit::Ai::parseProceduralLiquidLayout(
+    callArguments(fitted, "apply_liquid_layout_on_map"));
+  auto const fitted_terrain = Noggit::Ai::parseProceduralLayout(
+    callArguments(fitted, "apply_terrain_layout_on_map"));
+  require(fitted_liquid.layout.has_value() && fitted_terrain.layout.has_value(),
+          "the fitted terrain and river must remain valid layouts");
+  auto const& reference_terrain
+    = callArguments(mutation_baseline, "apply_terrain_layout_on_map");
+  auto const& compact_terrain
+    = callArguments(fitted, "apply_terrain_layout_on_map");
+  constexpr auto degrees_to_radians = 0.017453292519943295;
+  constexpr auto radians_to_degrees = 57.29577951308232;
+  auto const reference_slope
+    = reference_terrain.at("max_slope_degrees").get<double>();
+  auto const expected_compact_slope = std::atan(
+    std::tan(reference_slope * degrees_to_radians) / .32)
+    * radians_to_degrees;
+  auto canonical_fitted = Noggit::Ai::canonicalMobaArenaBlueprint(fitted);
+  auto const& canonical_fitted_terrain
+    = callArguments(canonical_fitted, "apply_terrain_layout_on_map");
+  require(std::abs(compact_terrain.at("max_slope_degrees").get<double>()
+                - expected_compact_slope) < .000001
+            && std::abs(canonical_fitted_terrain
+                 .at("max_slope_degrees").get<double>() - reference_slope)
+              < .000001,
+          "compact slope widening must preserve the horizontal relief mask");
+  require(terrainFeature(mutation_baseline, "objective_north").at("priority") == 70
+            && terrainFeature(fitted, "objective_north").at("priority") == 91
+            && terrainFeature(fitted, "objective_south").at("priority") == 91
+            && terrainFeature(fitted, "river_bed").at("priority") == 92,
+          "only compact objective pits may override the retained wall relief");
+  for (auto const& reference_feature : reference_terrain.at("features"))
+  {
+    auto const& name = reference_feature.at("name").get_ref<std::string const&>();
+    auto const& compact_feature = terrainFeature(fitted, name);
+    require(std::abs(compact_feature.at("half_width_ratio").get<double>()
+                  - reference_feature.at("half_width_ratio").get<double>() * .32)
+                < .000001
+              && std::abs(
+                compact_feature.at("transition_width_ratio").get<double>()
+                - reference_feature.at("transition_width_ratio").get<double>() * .32)
+                < .000001
+              && compact_feature.at("points").size()
+                == reference_feature.at("points").size(),
+            "compact terrain widths must preserve the reference mask");
+    for (std::size_t index = 0;
+         index < reference_feature.at("points").size(); ++index)
+    {
+      auto const& reference_point = reference_feature.at("points")[index];
+      auto const& compact_point = compact_feature.at("points")[index];
+      require(std::abs(compact_point.at("u").get<double>()
+                    - (.5 + (reference_point.at("u").get<double>() - .5) * .32))
+                  < .000001
+                && std::abs(compact_point.at("v").get<double>()
+                    - (.5 + (reference_point.at("v").get<double>() - .5) * .32))
+                  < .000001
+                && std::abs(compact_point.at("height").get<double>()
+                    - reference_point.at("height").get<double>()) < .000001,
+              "compact terrain points must be an exact horizontal homothety");
+    }
+  }
+  auto const& reference_vegetation
+    = callArguments(mutation_baseline, "scatter_assets_on_map", 1);
+  auto const& fitted_vegetation
+    = callArguments(fitted, "scatter_assets_on_map", 1);
+  require(reference_vegetation.at("regions").size()
+              == fitted_vegetation.at("regions").size()
+            && reference_vegetation.at("exclusions").size()
+              == fitted_vegetation.at("exclusions").size(),
+          "the compact arena lost vegetation regions or exclusions");
+  for (std::size_t index = 0;
+       index < reference_vegetation.at("regions").size(); ++index)
+    require(std::abs(
+      fitted_vegetation.at("regions")[index].at("min_spacing_ratio").get<double>()
+      - reference_vegetation.at("regions")[index]
+          .at("min_spacing_ratio").get<double>() * .32) < .000001,
+      "compact vegetation spacing must preserve the arena scale");
+  for (std::size_t index = 0;
+       index < reference_vegetation.at("exclusions").size(); ++index)
+    require(std::abs(
+      fitted_vegetation.at("exclusions")[index]
+          .at("half_width_ratio").get<double>()
+      - reference_vegetation.at("exclusions")[index]
+          .at("half_width_ratio").get<double>() * .32) < .000001,
+      "compact vegetation exclusions must preserve the arena scale");
+  auto requireEffectiveCore = [&](std::string_view name)
+  {
+    auto const& layout = *fitted_terrain.layout;
+    auto const feature = std::find_if(
+      layout.features.begin(), layout.features.end(),
+      [&](auto const& value) { return value.name == name; });
+    require(feature != layout.features.end(),
+            "the compact terrain feature is missing");
+    auto const index = static_cast<std::size_t>(
+      std::distance(layout.features.begin(), feature));
+    auto min_u = 1.0f;
+    auto max_u = 0.0f;
+    auto min_v = 1.0f;
+    auto max_v = 0.0f;
+    for (auto const& point : feature->points)
+    {
+      min_u = std::min(min_u, point.u);
+      max_u = std::max(max_u, point.u);
+      min_v = std::min(min_v, point.v);
+      max_v = std::max(max_v, point.v);
+    }
+    auto has_core = false;
+    for (auto y = 0; y < 128 && !has_core; ++y)
+      for (auto x = 0; x < 128 && !has_core; ++x)
+      {
+        auto const u = min_u - .01f
+          + (max_u - min_u + .02f) * (x + .5f) / 128.0f;
+        auto const v = min_v - .01f
+          + (max_v - min_v + .02f) * (y + .5f) / 128.0f;
+        has_core = Noggit::Ai::sampleProceduralLayout(
+          layout, u, v, 20.0f, 0.0f,
+          3200.0f / 3.0f, 3200.0f / 3.0f).feature_masks[index] >= .999f;
+      }
+    if (!has_core)
+      throw std::runtime_error(
+        "compact terrain feature lost its effective core: "
+        + std::string{name});
+  };
+  requireEffectiveCore("jungle_1_clear_path");
+  requireEffectiveCore("jungle_1_branch_path");
+  requireEffectiveCore("jungle_2_clear_path");
+  requireEffectiveCore("jungle_2_branch_path");
+  requireEffectiveCore("jungle_3_clear_path");
+  requireEffectiveCore("jungle_3_branch_path");
+  requireEffectiveCore("jungle_4_clear_path");
+  requireEffectiveCore("jungle_4_branch_path");
+  requireEffectiveCore("objective_north");
+  requireEffectiveCore("objective_south");
+  requireEffectiveCore("jungle_36_wall_mass");
+  requireEffectiveCore("jungle_45_wall_mass");
+  auto const& compact_river = fitted_liquid.layout->features.front();
+  auto const reference_liquid = Noggit::Ai::parseProceduralLiquidLayout(
+    callArguments(mutation_baseline, "apply_liquid_layout_on_map"));
+  require(reference_liquid.layout.has_value()
+            && std::abs(compact_river.points.front().height
+                  - reference_liquid.layout->features.front().points.front().height)
+              < .0001f
+            && std::abs(compact_river.half_width_ratio
+                  - reference_liquid.layout->features.front().half_width_ratio * .32f)
+              < .000001f
+            && std::abs(compact_river.transition_width_ratio
+                  - reference_liquid.layout->features.front()
+                      .transition_width_ratio * .32f) < .000001f,
+          "the compact river must preserve the reference mask and height");
+  auto compact_min_u = 1.0f;
+  auto compact_max_u = 0.0f;
+  auto compact_min_v = 1.0f;
+  auto compact_max_v = 0.0f;
+  for (auto const& point : compact_river.points)
+  {
+    compact_min_u = std::min(compact_min_u, point.u);
+    compact_max_u = std::max(compact_max_u, point.u);
+    compact_min_v = std::min(compact_min_v, point.v);
+    compact_max_v = std::max(compact_max_v, point.v);
+  }
+  require(compact_max_u - compact_min_u
+              + 2.0f * compact_river.half_width_ratio
+              >= Noggit::Ai::moba_arena_minimum_liquid_span_u
+            && compact_max_v - compact_min_v
+              + 2.0f * compact_river.half_width_ratio
+              >= Noggit::Ai::moba_arena_minimum_liquid_span_v,
+          "the compact river no longer satisfies its runtime span contract");
+  auto const outer_height = Noggit::Ai::sampleProceduralLayout(
+    *fitted_terrain.layout, .1f, .1f, 20.0f, 0.0f,
+    3200.0f / 3.0f, 3200.0f / 3.0f).height;
+  auto const centre_height = Noggit::Ai::sampleProceduralLayout(
+    *fitted_terrain.layout, .5f, .5f, 20.0f, 0.0f,
+    3200.0f / 3.0f, 3200.0f / 3.0f).height;
+  require(outer_height - centre_height >= 20.0f,
+          "the raised perimeter must physically close the compact arena");
+  requireAudit(Noggit::Ai::auditMobaArenaBlueprint(fitted, 2));
+  auto fitted_runtime = fitted;
+  fitted_runtime.erase("arena_fit");
+  require(!Noggit::Ai::auditMobaArenaBlueprint(fitted_runtime, 2)
+             .hasIssue("props.unwalkable"),
+          "the compact runtime terrain must keep every solid prop walkable");
+  auto const runtime_origin_audit = Noggit::Ai::auditMobaArenaBlueprint(
+    fitted_runtime, 2, 64, 26, 25);
+  auto const& runtime_vegetation
+    = runtime_origin_audit.metrics.at("scatter").at("vegetation");
+  require(runtime_vegetation.at("accepted_after_spacing").get<std::size_t>() >= 1
+            && runtime_vegetation.at("regions").contains("jungle_20_canopy"),
+          "the compact runtime scatter lost its trees");
+
   auto const audit = Noggit::Ai::auditMobaArenaBlueprint(first, 4);
   requireAudit(audit);
   verifyReferenceSimilarity(audit);

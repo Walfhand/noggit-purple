@@ -9,6 +9,21 @@ descendante, donc les positions se transposent directement.
 ## 1. Cadre global
 
 - Carré jouable d'environ 14 800 unités de côté.
+- Les données de carte donnent des bornes proches de 14 870 × 14 980 unités
+  (https://hextechdocs.dev/map-data/). Avec une vitesse de base de 325 à
+  355 unités/s, une traversée entre les deux bases prend environ 50 à 55 s.
+- Une empreinte WoW 2×2 mesure 1 066,67 yards et la course normale vaut
+  7 yards/s. Avec nos bases en (.113,.86) et (.887,.14), l'ancien blueprint
+  demandait environ 161 s entre les bases.
+- Cible retenue : `arena_scale_ratio = .32`, soit une arène centrée de
+  341,33 yards de côté et environ 51,5 s entre les bases. Le reste de
+  l'empreinte devient un relief rocheux périphérique. Les coordonnées,
+  largeurs, transitions, zones de végétation et espacements suivent une
+  homothétie horizontale exacte de ratio .32. Les écarts de hauteur, la
+  rugosité et le niveau de la rivière conservent leurs valeurs du modèle afin
+  que les reliefs ne deviennent pas miniatures. L'angle limite de pente est
+  compensé mathématiquement pour que son élargissement automatique conserve
+  malgré tout la silhouette vue du dessus du calque.
 - Trois lanes : top et bot longent les bords, mid coupe en diagonale.
 - La rivière coupe l'autre diagonale, largeur 4 à 6 % de la map, avec deux
   renflements majeurs : les fosses du Baron (haut-gauche) et du dragon

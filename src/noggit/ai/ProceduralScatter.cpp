@@ -277,7 +277,7 @@ namespace Noggit::Ai
       auto const density = value.at("density_per_tile").get<std::int64_t>();
       if (region.name.empty() || region.name.size() > 64 || !printableAscii(region.name)
           || !names.insert(region.name).second || density < 1 || density > 512
-          || region.min_spacing_ratio < 0.001f || region.min_spacing_ratio > 0.25f
+          || region.min_spacing_ratio < 0.00025f || region.min_spacing_ratio > 0.25f
           || region.min_height < -500.0f || region.max_height > 5000.0f
           || region.min_height > region.max_height
           || region.min_slope_degrees < 0.0f || region.max_slope_degrees > 90.0f
@@ -311,7 +311,8 @@ namespace Noggit::Ai
       ProceduralScatterExclusion exclusion;
       if (!exactFields(value, exclusion_fields) || !value.at("shape").is_string()
           || !finiteFloat(value.at("half_width_ratio"), exclusion.half_width_ratio)
-          || exclusion.half_width_ratio < 0.001f || exclusion.half_width_ratio > 0.25f)
+          || exclusion.half_width_ratio < 0.00025f
+          || exclusion.half_width_ratio > 0.25f)
         return fail("Chaque exclusion exige shape, points et half_width_ratio valides.");
       auto const shape = value.at("shape").get<std::string>();
       if (shape == "corridor") exclusion.shape = ProceduralLayoutShape::Corridor;

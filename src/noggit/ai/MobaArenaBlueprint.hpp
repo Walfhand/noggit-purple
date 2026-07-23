@@ -12,10 +12,9 @@
 
 namespace Noggit::Ai
 {
-  // The canonical SR river joins the two lane junctions; it deliberately does
-  // not touch the outer map borders.
-  inline constexpr double moba_arena_minimum_liquid_span_u = .55;
-  inline constexpr double moba_arena_minimum_liquid_span_v = .60;
+  // The compact arena occupies the centre of its 2x2 terrain footprint.
+  inline constexpr double moba_arena_minimum_liquid_span_u = .19;
+  inline constexpr double moba_arena_minimum_liquid_span_v = .20;
 
   nlohmann::json defaultMobaArenaSpecification();
 
@@ -27,4 +26,7 @@ namespace Noggit::Ai
     std::size_t footprint_side_tiles,
     std::size_t min_tile_x = 0,
     std::size_t min_tile_z = 0);
+
+  nlohmann::json canonicalMobaArenaBlueprint(
+    nlohmann::json const& blueprint);
 }

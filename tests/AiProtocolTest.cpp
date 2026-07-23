@@ -56,6 +56,7 @@ int main()
   nlohmann::json const* texture_preview = nullptr;
   nlohmann::json const* asset_scatter = nullptr;
   nlohmann::json const* skybox_apply = nullptr;
+  nlohmann::json const* moba_blueprint = nullptr;
 
   for (auto const& tool : tools)
   {
@@ -78,6 +79,8 @@ int main()
     }
     if (tool.at("name") == "scatter_assets_on_map") asset_scatter = &tool;
     if (tool.at("name") == "apply_skybox_on_map") skybox_apply = &tool;
+    if (tool.at("name") == "create_moba_arena_blueprint")
+      moba_blueprint = &tool;
     require(tool.at("type") == "function", "tool type must be function");
     require(tool.at("strict") == true, "tool must use strict mode");
     auto const& parameters = tool.at("parameters");
@@ -124,6 +127,12 @@ int main()
           "validate_moba_footprint tool is missing");
   require(tool_names.count("create_moba_arena_blueprint") == 1,
           "create_moba_arena_blueprint tool is missing");
+  require(moba_blueprint != nullptr
+            && moba_blueprint->at("parameters").at("properties")
+                 .at("arena_scale_ratio").at("minimum") == .25
+            && moba_blueprint->at("parameters").at("properties")
+                 .at("arena_scale_ratio").at("maximum") == 1.0,
+          "the MOBA arena scale calibration is missing");
   require(tool_names.count("apply_ground_effect_on_map") == 1,
           "apply_ground_effect_on_map tool is missing");
   require(tool_names.count("apply_skybox_on_map") == 1,
@@ -142,7 +151,11 @@ int main()
   require(scatter_properties.at("assets").at("minItems") == 1
             && scatter_properties.at("assets").at("maxItems") == 16
             && scatter_properties.at("regions").at("maxItems") == 48
-            && scatter_properties.at("exclusions").at("maxItems") == 96,
+            && scatter_properties.at("exclusions").at("maxItems") == 96
+            && scatter_properties.at("regions").at("items").at("properties")
+                 .at("min_spacing_ratio").at("minimum") == .00025
+            && scatter_properties.at("exclusions").at("items").at("properties")
+                 .at("half_width_ratio").at("minimum") == .00025,
           "asset scatter bounds changed");
 
   require(terrain_layout != nullptr, "terrain layout schema is missing");
@@ -165,7 +178,7 @@ int main()
             && layout_properties.at("max_slope_degrees").at("type")
               == nlohmann::json::array({"number", "null"})
             && layout_properties.at("max_slope_degrees").at("minimum") == 5.0
-            && layout_properties.at("max_slope_degrees").at("maximum") == 60.0
+            && layout_properties.at("max_slope_degrees").at("maximum") == 89.0
             && layout_properties.at("smoothing_strength").at("minimum") == 0.0
             && layout_properties.at("smoothing_strength").at("maximum") == 1.0,
           "terrain layout naturalization bounds changed");
@@ -177,6 +190,8 @@ int main()
               == nlohmann::json::array({"absolute", "offset"})
             && feature_properties.at("half_width_ratio").at("minimum") == 0.0
             && feature_properties.at("half_width_ratio").at("maximum") == 0.25
+            && feature_properties.at("transition_width_ratio").at("minimum")
+              == .00025
             && feature_properties.at("texture_layer").at("maximum") == 15
             && feature_properties.at("roughness_amplitude").at("minimum") == 0.0
             && feature_properties.at("roughness_amplitude").at("maximum") == 100.0
@@ -211,6 +226,10 @@ int main()
     .at("items").at("properties");
   require(liquid_feature_properties.at("shape").at("enum")
             == nlohmann::json::array({"corridor", "area"})
+            && liquid_feature_properties.at("half_width_ratio").at("minimum")
+              == .00125
+            && liquid_feature_properties.at("transition_width_ratio").at("minimum")
+              == .00025
             && liquid_feature_properties.at("liquid_type_id").at("minimum") == 1
             && liquid_feature_properties.at("liquid_type_id").at("maximum") == 65535
             && liquid_feature_properties.at("depth").at("minimum") == 0.01

@@ -220,12 +220,12 @@ namespace Noggit::Ai
           || !readFiniteFloat(
             feature_value.at("transition_width_ratio"),
             feature.transition_width_ratio)
-          || feature.half_width_ratio < 0.005f
+          || feature.half_width_ratio < 0.00125f
           || feature.half_width_ratio > 0.25f
-          || feature.transition_width_ratio < 0.001f
+          || feature.transition_width_ratio < 0.00025f
           || feature.transition_width_ratio > 0.25f)
       {
-        return fail("half_width_ratio doit être dans [0.005,0.25] et transition_width_ratio dans [0.001,0.25].");
+        return fail("half_width_ratio doit être dans [0.00125,0.25] et transition_width_ratio dans [0.00025,0.25].");
       }
 
       std::int64_t liquid_type_id = 0;

@@ -184,6 +184,19 @@ int main()
           && !Noggit::Ai::proceduralScatterExcluded(*parsed.scatter, 0.1f, 0.5f, 1000.0f, 500.0f),
           "corridor exclusion changed");
 
+  auto compact_bounds = specification;
+  compact_bounds["regions"][0]["min_spacing_ratio"] = .00025;
+  compact_bounds["exclusions"][0]["half_width_ratio"] = .00025;
+  require(Noggit::Ai::parseProceduralScatter(compact_bounds).scatter.has_value(),
+          "the minimum proportional scatter widths were rejected");
+  compact_bounds["regions"][0]["min_spacing_ratio"] = .00024;
+  require(!Noggit::Ai::parseProceduralScatter(compact_bounds).scatter,
+          "scatter spacing below the compact minimum was accepted");
+  compact_bounds["regions"][0]["min_spacing_ratio"] = .00025;
+  compact_bounds["exclusions"][0]["half_width_ratio"] = .00024;
+  require(!Noggit::Ai::parseProceduralScatter(compact_bounds).scatter,
+          "scatter exclusion below the compact minimum was accepted");
+
   specification["regions"][0]["extra"] = true;
   require(!Noggit::Ai::parseProceduralScatter(specification).scatter,
           "strict nested validation accepted an extra field");

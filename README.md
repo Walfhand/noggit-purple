@@ -100,7 +100,13 @@ For complete three-lane arenas, `create_moba_arena_blueprint` keeps gameplay
 topology out of the language model. The model chooses four reviewed textures,
 the liquid type, decorative assets and bounded style parameters; the blueprint
 returns exact arguments for the existing terrain, liquid and scatter tools. Its
-square-map template places fortified bases in opposite corners, side lanes along
+default `arena_scale_ratio` of `0.32` fits a 2x2 footprint to roughly the
+base-to-base traversal time of Summoner's Rift and raises the unused terrain
+into a rocky perimeter. The terrain, liquid and scatter masks use an exact
+horizontal homothety; relief height differences, roughness amplitude and water
+level retain their canonical values so the compact jungle walls do not become
+miniature. The slope limiter is transformed with the same homothety to keep the
+top-down wall silhouette aligned with the reference. The square-map template places fortified bases in opposite corners, side lanes along
 the perimeter, mid and river on opposing diagonals, four raised jungle sectors,
 twelve camp clearings nested inside continuous relief and two epic objective
 pits. Each quadrant uses a buff-centred graph with five doors, a through-route

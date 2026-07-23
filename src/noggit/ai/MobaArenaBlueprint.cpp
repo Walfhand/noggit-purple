@@ -3,6 +3,7 @@
 #include <noggit/ai/MobaArenaBlueprint.hpp>
 #include <noggit/ai/MobaArenaAudit.hpp>
 #include <noggit/ai/ProceduralLayout.hpp>
+#include <noggit/ai/ProceduralLiquidLayout.hpp>
 #include <noggit/ai/ProceduralProps.hpp>
 #include <noggit/ai/ProceduralScatter.hpp>
 
@@ -154,6 +155,129 @@ namespace Noggit::Ai
       return result;
     }
 
+    double fittedValue(double value, double minimum, double scale, bool inverse)
+    {
+      return minimum + (value - minimum) * (inverse ? 1.0 / scale : scale);
+    }
+
+    void fitPoints(nlohmann::json& points, double scale, bool inverse)
+    {
+      for (auto& value : points)
+        for (auto const* axis : {"u", "v"})
+          value[axis] = std::clamp(
+            .5 + (value.at(axis).get<double>() - .5)
+              * (inverse ? 1.0 / scale : scale),
+            0.0, 1.0);
+    }
+
+    void fitWidth(nlohmann::json& object, char const* name,
+                  double minimum, double scale, bool inverse)
+    {
+      if (object.contains(name))
+        object[name] = fittedValue(
+          object.at(name).get<double>(), minimum, scale, inverse);
+    }
+
+    void fitSlopeAngle(nlohmann::json& object, char const* name,
+                       double scale, bool inverse)
+    {
+      auto const value = object.find(name);
+      if (value == object.end() || value->is_null()) return;
+      constexpr auto degrees_to_radians = 0.017453292519943295;
+      constexpr auto radians_to_degrees = 57.29577951308232;
+      auto const tangent = std::tan(value->get<double>() * degrees_to_radians);
+      object[name] = std::atan(tangent * (inverse ? scale : 1.0 / scale))
+        * radians_to_degrees;
+    }
+
+    void transformMobaArenaBlueprint(
+      nlohmann::json& blueprint, double scale, bool inverse)
+    {
+      for (auto& call : blueprint.at("next_calls"))
+      {
+        auto const& name = call.at("name").get_ref<std::string const&>();
+        auto& arguments = call.at("arguments");
+        if (name == "apply_terrain_layout_on_map")
+        {
+          fitWidth(arguments, "edge_noise_ratio", 0.0, scale, inverse);
+          fitSlopeAngle(arguments, "max_slope_degrees", scale, inverse);
+          auto& features = arguments.at("features");
+          if (inverse)
+            features.erase(std::remove_if(features.begin(), features.end(),
+              [](nlohmann::json const& value)
+              { return value.at("name") == "arena_perimeter_relief"; }),
+              features.end());
+          for (auto& value : features)
+          {
+            fitPoints(value.at("points"), scale, inverse);
+            fitWidth(value, "half_width_ratio", 0.0, scale, inverse);
+            fitWidth(value, "transition_width_ratio", 0.0, scale, inverse);
+            auto const& feature_name
+              = value.at("name").get_ref<std::string const&>();
+            if (feature_name == "objective_north"
+                || feature_name == "objective_south")
+              value["priority"] = inverse ? 70 : 91;
+          }
+        }
+        else if (name == "apply_liquid_layout_on_map")
+        {
+          fitWidth(arguments, "edge_noise_ratio", 0.0, scale, inverse);
+          for (auto& value : arguments.at("features"))
+          {
+            fitPoints(value.at("points"), scale, inverse);
+            fitWidth(value, "half_width_ratio", 0.0, scale, inverse);
+            fitWidth(value, "transition_width_ratio", 0.0, scale, inverse);
+          }
+        }
+        else if (name == "scatter_assets_on_map")
+        {
+          for (auto& value : arguments.at("regions"))
+          {
+            fitPoints(value.at("points"), scale, inverse);
+            fitWidth(value, "min_spacing_ratio", 0.0, scale, inverse);
+          }
+          for (auto& value : arguments.at("exclusions"))
+          {
+            fitPoints(value.at("points"), scale, inverse);
+            fitWidth(value, "half_width_ratio", 0.0, scale, inverse);
+          }
+        }
+        else if (name == "place_props_on_map")
+        {
+          for (auto& value : arguments.at("props"))
+            for (auto const* axis : {"u", "v"})
+              value[axis] = std::clamp(
+                .5 + (value.at(axis).get<double>() - .5)
+                  * (inverse ? 1.0 / scale : scale),
+                0.0, 1.0);
+        }
+      }
+
+      if (auto semantics = blueprint.find("moba_semantics");
+          semantics != blueprint.end())
+        for (auto const* collection : {"camps", "objectives", "bases"})
+          for (auto& value : semantics->at(collection))
+          {
+            for (auto const* axis : {"u", "v"})
+              value[axis] = std::clamp(
+                .5 + (value.at(axis).get<double>() - .5)
+                  * (inverse ? 1.0 / scale : scale),
+                0.0, 1.0);
+            fitWidth(value, "radius", 0.0, scale, inverse);
+          }
+    }
+
+  }
+
+  nlohmann::json canonicalMobaArenaBlueprint(
+    nlohmann::json const& blueprint)
+  {
+    if (!blueprint.contains("arena_fit")) return blueprint;
+    auto canonical = blueprint;
+    auto const scale = canonical.at("arena_fit").at("scale_ratio").get<double>();
+    transformMobaArenaBlueprint(canonical, scale, true);
+    canonical.erase("arena_fit");
+    return canonical;
   }
 
   nlohmann::json defaultMobaArenaSpecification()
@@ -215,6 +339,7 @@ namespace Noggit::Ai
       }},
       {"seed", "moba-lab-1"},
       {"base_height", 20},
+      {"arena_scale_ratio", .32},
       {"river_depth", 8},
       {"lane_width_ratio", .014},
       {"river_width_ratio", .03},
@@ -266,13 +391,13 @@ namespace Noggit::Ai
         "Le blueprint MOBA exige un côté de carte entre 2 et 4 tuiles.");
     static auto const fields = std::set<std::string>{
       "texture_paths", "liquid_type_id", "assets", "seed", "base_height",
-      "river_depth", "lane_width_ratio", "river_width_ratio",
+      "arena_scale_ratio", "river_depth", "lane_width_ratio", "river_width_ratio",
       "lane_curvature", "river_curvature", "jungle_roughness",
       "vegetation_density_per_tile", "ground_effect_texture_id", "prop_paths",
       "skybox_path", "skybox_flags"
     };
     if (!arguments.is_object() || arguments.size() != fields.size())
-      throw std::invalid_argument("Le blueprint MOBA exige exactement ses 16 paramètres.");
+      throw std::invalid_argument("Le blueprint MOBA exige exactement ses 17 paramètres.");
     for (auto const& [name, value] : arguments.items())
     {
       static_cast<void>(value);
@@ -349,6 +474,8 @@ namespace Noggit::Ai
     };
 
     auto const base = finiteNumber(arguments, "base_height", -450.0, 4950.0);
+    auto const arena_scale = finiteNumber(
+      arguments, "arena_scale_ratio", .25, 1.0);
     auto const river_depth = finiteNumber(arguments, "river_depth", 2.0, 30.0);
     auto const lane_width = finiteNumber(arguments, "lane_width_ratio", 0.012, 0.055);
     auto const river_width = finiteNumber(arguments, "river_width_ratio", 0.015, 0.08);
@@ -1526,6 +1653,55 @@ namespace Noggit::Ai
       throw std::invalid_argument(message);
     }
     blueprint["audit"] = mobaArenaAuditSummary(audit);
+
+    if (arena_scale < 1.0)
+    {
+      transformMobaArenaBlueprint(blueprint, arena_scale, false);
+      auto& fitted_features
+        = blueprint["next_calls"][1]["arguments"]["features"];
+      auto const perimeter_height = base + std::max(24.0, relief_rise * 2.0);
+      fitted_features.insert(fitted_features.begin(), feature(
+        "arena_perimeter_relief", "area",
+        nlohmann::json::array({point(0, 0, perimeter_height),
+          point(1, 0, perimeter_height), point(1, 1, perimeter_height),
+          point(0, 1, perimeter_height)}),
+        0.0, .001, 3, 1, "absolute", roughness * .4, 1.0));
+
+      constexpr auto tile_size = 1600.0 / 3.0;
+      constexpr auto wow_run_speed = 7.0;
+      auto const playable_side = arena_scale
+        * static_cast<double>(footprint_side_tiles) * tile_size;
+      blueprint["arena_fit"] = {
+        {"scale_ratio", arena_scale},
+        {"playable_side_world_units", playable_side},
+        {"estimated_base_to_base_run_seconds",
+          playable_side * std::hypot(.887 - .113, .86 - .14)
+            / wow_run_speed},
+        {"perimeter_relief_height", perimeter_height}
+      };
+      blueprint["audit"]["metrics"]["arena_fit"] = blueprint["arena_fit"];
+
+      auto const& terrain_arguments = blueprint["next_calls"][1]["arguments"];
+      auto const& liquid_arguments = blueprint["next_calls"][2]["arguments"];
+      auto const& wall_arguments = blueprint["next_calls"][4]["arguments"];
+      auto const& props_arguments = blueprint["next_calls"][5]["arguments"];
+      auto const& vegetation_arguments = blueprint["next_calls"][6]["arguments"];
+      if (auto const parsed = parseProceduralLayout(terrain_arguments);
+          !parsed.layout)
+        throw std::invalid_argument(parsed.error);
+      if (auto const parsed = parseProceduralLiquidLayout(liquid_arguments);
+          !parsed.layout)
+        throw std::invalid_argument(parsed.error);
+      if (auto const parsed = parseProceduralScatter(wall_arguments);
+          !parsed.scatter)
+        throw std::invalid_argument(parsed.error);
+      if (auto const parsed = parseProceduralProps(props_arguments);
+          !parsed.props)
+        throw std::invalid_argument(parsed.error);
+      if (auto const parsed = parseProceduralScatter(vegetation_arguments);
+          !parsed.scatter)
+        throw std::invalid_argument(parsed.error);
+    }
     return blueprint;
   }
 }

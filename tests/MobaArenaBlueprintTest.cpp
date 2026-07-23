@@ -380,6 +380,10 @@ int main(int argc, char** argv)
           "a footprint with a missing tile was accepted");
 
   auto const spec = specification();
+  require(spec.at("skybox_path")
+              == "environments/stars/legionnexus_netherskybox01.m2"
+            && spec.at("skybox_flags") == 0,
+          "the map's selected skybox is not the MOBA default");
   auto const first = Noggit::Ai::compileMobaArenaBlueprint(spec, 4);
   if (dump_audit)
   {
@@ -481,6 +485,7 @@ int main(int argc, char** argv)
           && calls[7].at("arguments").at("skybox_path")
             == spec.at("skybox_path")
           && calls[7].at("arguments").at("flags") == spec.at("skybox_flags")
+          && calls[7].at("arguments").at("lighting_param_index") == 3
           && calls[8].at("name") == "validate_map"
           && calls[8].at("arguments").empty(),
           "generic execution pipeline changed");

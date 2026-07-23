@@ -1188,6 +1188,28 @@ Sky* Noggit::Ui::Tools::LightEditor::get_selected_sky() const
 	return _map_view->getWorld()->renderer()->skies()->findSkyById(_selected_sky_id);
 }
 
+void Noggit::Ui::Tools::LightEditor::reloadAfterExternalSkyChange()
+{
+	auto const editors = ActiveEditor;
+	ActiveEditor.clear();
+	for (auto* editor : editors)
+	{
+		editor->close();
+		editor->deleteLater();
+	}
+
+	if (auto* selected_sky = get_selected_sky())
+		loadSelectSky(selected_sky);
+	else
+	{
+		_selected_sky_id = 0;
+		_light_editing_widget->setEnabled(false);
+		save_current_sky_button->setEnabled(false);
+	}
+	updateActiveLights();
+	updateLightningInfo();
+}
+
 void LightEditor::load_light_param(int param_id)
 {
 	Sky* curr_sky = get_selected_sky();

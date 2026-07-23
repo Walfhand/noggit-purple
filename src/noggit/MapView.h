@@ -287,7 +287,9 @@ public:
   Noggit::Ui::Tools::AssetBrowser::Ui::AssetBrowserWidget* getAssetBrowserWidget();;
 
   Noggit::Ai::ProceduralSkyboxResult applyGlobalSkybox(
-    std::string path, std::uint32_t flags);
+    std::string path, std::uint32_t flags,
+    std::size_t lighting_param_index = 0);
+  void refreshLightEditorAfterSkyReload();
 
   glm::vec3 cursorPosition() const;
   bool hasValidCursorPosition() const;

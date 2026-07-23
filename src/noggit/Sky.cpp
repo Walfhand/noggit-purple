@@ -52,6 +52,21 @@ namespace skyparams
     auto [newIt, inserted] = skyParamMap.emplace(id, std::move(newParam));
     return &(newIt->second);  // Return newly created SkyParam
   }
+
+  void reloadCachedParam(
+    unsigned int id, Noggit::NoggitRenderContext context)
+  {
+    auto const found = skyParamMap.find(id);
+    if (found != skyParamMap.end())
+      found->second = SkyParam(id, context);
+  }
+
+  void reloadCachedParams(Noggit::NoggitRenderContext context)
+  {
+    for (auto& [id, param] : skyParamMap)
+      if (gLightParamsDB.CheckIfIdExists(id))
+        param = SkyParam(id, context);
+  }
 }
 
 

@@ -201,6 +201,13 @@ private:
     Noggit::NoggitRenderContext _context;
 };
 
+namespace skyparams
+{
+  void reloadCachedParam(
+    unsigned int id, Noggit::NoggitRenderContext context);
+  void reloadCachedParams(Noggit::NoggitRenderContext context);
+}
+
 class Sky 
 {
 private:

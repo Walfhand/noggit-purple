@@ -66,6 +66,15 @@ namespace Noggit::Ai
           throw std::runtime_error(std::string{name} + " source band is missing");
     }
 
+    bool bandRangeExists(
+      DBCFile& bands, std::uint32_t param_id, std::uint32_t count)
+    {
+      auto const first = bandStart(param_id, count);
+      for (std::uint32_t offset = 0; offset < count; ++offset)
+        if (!bands.CheckIfIdExists(first + offset)) return false;
+      return true;
+    }
+
     bool bandRangeIsFree(DBCFile& bands, std::uint32_t param_id, std::uint32_t count)
     {
       auto const first = bandStart(param_id, count);
@@ -73,16 +82,71 @@ namespace Noggit::Ai
         if (bands.CheckIfIdExists(first + offset)) return false;
       return true;
     }
+
+    bool parameterPresetMatches(
+      DBCFile& params, std::uint32_t target_id, std::uint32_t source_id)
+    {
+      auto const target = params.getByID(target_id);
+      auto const source = params.getByID(source_id);
+      for (std::size_t field = 1; field < params.getFieldCount(); ++field)
+        if (field != LightParamsDB::skybox
+            && target.getUInt(field) != source.getUInt(field))
+          return false;
+      return true;
+    }
+
+    bool bandRangeMatches(
+      DBCFile& bands, std::uint32_t target_param_id,
+      std::uint32_t source_param_id, std::uint32_t count)
+    {
+      auto const target_start = bandStart(target_param_id, count);
+      auto const source_start = bandStart(source_param_id, count);
+      for (std::uint32_t offset = 0; offset < count; ++offset)
+      {
+        auto const target = bands.getByID(target_start + offset);
+        auto const source = bands.getByID(source_start + offset);
+        for (std::size_t field = 1; field < bands.getFieldCount(); ++field)
+          if (target.getUInt(field) != source.getUInt(field)) return false;
+      }
+      return true;
+    }
+
+    void copyParameterPreset(
+      DBCFile& params, std::uint32_t target_id, std::uint32_t source_id)
+    {
+      auto target = params.getByID(target_id);
+      auto const source = params.getByID(source_id);
+      for (std::size_t field = 1; field < params.getFieldCount(); ++field)
+        if (field != LightParamsDB::skybox)
+          target.write(field, source.getUInt(field));
+    }
+
+    void copyBandRange(
+      DBCFile& bands, std::uint32_t target_param_id,
+      std::uint32_t source_param_id, std::uint32_t count)
+    {
+      auto const target_start = bandStart(target_param_id, count);
+      auto const source_start = bandStart(source_param_id, count);
+      for (std::uint32_t offset = 0; offset < count; ++offset)
+      {
+        auto target = bands.getByID(target_start + offset);
+        auto const source = bands.getByID(source_start + offset);
+        for (std::size_t field = 1; field < bands.getFieldCount(); ++field)
+          target.write(field, source.getUInt(field));
+      }
+    }
   }
 
   ProceduralSkyboxResult attachGlobalSkybox(
     DBCFile& light, DBCFile& light_params, DBCFile& light_skybox,
     DBCFile& light_int_band, DBCFile& light_float_band,
     std::uint32_t map_id, std::string const& skybox_path,
-    std::uint32_t flags)
+    std::uint32_t flags, std::size_t lighting_param_index)
   {
     if (skybox_path.empty())
       throw std::invalid_argument("skybox path must not be empty");
+    if (lighting_param_index >= 8)
+      throw std::invalid_argument("lighting parameter index must be between 0 and 7");
     requireFields(light, LightDB::DataIDs + 8, "Light.dbc");
     requireFields(light_params, LightParamsDB::flags + 1, "LightParams.dbc");
     requireFields(light_skybox, LightSkyboxDB::flags + 1, "LightSkybox.dbc");
@@ -93,33 +157,44 @@ namespace Noggit::Ai
     auto const source_light_id = existing_light_id.value_or(1);
     if (!light.CheckIfIdExists(source_light_id))
       throw std::runtime_error("Light.dbc source light is missing");
-    auto const source_param_id = light.getByID(source_light_id).getUInt(
+    auto const target_param_id = light.getByID(source_light_id).getUInt(
       LightDB::DataIDs + clear_param);
-    if (source_param_id == 0 || !light_params.CheckIfIdExists(source_param_id))
+    auto const source_param_id = light.getByID(source_light_id).getUInt(
+      LightDB::DataIDs + lighting_param_index);
+    if (target_param_id == 0 || !light_params.CheckIfIdExists(target_param_id))
       throw std::runtime_error("LightParams.dbc clear source is missing");
+    if (source_param_id == 0 || !light_params.CheckIfIdExists(source_param_id))
+      throw std::runtime_error("LightParams.dbc lighting preset is missing");
+    requireBandSources(light_int_band, source_param_id, int_band_count,
+                       "LightIntBand.dbc");
+    requireBandSources(light_float_band, source_param_id, float_band_count,
+                       "LightFloatBand.dbc");
 
-    if (existing_light_id)
+    auto const update_private_param = existing_light_id
+      && parameterReferenceCount(light, target_param_id) == 1
+      && bandRangeExists(light_int_band, target_param_id, int_band_count)
+      && bandRangeExists(light_float_band, target_param_id, float_band_count);
+    if (update_private_param)
     {
-      auto const current_skybox_id = light_params.getByID(source_param_id).getUInt(
+      auto const current_skybox_id = light_params.getByID(target_param_id).getUInt(
         LightParamsDB::skybox);
       if (current_skybox_id != 0 && light_skybox.CheckIfIdExists(current_skybox_id))
       {
         auto const current = light_skybox.getByID(current_skybox_id);
         if (current.getString(LightSkyboxDB::filename) == skybox_path
             && current.getUInt(LightSkyboxDB::flags) == flags)
-          return {false, *existing_light_id, source_param_id, current_skybox_id};
+          if (parameterPresetMatches(light_params, target_param_id, source_param_id)
+              && bandRangeMatches(light_int_band, target_param_id, source_param_id,
+                                  int_band_count)
+              && bandRangeMatches(light_float_band, target_param_id, source_param_id,
+                                  float_band_count))
+            return {false, *existing_light_id, target_param_id, current_skybox_id};
       }
     }
 
-    auto const update_private_param = existing_light_id
-      && parameterReferenceCount(light, source_param_id) == 1;
-    auto new_param_id = source_param_id;
+    auto new_param_id = target_param_id;
     if (!update_private_param)
     {
-      requireBandSources(light_int_band, source_param_id, int_band_count,
-                         "LightIntBand.dbc");
-      requireBandSources(light_float_band, source_param_id, float_band_count,
-                         "LightFloatBand.dbc");
       new_param_id = static_cast<std::uint32_t>(light_params.getEmptyRecordID());
       while (!bandRangeIsFree(light_int_band, new_param_id, int_band_count)
              || !bandRangeIsFree(light_float_band, new_param_id, float_band_count))
@@ -147,9 +222,14 @@ namespace Noggit::Ai
 
       if (update_private_param)
       {
-        light_params.getByID(source_param_id).write(
+        copyParameterPreset(light_params, target_param_id, source_param_id);
+        copyBandRange(light_int_band, target_param_id, source_param_id,
+                      int_band_count);
+        copyBandRange(light_float_band, target_param_id, source_param_id,
+                      float_band_count);
+        light_params.getByID(target_param_id).write(
           LightParamsDB::skybox, new_skybox_id);
-        return {true, *existing_light_id, source_param_id, new_skybox_id};
+        return {true, *existing_light_id, target_param_id, new_skybox_id};
       }
 
       auto params = light_params.addRecordCopy(new_param_id, source_param_id);

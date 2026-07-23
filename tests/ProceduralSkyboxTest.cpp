@@ -137,4 +137,54 @@ int main()
             && params.getByID(first.light_params_id).getUInt(
                  LightParamsDB::skybox) == third.skybox_id,
           "private map skybox was not updated in place");
+
+  auto dark_params = params.addRecord(6);
+  dark_params.write(LightParamsDB::skybox, first.skybox_id);
+  dark_params.write(LightParamsDB::glow, 0.15f);
+  light.getByID(1).write(LightDB::DataIDs + 3, std::uint32_t{6});
+  light.getByID(first.light_id).write(
+    LightDB::DataIDs + 3, std::uint32_t{6});
+  for (std::uint32_t offset = 0; offset < 18; ++offset)
+  {
+    auto band = int_bands.addRecord(91 + offset);
+    band.write(LightIntBandDB::Entries, std::uint32_t{1});
+    band.write(LightIntBandDB::Values, 50u + offset);
+  }
+  for (std::uint32_t offset = 0; offset < 6; ++offset)
+  {
+    auto band = float_bands.addRecord(31 + offset);
+    band.write(LightFloatBandDB::Entries, std::uint32_t{1});
+    band.write(LightFloatBandDB::Values, 0.1f + static_cast<float>(offset));
+  }
+  auto const preset_counts = std::array<std::size_t, 5>{
+    light.getRecordCount(), params.getRecordCount(), skyboxes.getRecordCount(),
+    int_bands.getRecordCount(), float_bands.getRecordCount()};
+  auto const dark = Noggit::Ai::attachGlobalSkybox(
+    light, params, skyboxes, int_bands, float_bands, 42,
+    "environments/stars/new.m2", 1, 3);
+  require(dark.changed && dark.light_id == first.light_id
+            && dark.light_params_id == first.light_params_id
+            && dark.skybox_id == first.skybox_id
+            && light.getByID(first.light_id).getUInt(LightDB::DataIDs)
+              == first.light_params_id,
+          "storm-underwater lighting was not made the persistent clear preset");
+  require(params.getByID(first.light_params_id).getFloat(LightParamsDB::glow)
+              == 0.15f
+            && params.getByID(6).getUInt(LightParamsDB::skybox)
+              == first.skybox_id
+            && int_bands.getByID(37).getUInt(LightIntBandDB::Values) == 50u
+            && int_bands.getByID(91).getUInt(LightIntBandDB::Values) == 50u
+            && std::abs(float_bands.getByID(13).getFloat(
+                          LightFloatBandDB::Values) - 0.1f) < 0.0001f,
+          "lighting preset was not copied into the private clear parameter");
+  require(preset_counts == std::array<std::size_t, 5>{
+            light.getRecordCount(), params.getRecordCount(), skyboxes.getRecordCount(),
+            int_bands.getRecordCount(), float_bands.getRecordCount()},
+          "reusing a matching lighting preset added DBC records");
+  auto const dark_again = Noggit::Ai::attachGlobalSkybox(
+    light, params, skyboxes, int_bands, float_bands, 42,
+    "environments/stars/new.m2", 1, 3);
+  require(!dark_again.changed
+            && dark_again.light_params_id == first.light_params_id,
+          "persistent lighting preset was not idempotent");
 }

@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 
@@ -21,5 +22,5 @@ namespace Noggit::Ai
     DBCFile& light, DBCFile& light_params, DBCFile& light_skybox,
     DBCFile& light_int_band, DBCFile& light_float_band,
     std::uint32_t map_id, std::string const& skybox_path,
-    std::uint32_t flags);
+    std::uint32_t flags, std::size_t lighting_param_index = 0);
 }

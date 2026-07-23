@@ -55,6 +55,7 @@
 #include <external/glm/gtc/type_ptr.hpp>
 #include <external/qtimgui/QtImGui.h>
 #include <opengl/types.hpp>
+#include <exception>
 #include <limits>
 #include <variant>
 #include <noggit/Selection.h>
@@ -4339,7 +4340,7 @@ Noggit::Ui::Tools::AssetBrowser::Ui::AssetBrowserWidget* MapView::getAssetBrowse
 }
 
 Noggit::Ai::ProceduralSkyboxResult MapView::applyGlobalSkybox(
-  std::string path, std::uint32_t flags)
+  std::string path, std::uint32_t flags, std::size_t lighting_param_index)
 {
   auto* application = Noggit::Application::NoggitApplication::instance();
   path = BlizzardArchive::ClientData::normalizeFilenameInternal(std::move(path));
@@ -4351,6 +4352,9 @@ Noggit::Ai::ProceduralSkyboxResult MapView::applyGlobalSkybox(
       "La skybox n'existe pas dans les donnees client : " + path);
   if (flags > 3)
     throw std::invalid_argument("Les flags de skybox doivent etre compris entre 0 et 3.");
+  if (lighting_param_index >= 8)
+    throw std::invalid_argument(
+      "L'index du parametre lumineux doit etre compris entre 0 et 7.");
 
   auto const light_backup = gLightDB;
   auto const params_backup = gLightParamsDB;
@@ -4362,10 +4366,12 @@ Noggit::Ai::ProceduralSkyboxResult MapView::applyGlobalSkybox(
     auto const update = Noggit::Ai::attachGlobalSkybox(
       gLightDB, gLightParamsDB, gLightSkyboxDB,
       gLightIntBandDB, gLightFloatBandDB,
-      _world->getMapID(), path, flags);
+      _world->getMapID(), path, flags, lighting_param_index);
 
     makeCurrent();
     OpenGL::context::scoped_setter const current_context(::gl, context());
+    skyparams::reloadCachedParam(
+      update.light_params_id, _world->getRenderContext());
     auto skies = std::make_unique<Skies>(
       _world->getMapID(), _world->getRenderContext());
     if (update.changed)
@@ -4377,18 +4383,45 @@ Noggit::Ai::ProceduralSkyboxResult MapView::applyGlobalSkybox(
       gLightDB.save();
     }
     _world->renderer()->skies() = std::move(skies);
+    refreshLightEditorAfterSkyReload();
     invalidate();
     return update;
   }
   catch (...)
   {
+    auto const error = std::current_exception();
     gLightDB.overwriteWith(light_backup);
     gLightParamsDB.overwriteWith(params_backup);
     gLightSkyboxDB.overwriteWith(skybox_backup);
     gLightIntBandDB.overwriteWith(int_band_backup);
     gLightFloatBandDB.overwriteWith(float_band_backup);
-    throw;
+    try
+    {
+      makeCurrent();
+      OpenGL::context::scoped_setter const current_context(::gl, context());
+      skyparams::reloadCachedParams(_world->getRenderContext());
+      _world->renderer()->skies() = std::make_unique<Skies>(
+        _world->getMapID(), _world->getRenderContext());
+      refreshLightEditorAfterSkyReload();
+      invalidate();
+    }
+    catch (...)
+    {
+    }
+    std::rethrow_exception(error);
   }
+}
+
+void MapView::refreshLightEditorAfterSkyReload()
+{
+  if (!_tool_panel_dock) return;
+  for (auto* widget : _tool_panel_dock->findChildren<QWidget*>())
+    if (auto* light_editor =
+          dynamic_cast<Noggit::Ui::Tools::LightEditor*>(widget))
+    {
+      light_editor->reloadAfterExternalSkyChange();
+      return;
+    }
 }
 
 glm::vec3 MapView::cursorPosition() const

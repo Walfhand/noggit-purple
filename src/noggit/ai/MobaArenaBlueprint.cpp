@@ -167,8 +167,8 @@ namespace Noggit::Ai
       })},
       {"liquid_type_id", 1},
       {"ground_effect_texture_id", 0},
-      {"skybox_path", "environments/stars/8zul_sky01.m2"},
-      {"skybox_flags", 1},
+      {"skybox_path", "environments/stars/legionnexus_netherskybox01.m2"},
+      {"skybox_flags", 0},
       {"assets", nlohmann::json::array({
         {{"path", "world/expansion07/doodads/zuldazarzone/8zul_jungletree_a01.m2"},
          {"role", "canopy"}, {"weight", 3}, {"min_scale", .8},
@@ -1506,7 +1506,8 @@ namespace Noggit::Ai
         {{"name", "place_props_on_map"}, {"arguments", std::move(props_call)}},
         {{"name", "scatter_assets_on_map"}, {"arguments", std::move(vegetation)}},
         {{"name", "apply_skybox_on_map"}, {"arguments", {
-          {"skybox_path", skybox_path}, {"flags", skybox_flags}}}},
+          {"skybox_path", skybox_path}, {"flags", skybox_flags},
+          {"lighting_param_index", 3}}}},
         {{"name", "validate_map"}, {"arguments", nlohmann::json::object()}}
       })}};
     auto const audit = auditMobaArenaBlueprint(blueprint, footprint_side_tiles,

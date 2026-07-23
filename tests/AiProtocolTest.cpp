@@ -55,6 +55,7 @@ int main()
   nlohmann::json const* texture_search = nullptr;
   nlohmann::json const* texture_preview = nullptr;
   nlohmann::json const* asset_scatter = nullptr;
+  nlohmann::json const* skybox_apply = nullptr;
 
   for (auto const& tool : tools)
   {
@@ -76,6 +77,7 @@ int main()
       texture_preview = &tool;
     }
     if (tool.at("name") == "scatter_assets_on_map") asset_scatter = &tool;
+    if (tool.at("name") == "apply_skybox_on_map") skybox_apply = &tool;
     require(tool.at("type") == "function", "tool type must be function");
     require(tool.at("strict") == true, "tool must use strict mode");
     auto const& parameters = tool.at("parameters");
@@ -126,6 +128,12 @@ int main()
           "apply_ground_effect_on_map tool is missing");
   require(tool_names.count("apply_skybox_on_map") == 1,
           "apply_skybox_on_map tool is missing");
+  require(skybox_apply != nullptr
+            && skybox_apply->at("parameters").at("properties")
+                 .at("lighting_param_index").at("minimum") == 0
+            && skybox_apply->at("parameters").at("properties")
+                 .at("lighting_param_index").at("maximum") == 7,
+          "skybox lighting preset schema is missing");
   require(tool_names.count("search_ground_effects") == 1,
           "search_ground_effects tool is missing");
 

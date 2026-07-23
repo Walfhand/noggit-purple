@@ -667,9 +667,13 @@ namespace Noggit::Ai
       {"type", "object"},
       {"properties", {
         {"skybox_path", { {"type", "string"}, {"minLength", 1}, {"maxLength", 260} }},
-        {"flags", { {"type", "integer"}, {"minimum", 0}, {"maximum", 3} }}
+        {"flags", { {"type", "integer"}, {"minimum", 0}, {"maximum", 3} }},
+        {"lighting_param_index", {
+          {"type", "integer"}, {"minimum", 0}, {"maximum", 7},
+          {"description", "Palette à rendre permanente dans Clear Weather : 0=Clear, 1=Clear Underwater, 2=Storm, 3=Storm Underwater."}
+        }}
       }},
-      {"required", {"skybox_path", "flags"}},
+      {"required", {"skybox_path", "flags", "lighting_param_index"}},
       {"additionalProperties", false}
     };
 
@@ -783,7 +787,7 @@ namespace Noggit::Ai
       {
         {"type", "function"},
         {"name", "apply_skybox_on_map"},
-        {"description", "Relie une skybox M2 à la lumière globale de la carte en clonant le LightParams clair et ses bandes, sans modifier les paramètres partagés des autres cartes. Écrit Light.dbc, LightParams.dbc, LightSkybox.dbc, LightIntBand.dbc et LightFloatBand.dbc dans le projet."},
+        {"description", "Relie une skybox M2 à la lumière globale et copie la palette choisie dans un LightParams Clear privé, sans modifier les paramètres partagés des autres cartes. Écrit Light.dbc, LightParams.dbc, LightSkybox.dbc, LightIntBand.dbc et LightFloatBand.dbc dans le projet."},
         {"parameters", std::move(skybox_apply_parameters)},
         {"strict", true}
       },

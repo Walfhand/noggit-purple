@@ -1283,9 +1283,10 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
         world->basename, &world->mapIndex);
       world->renderer()->reloadHorizon();
       tile_error = loadTilesSequentially(*world, _moba_transaction->loaded_tiles);
-      if (!tile_error)
-        world->renderer()->skies() = std::make_unique<Skies>(
-          world->getMapID(), world->getRenderContext());
+      skyparams::reloadCachedParams(world->getRenderContext());
+      world->renderer()->skies() = std::make_unique<Skies>(
+        world->getMapID(), world->getRenderContext());
+      _map_view->refreshLightEditorAfterSkyReload();
       _map_view->setEnabled(_moba_transaction->map_view_was_enabled);
       _map_view->invalidate();
     }
@@ -1357,6 +1358,7 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
     auto* editor = new QPlainTextEdit(&dialog);
     QSettings settings;
     static constexpr auto specification_keys = std::array{
+      "ai/mobaBlueprintLabSpecificationV16",
       "ai/mobaBlueprintLabSpecificationV15",
       "ai/mobaBlueprintLabSpecificationV14",
       "ai/mobaBlueprintLabSpecificationV13",
@@ -1465,11 +1467,18 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
                 || old_props.contains(specification.at("prop_paths").at(role)
                                        .get<std::string>()))
               specification["prop_paths"][role] = path;
-        if (!specification.contains("skybox_path")
-            || specification.at("skybox_path")
-              == "environments/stars/tanaan_patch_junglesky01.m2")
+        static auto const old_skyboxes = std::set<std::string>{
+          "environments/stars/tanaan_patch_junglesky01.m2",
+          "environments/stars/8zul_sky01.m2"};
+        auto const migrate_skybox = !specification.contains("skybox_path")
+          || old_skyboxes.contains(
+            specification.at("skybox_path").get<std::string>());
+        if (migrate_skybox)
+        {
           specification["skybox_path"] = defaults.at("skybox_path");
-        if (!specification.contains("skybox_flags"))
+          specification["skybox_flags"] = defaults.at("skybox_flags");
+        }
+        else if (!specification.contains("skybox_flags"))
           specification["skybox_flags"] = defaults.at("skybox_flags");
         migrated = QString::fromStdString(specification.dump(2));
       }
@@ -2503,12 +2512,15 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
     }
     else if (*operation == MapBatchOperation::ApplySkybox)
     {
-      static auto const fields = std::set<std::string>{"skybox_path", "flags"};
+      static auto const fields = std::set<std::string>{
+        "skybox_path", "flags", "lighting_param_index"};
       if (arguments.size() != fields.size()
           || !arguments.contains("skybox_path") || !arguments.at("skybox_path").is_string()
-          || !arguments.contains("flags") || !arguments.at("flags").is_number_integer())
+          || !arguments.contains("flags") || !arguments.at("flags").is_number_integer()
+          || !arguments.contains("lighting_param_index")
+          || !arguments.at("lighting_param_index").is_number_integer())
         return completeWith(toolError(
-          "apply_skybox_on_map exige exactement skybox_path et flags."));
+          "apply_skybox_on_map exige exactement skybox_path, flags et lighting_param_index."));
       for (auto const& [name, value] : arguments.items())
       {
         static_cast<void>(value);
@@ -2520,6 +2532,8 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
       auto path = BlizzardArchive::ClientData::normalizeFilenameInternal(
         arguments.at("skybox_path").get<std::string>());
       auto const flags = arguments.at("flags").get<long long>();
+      auto const lighting_param_index =
+        arguments.at("lighting_param_index").get<long long>();
       if (!application->hasClientData() || !path.starts_with("environments/stars/")
           || !path.ends_with(".m2") || path.find("..") != std::string::npos
           || !application->clientData()->exists(path))
@@ -2527,14 +2541,19 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
           "La skybox M2 n'existe pas sous environments/stars dans le client : " + path));
       if (flags < 0 || flags > 3)
         return completeWith(toolError("flags doit être compris entre 0 et 3."));
+      if (lighting_param_index < 0 || lighting_param_index > 7)
+        return completeWith(toolError(
+          "lighting_param_index doit être compris entre 0 et 7."));
 
       try
       {
         auto const update = _map_view->applyGlobalSkybox(
-          path, static_cast<std::uint32_t>(flags));
+          path, static_cast<std::uint32_t>(flags),
+          static_cast<std::size_t>(lighting_param_index));
         return completeWith({
           {"ok", true}, {"operation", call.name}, {"skybox_path", path},
-          {"flags", flags}, {"changed", update.changed}, {"saved", update.changed},
+          {"flags", flags}, {"lighting_param_index", lighting_param_index},
+          {"changed", update.changed}, {"saved", update.changed},
           {"light_id", update.light_id},
           {"light_params_id", update.light_params_id},
           {"light_skybox_id", update.skybox_id},

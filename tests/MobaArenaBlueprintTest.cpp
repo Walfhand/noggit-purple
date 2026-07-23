@@ -380,6 +380,16 @@ int main(int argc, char** argv)
           "a footprint with a missing tile was accepted");
 
   auto const spec = specification();
+  auto const& texture_paths = spec.at("texture_paths");
+  require(std::all_of(texture_paths.begin(), texture_paths.end(),
+          [](nlohmann::json const& path)
+          {
+            return path.get_ref<std::string const&>()
+              .starts_with("tileset/expansion07/");
+          })
+            && texture_paths.at(3)
+              == "tileset/expansion07/zuldazarzone/8zul_rock01_1024.blp",
+          "the default MOBA terrain textures must be WotLK-compatible");
   require(spec.at("skybox_path")
               == "environments/stars/legionnexus_netherskybox01.m2"
             && spec.at("skybox_flags") == 0,

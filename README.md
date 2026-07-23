@@ -110,6 +110,11 @@ at the two bases. Scatter
 preflight counts only regions that actually intersect a
 tile, so a 2x2 arena does not multiply candidates across unrelated tiles.
 Generic tools remain available unchanged for non-MOBA maps.
+Blueprint defaults must use asset paths that the target WotLK 3.3.5 client can
+resolve and decode, not merely paths that Noggit can open from extended client
+archives. Paths are written verbatim to the ADT and the game client performs no
+compatibility remapping; for example, the MOBA terrain uses the validated
+`tileset/expansion07/zuldazarzone/...` backports instead of `tileset/8.0/...`.
 The main viewport also approximates native texture GroundEffects with transient
 M2 instances (at most 16 per chunk) so ground cover can be reviewed without
 launching WoW. These preview instances are never saved into the ADT and follow

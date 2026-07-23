@@ -163,7 +163,7 @@ namespace Noggit::Ai
         "tileset/expansion07/zuldazarzone/8zul_moss01_512.blp",
         "tileset/expansion07/zuldazarzone/8zul_tile01_512.blp",
         "tileset/expansion07/zuldazarzone/8zul_redjunglefloor_1024.blp",
-        "tileset/8.0/zuldazar/data/8zul_rock01_1024.blp"
+        "tileset/expansion07/zuldazarzone/8zul_rock01_1024.blp"
       })},
       {"liquid_type_id", 1},
       {"ground_effect_texture_id", 0},

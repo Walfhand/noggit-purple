@@ -1358,6 +1358,7 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
     auto* editor = new QPlainTextEdit(&dialog);
     QSettings settings;
     static constexpr auto specification_keys = std::array{
+      "ai/mobaBlueprintLabSpecificationV17",
       "ai/mobaBlueprintLabSpecificationV16",
       "ai/mobaBlueprintLabSpecificationV15",
       "ai/mobaBlueprintLabSpecificationV14",
@@ -1449,6 +1450,8 @@ Les outils *_on_map enregistrent les tuiles une par une et ne sont pas annulable
           {"tileset/6.0/tanaanjungle/data/6tj_mud_01_512.blp",
            defaults.at("texture_paths").at(2).get<std::string>()},
           {"tileset/6.0/tanaanjungle/data/6tj_rock_02_1024.blp",
+           defaults.at("texture_paths").at(3).get<std::string>()},
+          {"tileset/8.0/zuldazar/data/8zul_rock01_1024.blp",
            defaults.at("texture_paths").at(3).get<std::string>()}};
         for (auto& texture : specification.at("texture_paths"))
           if (auto const found = old_textures.find(texture.get<std::string>());

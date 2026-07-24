@@ -320,8 +320,27 @@ int main()
     }
     too_many_segments["features"].push_back(std::move(feature));
   }
+  auto segment_limit = too_many_segments;
+  segment_limit["features"].erase(segment_limit["features"].end() - 1);
+  auto limit_tail = validArguments()["features"][0];
+  limit_tail["name"] = "limit_tail";
+  limit_tail["points"] = nlohmann::json::array();
+  for (int point = 0; point < 11; ++point)
+    limit_tail["points"].push_back({
+      {"u", static_cast<double>(point) / 10.0},
+      {"v", .99},
+      {"height", 10.0}
+    });
+  segment_limit["features"].push_back(std::move(limit_tail));
+  require(Noggit::Ai::parseProceduralLayout(segment_limit).layout.has_value(),
+          "layout with 520 segments was rejected");
+  segment_limit["features"].back()["points"].push_back({
+    {"u", .5}, {"v", .98}, {"height", 10.0}
+  });
+  require(!Noggit::Ai::parseProceduralLayout(segment_limit).layout,
+          "layout with more than 520 segments was accepted");
   require(!Noggit::Ai::parseProceduralLayout(too_many_segments).layout,
-          "layout with more than 516 segments was accepted");
+          "oversized layout segment count was accepted");
 
   auto bad_name = validArguments();
   bad_name["features"][0]["name"] = "bad\nname";

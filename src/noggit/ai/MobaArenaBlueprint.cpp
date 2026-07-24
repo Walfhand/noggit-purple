@@ -209,11 +209,12 @@ namespace Noggit::Ai
               features.end());
           for (auto& value : features)
           {
+            auto const& feature_name
+              = value.at("name").get_ref<std::string const&>();
+            if (feature_name == "arena_ground") continue;
             fitPoints(value.at("points"), scale, inverse);
             fitWidth(value, "half_width_ratio", 0.0, scale, inverse);
             fitWidth(value, "transition_width_ratio", 0.0, scale, inverse);
-            auto const& feature_name
-              = value.at("name").get_ref<std::string const&>();
             if (feature_name == "objective_north"
                 || feature_name == "objective_south")
               value["priority"] = inverse ? 70 : 91;
@@ -1659,13 +1660,50 @@ namespace Noggit::Ai
       transformMobaArenaBlueprint(blueprint, arena_scale, false);
       auto& fitted_features
         = blueprint["next_calls"][1]["arguments"]["features"];
-      auto const perimeter_height = base + std::max(24.0, relief_rise * 2.0);
+      auto const margin = (1.0 - arena_scale) * .5;
+      constexpr auto mountain_width_variation = .6;
+      auto const mountain_half_width
+        = std::clamp(margin * .018, .00125, .006);
+      auto const mountain_transition
+        = std::clamp(margin * .09, .00025, .03);
+      auto const mountain_clearance = std::min(.005, margin * .02);
+      auto const mountain_inset = std::max(0.0,
+        margin - mountain_half_width * (1.0 + mountain_width_variation)
+          - mountain_transition - mountain_clearance);
+      auto const mountain_outer = 1.0 - mountain_inset;
+      auto const mountain_jag = std::min(.04, mountain_inset);
+      auto const mountain_shoulder = std::min(.07, arena_scale * .22);
+      auto const mountain_base_height
+        = base + std::max(42.0, relief_rise * 3.0);
+      auto const perimeter_height = mountain_base_height + 34.0;
       fitted_features.insert(fitted_features.begin(), feature(
-        "arena_perimeter_relief", "area",
-        nlohmann::json::array({point(0, 0, perimeter_height),
-          point(1, 0, perimeter_height), point(1, 1, perimeter_height),
-          point(0, 1, perimeter_height)}),
-        0.0, .001, 3, 1, "absolute", roughness * .4, 1.0));
+        "arena_perimeter_relief", "corridor",
+        nlohmann::json::array({
+          point(mountain_inset - mountain_jag, mountain_inset,
+                mountain_base_height),
+          point(.5 - mountain_shoulder,
+                mountain_inset - .9 * mountain_jag,
+                mountain_base_height + 24.0),
+          point(mountain_outer,
+                mountain_inset - .65 * mountain_jag,
+                mountain_base_height + 8.0),
+          point(mountain_outer + mountain_jag, .5 - mountain_shoulder,
+                mountain_base_height + 34.0),
+          point(mountain_outer + mountain_jag, mountain_outer,
+                mountain_base_height),
+          point(.5 + mountain_shoulder,
+                mountain_outer + .9 * mountain_jag,
+                mountain_base_height + 24.0),
+          point(mountain_inset,
+                mountain_outer + .65 * mountain_jag,
+                mountain_base_height + 8.0),
+          point(mountain_inset - mountain_jag, .5 + mountain_shoulder,
+                mountain_base_height + 34.0),
+          point(mountain_inset - mountain_jag, mountain_inset,
+                mountain_base_height)}),
+        mountain_half_width, mountain_transition, 0, 10, "absolute",
+        std::clamp(roughness * 3.2, 14.0, 18.0), 1.0,
+        mountain_width_variation));
 
       constexpr auto tile_size = 1600.0 / 3.0;
       constexpr auto wow_run_speed = 7.0;

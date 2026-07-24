@@ -18,7 +18,7 @@ namespace Noggit::Ai
   namespace
   {
     constexpr std::size_t max_points_per_feature = 16;
-    constexpr std::size_t max_total_segments = 516;
+    constexpr std::size_t max_total_segments = 520;
     constexpr float minimum_layout_height = -500.0f;
     constexpr float maximum_layout_height = 5000.0f;
 
@@ -603,7 +603,7 @@ namespace Noggit::Ai
         ? points.size() : points.size() - 1;
       if (total_segments > max_total_segments)
       {
-        return fail("Le layout ne peut pas dépasser 516 segments au total.");
+        return fail("Le layout ne peut pas dépasser 520 segments au total.");
       }
       for (auto const& point_value : points)
       {

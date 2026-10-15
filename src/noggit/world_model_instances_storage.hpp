@@ -8,6 +8,7 @@
 #include <atomic>
 #include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 struct TileIndex;
@@ -52,7 +53,7 @@ namespace Noggit
     void upload();
     void unload();
 
-    unsigned int getTotalModelsCount() const;;
+    unsigned int getTotalModelsCount() const;
 
   private: // private functions aren't thread safe
     bool unsafe_uid_is_used(std::uint32_t uid) const;
@@ -103,7 +104,7 @@ namespace Noggit
 
   private:
     World* _world;
-    std::mutex _mutex;
+    mutable std::mutex _mutex;
     std::atomic<bool> _uid_duplicates_found = {false};
 
     m2_instance_umap _m2s;
@@ -117,5 +118,6 @@ namespace Noggit
     bool _transform_storage_uploaded = false;
 
     std::unordered_map<std::uint32_t, int> _instance_count_per_uid;
+    std::unordered_set<std::uint32_t> _instances_being_removed;
   };
 }

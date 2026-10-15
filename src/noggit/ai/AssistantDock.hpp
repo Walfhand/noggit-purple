@@ -10,6 +10,8 @@
 
 #include <cstddef>
 #include <memory>
+#include <optional>
+#include <string>
 
 class QLabel;
 class QLineEdit;
@@ -23,6 +25,7 @@ class MapView;
 namespace Noggit::Ai
 {
   struct MapBatchState;
+  struct MobaTransactionState;
 
   class AssistantDock final : public QDockWidget
   {
@@ -49,6 +52,9 @@ namespace Noggit::Ai
     void setBusy(bool busy);
     void finishTurn(QString const& answer);
     void failTurn(QString const& message);
+    std::optional<std::string> beginMobaTransaction();
+    std::optional<std::string> rollbackMobaTransaction();
+    void commitMobaTransaction();
     void appendTranscript(QString const& speaker, QString const& text);
     nlohmann::json executeTool(FunctionCall const& call);
 
@@ -65,9 +71,11 @@ namespace Noggit::Ai
     QLabel* _status;
     nlohmann::json _input;
     nlohmann::json _pending_plan;
+    nlohmann::json _approved_blueprint_calls = nlohmann::json::array();
     nlohmann::json _direct_blueprint_calls = nlohmann::json::array();
     nlohmann::json _direct_blueprint_results = nlohmann::json::array();
     std::unique_ptr<MapBatchState> _map_batch;
+    std::unique_ptr<MobaTransactionState> _moba_transaction;
     std::size_t _tool_rounds = 0;
     bool _busy = false;
     bool _cancel_requested = false;

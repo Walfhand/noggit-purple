@@ -71,6 +71,7 @@ public:
   std::string basename;
 
   explicit World(const std::string& name, int map_id, Noggit::NoggitRenderContext context, bool create_empty = false);
+  ~World();
 
   void LoadSavedSelectionGroups();
 

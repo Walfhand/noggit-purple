@@ -52,8 +52,8 @@ public:
   explicit ModelInstance(BlizzardArchive::Listfile::FileKey const& file_key
                          , ENTRY_MDDF const*d, Noggit::NoggitRenderContext context);
 
-  ModelInstance(ModelInstance const& other) = default;
-  ModelInstance& operator= (ModelInstance const& other) = default;
+  ModelInstance(ModelInstance const& other);
+  ModelInstance& operator= (ModelInstance const& other);
 
   ModelInstance (ModelInstance&& other) noexcept;
 
@@ -86,8 +86,8 @@ public:
   void recalcExtents() override;
   void ensureExtents() override;
   bool finishedLoading() override;;
-  std::array<glm::vec3, 2> const& getExtents() override; // axis aligned
-  std::array<glm::vec3, 2> const& getLocalExtents() const;
+  std::array<glm::vec3, 2> getExtents() override; // axis aligned snapshot
+  std::array<glm::vec3, 2> getLocalExtents() const;
 
   std::array<glm::vec3, 8> getBoundingBox() override; // not axis aligned
 

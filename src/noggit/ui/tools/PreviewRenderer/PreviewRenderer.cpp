@@ -163,7 +163,7 @@ void PreviewRenderer::draw()
   gl.blendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
   // draw WMOs
-  std::unordered_map<std::string, std::vector<ModelInstance*>> _wmo_doodads;
+  std::unordered_map<Model*, std::vector<glm::mat4x4>> wmo_doodads;
 
   if (_draw_wmo.get() && !_wmo_instances.empty())
   {
@@ -202,16 +202,10 @@ void PreviewRenderer::draw()
             , true, true, false, false
         );
 
-        auto doodads = wmo_instance.get_doodads(true);
-
-        if (doodads)
+        wmo_instance.for_each_doodad(true, [&](wmo_doodad_instance& doodad)
         {
-          for (auto& pair : *doodads)
-          {
-            for (auto& doodad : pair.second)
-              _wmo_doodads[doodad.model->file_key().filepath()].push_back(&doodad);
-          }
-        }
+          wmo_doodads[doodad.model.get()].push_back(doodad.transformMatrix());
+        });
 
      }
 
@@ -222,7 +216,7 @@ void PreviewRenderer::draw()
   // draw M2
   std::unordered_map<Model*, std::size_t> model_boxes_to_draw;
 
-  if (_draw_models.get() && !(_model_instances.empty() && _wmo_doodads.empty()))
+  if (_draw_models.get() && !(_model_instances.empty() && wmo_doodads.empty()))
   {
     if (_draw_animated.get())
       ModelManager::resetAnim();
@@ -272,18 +266,11 @@ void PreviewRenderer::draw()
       );
     }
 
-    for (auto& it : _wmo_doodads)
+    for (auto& [model, matrices] : wmo_doodads)
     {
-      instance_mtx.clear();
-      
-      for (auto& instance : it.second)
-      {
-        instance_mtx.push_back(instance->transformMatrix());
-      }
-
-      it.second[0]->model->renderer()->draw(
+      model->renderer()->draw(
           mv
-          , instance_mtx
+          , matrices
           , m2_shader
           , model_render_state
           , frustum
@@ -408,19 +395,21 @@ std::vector<glm::vec3> PreviewRenderer::calcSceneExtents()
 
   for (auto& instance : _model_instances)
   {
+    auto const instance_extents = instance.getExtents();
     for (int i = 0; i < 3; ++i)
     {
-      min[i] = std::min(instance.getExtents()[0][i], min[i]);
-      max[i] = std::max(instance.getExtents()[1][i], max[i]);
+      min[i] = std::min(instance_extents[0][i], min[i]);
+      max[i] = std::max(instance_extents[1][i], max[i]);
     }
   }
 
   for (auto& instance : _wmo_instances)
   {
+    auto const instance_extents = instance.getExtents();
     for (int i = 0; i < 3; ++i)
     {
-      min[i] = std::min(instance.getExtents()[0][i], min[i]);
-      max[i] = std::max(instance.getExtents()[1][i], max[i]);
+      min[i] = std::min(instance_extents[0][i], min[i]);
+      max[i] = std::max(instance_extents[1][i], max[i]);
     }
   }
 

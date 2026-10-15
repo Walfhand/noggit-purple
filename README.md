@@ -40,7 +40,7 @@ Only Docker and the exported files are written on the host. To launch Noggit:
 ```
 
 Pour tester le générateur MOBA sans appeler OpenAI, ouvre une carte carrée
-complète d'au moins 3×3 tuiles puis clique sur **Lab blueprint MOBA** dans le
+complète de 2×2 à 4×4 tuiles puis clique sur **Lab blueprint MOBA** dans le
 dock assistant. Le JSON prérempli peut être compilé sans modifier la carte ;
 **Compiler et exécuter** lance ensuite exactement terrain, eau, végétation et
 validation. La dernière spécification utilisée est conservée dans les réglages.
@@ -100,12 +100,27 @@ For complete three-lane arenas, `create_moba_arena_blueprint` keeps gameplay
 topology out of the language model. The model chooses four reviewed textures,
 the liquid type, decorative assets and bounded style parameters; the blueprint
 returns exact arguments for the existing terrain, liquid and scatter tools. Its
-square-map template places fortified bases in opposite corners, side lanes along
-the perimeter, mid and river on opposing diagonals, four jungle sectors, twelve
-protected camp clearings, four discontinuous sight-blocking walls and two epic
-objective pits. Scatter preflight counts only regions that actually intersect a
+default `arena_scale_ratio` of `0.32` fits a 2x2 footprint to roughly the
+base-to-base traversal time of Summoner's Rift and raises the unused terrain
+into a rocky perimeter. The terrain, liquid and scatter masks use an exact
+horizontal homothety; relief height differences, roughness amplitude and water
+level retain their canonical values so the compact jungle walls do not become
+miniature. The slope limiter is transformed with the same homothety to keep the
+top-down wall silhouette aligned with the reference. The square-map template places fortified bases in opposite corners, side lanes along
+the perimeter, mid and river on opposing diagonals, four raised jungle sectors,
+twelve camp clearings nested inside continuous relief and two epic objective
+pits. Each quadrant uses a buff-centred graph with five doors, a through-route
+for the medium camp and a short spur for the small camp; lanes, riverbanks and
+objective pits retain their complete footprint, while constructed walls remain
+at the two bases. Scatter
+preflight counts only regions that actually intersect a
 tile, so a 2x2 arena does not multiply candidates across unrelated tiles.
 Generic tools remain available unchanged for non-MOBA maps.
+Blueprint defaults must use asset paths that the target WotLK 3.3.5 client can
+resolve and decode, not merely paths that Noggit can open from extended client
+archives. Paths are written verbatim to the ADT and the game client performs no
+compatibility remapping; for example, the MOBA terrain uses the validated
+`tileset/expansion07/zuldazarzone/...` backports instead of `tileset/8.0/...`.
 The main viewport also approximates native texture GroundEffects with transient
 M2 instances (at most 16 per chunk) so ground cover can be reviewed without
 launching WoW. These preview instances are never saved into the ADT and follow

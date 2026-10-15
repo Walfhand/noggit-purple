@@ -36,11 +36,11 @@ void TileGetObjectUIDsNode::compute()
   auto uids = tile->get_uids();
 
   _uids.clear();
-  _uids.resize(uids->size());
+  _uids.resize(uids.size());
 
-  for (int i = 0; i < uids->size(); ++i)
+  for (int i = 0; i < uids.size(); ++i)
   {
-    _uids[i] = std::make_shared<UnsignedIntegerData>((*uids)[i]);
+    _uids[i] = std::make_shared<UnsignedIntegerData>(uids[i]);
   }
 
   _out_ports[0].out_value = std::make_shared<LogicData>(true);

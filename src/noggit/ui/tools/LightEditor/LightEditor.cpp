@@ -6,9 +6,13 @@
 #include <noggit/DBC.h>
 #include <noggit/MapView.h>
 #include <noggit/Model.h>
+#include <noggit/Sky.h>
+#include <noggit/ai/ProceduralSkybox.hpp>
+#include <noggit/ui/tools/AssetBrowser/Ui/AssetBrowser.hpp>
 #include <noggit/ui/FontAwesome.hpp>
 #include <noggit/ui/widgets/LightViewWidget.h>
 #include <noggit/World.h>
+#include <opengl/context.hpp>
 
 #include <format>
 #include <filesystem>
@@ -20,6 +24,7 @@
 #include <QComboBox>
 #include <QDial>
 #include <QDoubleSpinBox>
+#include <QDockWidget>
 #include <QFile>
 #include <QFormLayout>
 #include <QGridLayout>
@@ -423,7 +428,11 @@ LightEditor::LightEditor(MapView* map_view, QWidget* parent)
 	param_grid_layout->addWidget(new QLabel("Skybox model:", this), 2, 0);
 	skybox_model_lineedit = new QLineEdit(this);
 	skybox_model_lineedit->setEnabled(false);
-	param_grid_layout->addWidget(skybox_model_lineedit, 2, 1);
+	auto skybox_model_layout = new QHBoxLayout();
+	auto browse_skyboxes_button = new QPushButton("Browse...", this);
+	skybox_model_layout->addWidget(skybox_model_lineedit);
+	skybox_model_layout->addWidget(browse_skyboxes_button);
+	param_grid_layout->addLayout(skybox_model_layout, 2, 1);
 
 	skybox_flag_1 = new QCheckBox("Full day Skybox", this);
 	skybox_flag_1->setCheckState(Qt::Unchecked);
@@ -435,6 +444,10 @@ LightEditor::LightEditor(MapView* map_view, QWidget* parent)
 	skybox_flag_2->setEnabled(false);
 	skybox_flag_2->setToolTip("render stars, sun and moons and clouds as well.");
 	param_grid_layout->addWidget(skybox_flag_2, 4, 0, 1, 2);
+	auto apply_skybox_button = new QPushButton("Apply to global map light", this);
+	apply_skybox_button->setToolTip(
+		"Persist this skybox on the map's global Clear Weather light.");
+	param_grid_layout->addWidget(apply_skybox_button, 5, 0, 1, 2);
 	
 
 	// Alpha values ********************************************************************************************** //
@@ -805,16 +818,77 @@ LightEditor::LightEditor(MapView* map_view, QWidget* parent)
 		updateLightning();
 		});
 
+	connect(browse_skyboxes_button, &QPushButton::clicked, this, [this] {
+		auto* asset_browser = _map_view->getAssetBrowserWidget();
+		if (!asset_browser)
+			return;
+		asset_browser->set_browse_mode(
+			Noggit::Ui::Tools::AssetBrowser::asset_browse_mode::skybox);
+		_map_view->getAssetBrowser()->show();
+		_map_view->getAssetBrowser()->raise();
+	});
+
+	if (auto* asset_browser = _map_view->getAssetBrowserWidget())
+	{
+		connect(asset_browser,
+			&Noggit::Ui::Tools::AssetBrowser::Ui::AssetBrowserWidget::selectionChanged,
+			this, [this, asset_browser](std::string const& path) {
+				if (asset_browser->_browse_mode
+						== Noggit::Ui::Tools::AssetBrowser::asset_browse_mode::skybox
+					&& skybox_model_lineedit->isEnabled())
+					skybox_model_lineedit->setText(QString::fromStdString(path));
+			});
+	}
+
+	connect(apply_skybox_button, &QPushButton::clicked, this, [this] {
+		auto* selected_sky = get_selected_sky();
+		if (!selected_sky || !selected_sky->global
+			|| param_combobox->currentIndex() != SKY_PARAM_CLEAR)
+		{
+			QMessageBox::warning(this, "Skybox",
+				"Select the Global Light and Clear Weather parameter first.");
+			return;
+		}
+
+		auto const flags = static_cast<std::uint32_t>(
+			(skybox_flag_1->isChecked() ? LIGHT_SKYBOX_FULL_DAY : 0)
+			| (skybox_flag_2->isChecked() ? LIGHT_SKYBOX_COMBINE : 0));
+		try
+		{
+			_map_view->applyGlobalSkybox(
+				skybox_model_lineedit->text().toStdString(), flags);
+			if (auto* reloaded_sky = get_selected_sky())
+				loadSelectSky(reloaded_sky);
+		}
+		catch (std::exception const& error)
+		{
+			QMessageBox::critical(this, "Skybox",
+				QString("Unable to apply the skybox:\n%1").arg(error.what()));
+		}
+	});
+
 	// connect(skybox_model_lineedit, &QLineEdit::textChanged, [&](std::string v) {
 	QLineEdit::connect(skybox_model_lineedit, &QLineEdit::textChanged
 	, [=]
 	{
+	auto* sky = get_selected_sky();
+	if (!sky)
+		return;
+	auto param_opt = sky->getParam(param_combobox->currentIndex());
+	if (!param_opt.has_value())
+		return;
+
+	// The skybox model instance holds GL resources tied to the map view's
+	// context. The asset browser's preview context can be current here.
+	_map_view->makeCurrent();
+	OpenGL::context::scoped_setter const _(::gl, _map_view->context());
+
 	auto text = skybox_model_lineedit->text().toStdString();
 	if (text.empty())
-		get_selected_sky()->getParam(param_combobox->currentIndex()).value()->skybox.reset();
+		param_opt.value()->skybox.reset();
 	else
-		get_selected_sky()->getParam(param_combobox->currentIndex()).value()->skybox.emplace(text.c_str(), _world->getRenderContext());
-	
+		param_opt.value()->skybox.emplace(text.c_str(), _world->getRenderContext());
+
 	updateLightning();
 	});
 
@@ -1114,6 +1188,28 @@ Sky* Noggit::Ui::Tools::LightEditor::get_selected_sky() const
 	return _map_view->getWorld()->renderer()->skies()->findSkyById(_selected_sky_id);
 }
 
+void Noggit::Ui::Tools::LightEditor::reloadAfterExternalSkyChange()
+{
+	auto const editors = ActiveEditor;
+	ActiveEditor.clear();
+	for (auto* editor : editors)
+	{
+		editor->close();
+		editor->deleteLater();
+	}
+
+	if (auto* selected_sky = get_selected_sky())
+		loadSelectSky(selected_sky);
+	else
+	{
+		_selected_sky_id = 0;
+		_light_editing_widget->setEnabled(false);
+		save_current_sky_button->setEnabled(false);
+	}
+	updateActiveLights();
+	updateLightningInfo();
+}
+
 void LightEditor::load_light_param(int param_id)
 {
 	Sky* curr_sky = get_selected_sky();
@@ -1199,7 +1295,7 @@ void LightEditor::load_light_param(int param_id)
 	  skybox_flag_1->setChecked(true);
 
 	if (sky_param->skyboxFlags & (1 << 1))
-	  skybox_flag_1->setChecked(true);
+	  skybox_flag_2->setChecked(true);
 
 	skybox_flag_1->setEnabled(true);
 	skybox_flag_2->setEnabled(true);

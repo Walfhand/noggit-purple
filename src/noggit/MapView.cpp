@@ -8,7 +8,9 @@
 #include <noggit/WMOInstance.h> // WMOInstance
 #include <noggit/World.h>
 #include <noggit/MapTile.h>
+#include <noggit/Sky.h>
 #include <noggit/ai/AssistantDock.hpp>
+#include <noggit/ai/ProceduralSkybox.hpp>
 #include <noggit/map_index.hpp>
 #include <noggit/TabletManager.hpp>
 #include <opengl/texture.hpp>
@@ -53,6 +55,7 @@
 #include <external/glm/gtc/type_ptr.hpp>
 #include <external/qtimgui/QtImGui.h>
 #include <opengl/types.hpp>
+#include <exception>
 #include <limits>
 #include <variant>
 #include <noggit/Selection.h>
@@ -77,6 +80,7 @@
 #include <noggit/tools/AreaTriggerTool.hpp>
 #include <noggit/StringHash.hpp>
 #include <noggit/application/NoggitApplication.hpp>
+#include <ClientData.hpp>
 
 #ifdef USE_MYSQL_UID_STORAGE
 #include <mysql/mysql.h>
@@ -2959,6 +2963,12 @@ MapView::~MapView()
 
   _destroying = true;
 
+  // addDockWidget reparents the assistant to the main window. Destroy it
+  // while this MapView, its World, and the OpenGL context are still valid so
+  // an active map transaction can roll back safely.
+  delete _ai_assistant_dock;
+  _ai_assistant_dock = nullptr;
+
   _main_window->removeToolBar(_main_window->_app_toolbar);
 
   OpenGL::context::scoped_setter const _ (::gl, context());
@@ -4327,6 +4337,91 @@ QDockWidget* MapView::getAssetBrowser()
 Noggit::Ui::Tools::AssetBrowser::Ui::AssetBrowserWidget* MapView::getAssetBrowserWidget()
 {
   return _asset_browser;
+}
+
+Noggit::Ai::ProceduralSkyboxResult MapView::applyGlobalSkybox(
+  std::string path, std::uint32_t flags, std::size_t lighting_param_index)
+{
+  auto* application = Noggit::Application::NoggitApplication::instance();
+  path = BlizzardArchive::ClientData::normalizeFilenameInternal(std::move(path));
+  if (!application->hasClientData() || !_world
+      || !path.starts_with("environments/stars/") || !path.ends_with(".m2")
+      || path.find("..") != std::string::npos
+      || !application->clientData()->exists(path))
+    throw std::invalid_argument(
+      "La skybox n'existe pas dans les donnees client : " + path);
+  if (flags > 3)
+    throw std::invalid_argument("Les flags de skybox doivent etre compris entre 0 et 3.");
+  if (lighting_param_index >= 8)
+    throw std::invalid_argument(
+      "L'index du parametre lumineux doit etre compris entre 0 et 7.");
+
+  auto const light_backup = gLightDB;
+  auto const params_backup = gLightParamsDB;
+  auto const skybox_backup = gLightSkyboxDB;
+  auto const int_band_backup = gLightIntBandDB;
+  auto const float_band_backup = gLightFloatBandDB;
+  try
+  {
+    auto const update = Noggit::Ai::attachGlobalSkybox(
+      gLightDB, gLightParamsDB, gLightSkyboxDB,
+      gLightIntBandDB, gLightFloatBandDB,
+      _world->getMapID(), path, flags, lighting_param_index);
+
+    makeCurrent();
+    OpenGL::context::scoped_setter const current_context(::gl, context());
+    skyparams::reloadCachedParam(
+      update.light_params_id, _world->getRenderContext());
+    auto skies = std::make_unique<Skies>(
+      _world->getMapID(), _world->getRenderContext());
+    if (update.changed)
+    {
+      gLightSkyboxDB.save();
+      gLightParamsDB.save();
+      gLightIntBandDB.save();
+      gLightFloatBandDB.save();
+      gLightDB.save();
+    }
+    _world->renderer()->skies() = std::move(skies);
+    refreshLightEditorAfterSkyReload();
+    invalidate();
+    return update;
+  }
+  catch (...)
+  {
+    auto const error = std::current_exception();
+    gLightDB.overwriteWith(light_backup);
+    gLightParamsDB.overwriteWith(params_backup);
+    gLightSkyboxDB.overwriteWith(skybox_backup);
+    gLightIntBandDB.overwriteWith(int_band_backup);
+    gLightFloatBandDB.overwriteWith(float_band_backup);
+    try
+    {
+      makeCurrent();
+      OpenGL::context::scoped_setter const current_context(::gl, context());
+      skyparams::reloadCachedParams(_world->getRenderContext());
+      _world->renderer()->skies() = std::make_unique<Skies>(
+        _world->getMapID(), _world->getRenderContext());
+      refreshLightEditorAfterSkyReload();
+      invalidate();
+    }
+    catch (...)
+    {
+    }
+    std::rethrow_exception(error);
+  }
+}
+
+void MapView::refreshLightEditorAfterSkyReload()
+{
+  if (!_tool_panel_dock) return;
+  for (auto* widget : _tool_panel_dock->findChildren<QWidget*>())
+    if (auto* light_editor =
+          dynamic_cast<Noggit::Ui::Tools::LightEditor*>(widget))
+    {
+      light_editor->reloadAfterExternalSkyChange();
+      return;
+    }
 }
 
 glm::vec3 MapView::cursorPosition() const

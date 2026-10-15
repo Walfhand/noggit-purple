@@ -18,15 +18,17 @@ namespace Noggit
   {
     std::uint32_t uid = instance.uid;
     std::uint32_t uid_after;
+    ModelInstance* stored_instance;
 
     {
       std::lock_guard<std::mutex> const lock (_mutex);
       uid_after = unsafe_add_model_instance_no_world_upd(std::move(instance), action);
+      stored_instance = &_m2s.at(uid_after);
     }
 
     if (from_reloading || uid_after != uid)
     {
-      _world->updateTilesModel(&_m2s.at(uid_after), model_update::add);
+      _world->updateTilesModel(stored_instance, model_update::add);
     }
 
     return uid_after;
@@ -67,15 +69,17 @@ namespace Noggit
   {
     std::uint32_t uid = instance.uid;
     std::uint32_t uid_after;
+    WMOInstance* stored_instance;
 
     {
       std::lock_guard<std::mutex> const lock(_mutex);
       uid_after = unsafe_add_wmo_instance_no_world_upd(std::move(instance), action);
+      stored_instance = &_wmos.at(uid_after);
     }
 
     if (from_reloading || uid_after != uid)
     {
-      _world->updateTilesWMO(&_wmos.at(uid_after), model_update::add);
+      _world->updateTilesWMO(stored_instance, model_update::add);
     }
 
     return uid_after;
@@ -113,97 +117,128 @@ namespace Noggit
 
   void world_model_instances_storage::delete_instances_from_tile(TileIndex const& tile, bool action)
   {
-    // std::unique_lock<std::mutex> const lock (_mutex);
-    std::vector<selected_object_type> instances_to_remove;
+    std::vector<std::uint32_t> instances_to_remove;
+    {
+      std::lock_guard<std::mutex> const lock(_mutex);
+      instances_to_remove.reserve(_m2s.size() + _wmos.size());
 
-    for (auto it = _m2s.begin(); it != _m2s.end(); ++it)
-    {
-      if (TileIndex(it->second.pos) == tile)
+      for (auto const& [uid, instance] : _m2s)
       {
-        instances_to_remove.push_back(&it->second);
+        if (TileIndex(instance.pos) == tile)
+          instances_to_remove.push_back(uid);
+      }
+      for (auto const& [uid, instance] : _wmos)
+      {
+        if (TileIndex(instance.pos) == tile)
+          instances_to_remove.push_back(uid);
       }
     }
-    for (auto it = _wmos.begin(); it != _wmos.end();++it)
-    {
-      if (TileIndex(it->second.pos) == tile)
-      {
-        instances_to_remove.push_back(&it->second);
-      }
-    }
-    delete_instances(instances_to_remove, action);
+
+    for (auto const uid : instances_to_remove)
+      delete_instance(uid, action);
   }
 
   void world_model_instances_storage::delete_instances(std::vector<selected_object_type> const& instances, bool action)
   {
-    for (auto& obj : instances)
+    std::unordered_set<std::uint32_t> uids;
+    for (auto* const obj : instances)
     {
-      // done in delete_instance
-      /*
-      if (action && NOGGIT_CUR_ACTION)
-        NOGGIT_CUR_ACTION->registerObjectRemoved(obj);*/
-
-      if (obj->which() == eMODEL)
-      {
-        auto instance = static_cast<ModelInstance*>(obj);
-        
-        _world->updateTilesModel(instance, model_update::remove);
-        delete_instance(instance->uid, action);
-      }
-      else if (obj->which() == eWMO)
-      {
-        auto instance = static_cast<WMOInstance*>(obj);
-
-        _world->updateTilesWMO(instance, model_update::remove);
-        delete_instance(instance->uid, action);
-      }
+      if (obj)
+        uids.insert(obj->uid);
     }
+
+    for (auto const uid : uids)
+      delete_instance(uid, action);
   }
 
   void world_model_instances_storage::delete_instance(std::uint32_t uid, bool action)
   {
-    std::unique_lock<std::mutex> const lock (_mutex);
+    m2_instance_umap::node_type m2;
+    wmo_instance_umap::node_type wmo;
+    SceneObject* object = nullptr;
 
-    if (auto instance = get_instance(uid, false))
     {
-      _world->updateTilesEntry(instance.value(), model_update::remove);
-      auto obj = std::get<selected_object_type>(instance.value());
+      std::lock_guard<std::mutex> const lock(_mutex);
+      if (_instances_being_removed.contains(uid))
+        return;
 
-      for (auto& selection_group : _world->_selection_groups)
+      if (auto const it = _m2s.find(uid); it != _m2s.end())
       {
-          if (selection_group.contains_object(obj))
-          {
-              selection_group.remove_member(obj->uid);
-          }
+        m2 = _m2s.extract(it);
+        object = &m2.mapped();
       }
-      if (action && NOGGIT_CUR_ACTION)
+      else if (auto const it = _wmos.find(uid); it != _wmos.end())
       {
-        NOGGIT_CUR_ACTION->registerObjectRemoved(obj);
+        wmo = _wmos.extract(it);
+        object = &wmo.mapped();
+      }
+
+      if (!object)
+        return;
+
+      _instances_being_removed.insert(uid);
+    }
+
+    // The extracted node owns the instance until every external consumer has
+    // finished with its pointer, without holding the storage mutex while the
+    // tile queue waits.
+    _world->updateTilesEntry(object, model_update::remove);
+
+    for (auto& selection_group : _world->_selection_groups)
+    {
+      if (selection_group.contains_object(object))
+      {
+        selection_group.remove_member(object->uid);
+        break;
       }
     }
 
+    if (action && NOGGIT_CUR_ACTION)
+      NOGGIT_CUR_ACTION->registerObjectRemoved(object);
+
+    std::lock_guard<std::mutex> const lock(_mutex);
     _instance_count_per_uid.erase(uid);
-    _m2s.erase(uid);
-    _wmos.erase(uid);
+    _instances_being_removed.erase(uid);
   }
 
   void world_model_instances_storage::unload_instance_and_remove_from_selection_if_necessary(std::uint32_t uid)
   {
-    std::unique_lock<std::mutex> const lock (_mutex);
+    m2_instance_umap::node_type m2;
+    wmo_instance_umap::node_type wmo;
+    bool remove_from_selection = false;
 
-    if (!unsafe_uid_is_used(uid))
     {
-      LogError << "Trying to unload an instance that wasn't stored" << std::endl;
-      return;
+      std::lock_guard<std::mutex> const lock(_mutex);
+      if (_instances_being_removed.contains(uid))
+        return;
+
+      if (!_instance_count_per_uid.contains(uid))
+      {
+        LogError << "Trying to unload an instance that wasn't stored" << std::endl;
+        return;
+      }
+
+      if (auto const it = _m2s.find(uid); it != _m2s.end())
+      {
+        if (!it->second.getTiles().empty()) return;
+        m2 = _m2s.extract(it);
+      }
+      else if (auto const it = _wmos.find(uid); it != _wmos.end())
+      {
+        if (!it->second.getTiles().empty()) return;
+        wmo = _wmos.extract(it);
+      }
+
+      _instances_being_removed.insert(uid);
+      remove_from_selection = !m2.empty() || !wmo.empty();
     }
 
-    if (--_instance_count_per_uid.at(uid) == 0)
-    {
+    if (remove_from_selection)
       _world->remove_from_selection(uid, false, false);
 
-      _instance_count_per_uid.erase(uid);
-      _m2s.erase(uid);
-      _wmos.erase(uid);
-    }
+    std::lock_guard<std::mutex> const lock(_mutex);
+    _instance_count_per_uid.erase(uid);
+    _instances_being_removed.erase(uid);
   }
 
   void world_model_instances_storage::clear()
@@ -211,6 +246,7 @@ namespace Noggit
     std::unique_lock<std::mutex> const lock (_mutex);
 
     _instance_count_per_uid.clear();
+    _instances_being_removed.clear();
     _m2s.clear();
     _wmos.clear();
   }
@@ -305,63 +341,41 @@ namespace Noggit
 
   bool world_model_instances_storage::unsafe_uid_is_used(std::uint32_t uid) const
   {
-    return _instance_count_per_uid.find(uid) != _instance_count_per_uid.end();
+    return _instance_count_per_uid.find(uid) != _instance_count_per_uid.end()
+        || _instances_being_removed.contains(uid);
   }
 
   void world_model_instances_storage::clear_duplicates(bool action)
   {
-    std::unique_lock<std::mutex> const lock (_mutex);
-
-    int deleted_uids = 0;
-
-    for (auto lhs(_wmos.begin()); lhs != _wmos.end(); ++lhs)
+    std::unordered_set<std::uint32_t> duplicate_uids;
     {
-      for (auto rhs(std::next(lhs)); rhs != _wmos.end();)
+      std::lock_guard<std::mutex> const lock(_mutex);
+
+      for (auto lhs = _wmos.begin(); lhs != _wmos.end(); ++lhs)
       {
-        assert(lhs->first != rhs->first);
-
-        if (lhs->second.isDuplicateOf(rhs->second))
+        for (auto rhs = std::next(lhs); rhs != _wmos.end(); ++rhs)
         {
-          _world->updateTilesWMO(&rhs->second, model_update::remove);
-
-          _instance_count_per_uid.erase(rhs->second.uid);
-          if (action && NOGGIT_CUR_ACTION)
-            NOGGIT_CUR_ACTION->registerObjectRemoved(&rhs->second);
-          rhs = _wmos.erase(rhs);
-          deleted_uids++;
+          assert(lhs->first != rhs->first);
+          if (lhs->second.isDuplicateOf(rhs->second))
+            duplicate_uids.insert(rhs->first);
         }
-        else
+      }
+
+      for (auto lhs = _m2s.begin(); lhs != _m2s.end(); ++lhs)
+      {
+        for (auto rhs = std::next(lhs); rhs != _m2s.end(); ++rhs)
         {
-          rhs++;
+          assert(lhs->first != rhs->first);
+          if (lhs->second.isDuplicateOf(rhs->second))
+            duplicate_uids.insert(rhs->first);
         }
       }
     }
 
-    for (auto lhs(_m2s.begin()); lhs != _m2s.end(); ++lhs)
-    {
-      for (auto rhs(std::next(lhs)); rhs != _m2s.end();)
-      {
-        assert(lhs->first != rhs->first);
+    for (auto const uid : duplicate_uids)
+      delete_instance(uid, action);
 
-        if (lhs->second.isDuplicateOf(rhs->second))
-        {
-          _world->updateTilesModel(&rhs->second, model_update::remove);
-
-          _instance_count_per_uid.erase(rhs->second.uid);
-
-          if (action && NOGGIT_CUR_ACTION)
-            NOGGIT_CUR_ACTION->registerObjectRemoved(&rhs->second);
-          rhs = _m2s.erase(rhs);
-          deleted_uids++;
-        }
-        else
-        {
-          rhs++;
-        }
-      }
-    }
-
-    Log << "Deleted " << deleted_uids << " duplicate Model/WMO" << std::endl;
+    Log << "Deleted " << duplicate_uids.size() << " duplicate Model/WMO" << std::endl;
   }
 
   bool world_model_instances_storage::uid_duplicates_found() const
@@ -399,6 +413,7 @@ namespace Noggit
 
   unsigned int world_model_instances_storage::getTotalModelsCount() const
   {
+    std::lock_guard<std::mutex> const lock(_mutex);
     return _m2s.size() + _wmos.size();
   }
 }

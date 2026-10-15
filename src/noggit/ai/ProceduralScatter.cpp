@@ -89,7 +89,94 @@ namespace Noggit::Ai
     bool validRole(std::string const& role)
     {
       return role == "canopy" || role == "understory"
-          || role == "rock" || role == "detail";
+          || role == "rock" || role == "wall" || role == "detail";
+    }
+
+    struct WallSample
+    {
+      float u = 0.0f;
+      float v = 0.0f;
+      float yaw_degrees = 0.0f;
+    };
+
+    WallSample wallSample(std::vector<ProceduralLayoutPoint> const& points,
+                          std::size_t index, std::size_t count,
+                          bool skip_corridor_end_caps, bool open_chain)
+    {
+      struct Edge
+      {
+        std::size_t start = 0;
+        float du = 0.0f;
+        float dv = 0.0f;
+        float length = 0.0f;
+        std::size_t samples = 1;
+      };
+      auto edges = std::vector<Edge>{};
+      auto perimeter = 0.0f;
+      for (std::size_t edge = 0; edge < points.size(); ++edge)
+      {
+        if (skip_corridor_end_caps
+            && (edge + 1 == points.size() / 2 || edge + 1 == points.size()))
+          continue;
+        if (open_chain && edge + 1 == points.size()) continue;
+        auto const& first = points[edge];
+        auto const& second = points[(edge + 1) % points.size()];
+        auto const du = second.u - first.u;
+        auto const dv = second.v - first.v;
+        auto const length = std::hypot(du, dv);
+        if (length <= 0.0f) continue;
+        edges.push_back({edge, du, dv, length, 1});
+        perimeter += length;
+      }
+      if (edges.empty() || count == 0) return {};
+
+      if (count < edges.size())
+      {
+        auto remaining = (static_cast<float>(index % count) + 0.5f)
+          / static_cast<float>(count) * perimeter;
+        for (auto const& edge : edges)
+        {
+          if (remaining > edge.length)
+          {
+            remaining -= edge.length;
+            continue;
+          }
+          auto const progress = std::clamp(remaining / edge.length, 0.0f, 1.0f);
+          auto yaw = std::atan2(edge.dv, -edge.du) * 57.29577951308232f;
+          if (yaw < 0.0f) yaw += 360.0f;
+          auto const& first = points[edge.start];
+          return {first.u + edge.du * progress,
+                  first.v + edge.dv * progress, yaw};
+        }
+        return {points.front().u, points.front().v, 0.0f};
+      }
+
+      for (auto assigned = edges.size(); assigned < count; ++assigned)
+      {
+        auto best = edges.begin();
+        for (auto edge = edges.begin() + 1; edge != edges.end(); ++edge)
+          if (edge->length / static_cast<float>(edge->samples)
+              > best->length / static_cast<float>(best->samples))
+            best = edge;
+        ++best->samples;
+      }
+      auto local_index = index % count;
+      for (auto const& edge : edges)
+      {
+        if (local_index >= edge.samples)
+        {
+          local_index -= edge.samples;
+          continue;
+        }
+        auto const progress = (static_cast<float>(local_index) + 0.5f)
+          / static_cast<float>(edge.samples);
+        auto yaw = std::atan2(edge.dv, -edge.du) * 57.29577951308232f;
+        if (yaw < 0.0f) yaw += 360.0f;
+        auto const& first = points[edge.start];
+        return {first.u + edge.du * progress,
+                first.v + edge.dv * progress, yaw};
+      }
+      return {points.front().u, points.front().v, 0.0f};
     }
 
     bool parsePoints(nlohmann::json const& values,
@@ -168,8 +255,8 @@ namespace Noggit::Ai
     }
 
     auto const& regions = arguments.at("regions");
-    if (!regions.is_array() || regions.empty() || regions.size() > 16)
-      return fail("regions doit contenir entre 1 et 16 zones.");
+    if (!regions.is_array() || regions.empty() || regions.size() > 48)
+      return fail("regions doit contenir entre 1 et 48 zones.");
     std::set<std::string> names;
     for (auto const& value : regions)
     {
@@ -190,7 +277,7 @@ namespace Noggit::Ai
       auto const density = value.at("density_per_tile").get<std::int64_t>();
       if (region.name.empty() || region.name.size() > 64 || !printableAscii(region.name)
           || !names.insert(region.name).second || density < 1 || density > 512
-          || region.min_spacing_ratio < 0.001f || region.min_spacing_ratio > 0.25f
+          || region.min_spacing_ratio < 0.00025f || region.min_spacing_ratio > 0.25f
           || region.min_height < -500.0f || region.max_height > 5000.0f
           || region.min_height > region.max_height
           || region.min_slope_degrees < 0.0f || region.max_slope_degrees > 90.0f
@@ -202,21 +289,30 @@ namespace Noggit::Ai
              { return asset.role == region.role; }))
         return fail("Nom, densité, espacement, hauteur ou pente de région invalide.");
       region.density_per_tile = static_cast<std::size_t>(density);
-      if (!parsePoints(value.at("points"), region.points, 3)
+      // Wall chains are open polylines walked end to end, not closed areas.
+      auto const open_chain = region.role == "wall"
+        && region.name.find("_chain") != std::string::npos;
+      if (open_chain)
+      {
+        if (!parsePoints(value.at("points"), region.points, 2))
+          return fail("Chaque chaîne de mur doit être une polyligne de 2 à 16 points.");
+      }
+      else if (!parsePoints(value.at("points"), region.points, 3)
           || !isSimpleProceduralArea(region.points))
         return fail("Chaque région doit être un polygone simple de 3 à 16 points.");
       scatter.regions.push_back(std::move(region));
     }
 
     auto const& exclusions = arguments.at("exclusions");
-    if (!exclusions.is_array() || exclusions.size() > 32)
-      return fail("exclusions doit contenir au plus 32 formes.");
+    if (!exclusions.is_array() || exclusions.size() > 96)
+      return fail("exclusions doit contenir au plus 96 formes.");
     for (auto const& value : exclusions)
     {
       ProceduralScatterExclusion exclusion;
       if (!exactFields(value, exclusion_fields) || !value.at("shape").is_string()
           || !finiteFloat(value.at("half_width_ratio"), exclusion.half_width_ratio)
-          || exclusion.half_width_ratio < 0.001f || exclusion.half_width_ratio > 0.25f)
+          || exclusion.half_width_ratio < 0.00025f
+          || exclusion.half_width_ratio > 0.25f)
         return fail("Chaque exclusion exige shape, points et half_width_ratio valides.");
       auto const shape = value.at("shape").get<std::string>();
       if (shape == "corridor") exclusion.shape = ProceduralLayoutShape::Corridor;
@@ -240,6 +336,23 @@ namespace Noggit::Ai
     auto const base = hash(scatter.seed, {region_index, tile_x, tile_z, candidate_index});
     ProceduralScatterCandidate candidate;
     auto const& region = scatter.regions[region_index];
+    auto const is_wall = proceduralScatterIsWallRegion(region);
+    if (is_wall)
+    {
+      auto const sample = wallSample(
+        region.points, candidate_index, region.density_per_tile,
+        region.name.ends_with("_path_wall"),
+        region.name.find("_chain") != std::string::npos);
+      candidate.u = sample.u;
+      candidate.v = sample.v;
+      candidate.yaw_degrees = sample.yaw_degrees;
+      if (candidate.u < u_min || candidate.u >= u_max
+          || candidate.v < v_min || candidate.v >= v_max)
+      {
+        candidate.active = false;
+        return candidate;
+      }
+    }
     auto region_u_min = 1.0f;
     auto region_u_max = 0.0f;
     auto region_v_min = 1.0f;
@@ -251,17 +364,20 @@ namespace Noggit::Ai
       region_v_min = std::min(region_v_min, point.v);
       region_v_max = std::max(region_v_max, point.v);
     }
-    u_min = std::max(u_min, region_u_min);
-    u_max = std::min(u_max, region_u_max);
-    v_min = std::max(v_min, region_v_min);
-    v_max = std::min(v_max, region_v_max);
-    if (u_min >= u_max || v_min >= v_max)
+    if (!is_wall)
     {
-      candidate.active = false;
-      return candidate;
+      u_min = std::max(u_min, region_u_min);
+      u_max = std::min(u_max, region_u_max);
+      v_min = std::max(v_min, region_v_min);
+      v_max = std::min(v_max, region_v_max);
+      if (u_min >= u_max || v_min >= v_max)
+      {
+        candidate.active = false;
+        return candidate;
+      }
+      candidate.u = u_min + unit(hash(scatter.seed, {base, 1})) * (u_max - u_min);
+      candidate.v = v_min + unit(hash(scatter.seed, {base, 2})) * (v_max - v_min);
     }
-    candidate.u = u_min + unit(hash(scatter.seed, {base, 1})) * (u_max - u_min);
-    candidate.v = v_min + unit(hash(scatter.seed, {base, 2})) * (v_max - v_min);
     auto const massif = smoothNoise(scatter.seed, candidate.u, candidate.v,
                                     region.cluster_scale, region_index + 101);
     auto const clustered_density = std::clamp((massif - 0.25f) / 0.55f, 0.0f, 1.0f);
@@ -276,7 +392,8 @@ namespace Noggit::Ai
       auto const patch = smoothNoise(scatter.seed, candidate.u, candidate.v,
                                      region.cluster_scale * 1.8f, 1000 + index * 37);
       auto const local_variation = unit(hash(scatter.seed, {base, 2000 + index}));
-      auto const score = patch * 0.8f + local_variation * 0.2f
+      auto const score = (is_wall ? local_variation
+                                  : patch * 0.8f + local_variation * 0.2f)
         + std::log(asset.weight) * 0.05f;
       if (score > best_score)
       {
@@ -287,8 +404,14 @@ namespace Noggit::Ai
     auto const& asset = scatter.assets[candidate.asset_index];
     candidate.scale = asset.min_scale
       + unit(hash(scatter.seed, {base, 4})) * (asset.max_scale - asset.min_scale);
-    candidate.yaw_degrees = unit(hash(scatter.seed, {base, 5})) * 360.0f;
+    if (!is_wall)
+      candidate.yaw_degrees = unit(hash(scatter.seed, {base, 5})) * 360.0f;
     return candidate;
+  }
+
+  bool proceduralScatterIsWallRegion(ProceduralScatterRegion const& region)
+  {
+    return region.role == "wall" || region.name.ends_with("_wall");
   }
 
   bool proceduralScatterContains(

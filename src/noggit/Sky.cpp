@@ -52,6 +52,21 @@ namespace skyparams
     auto [newIt, inserted] = skyParamMap.emplace(id, std::move(newParam));
     return &(newIt->second);  // Return newly created SkyParam
   }
+
+  void reloadCachedParam(
+    unsigned int id, Noggit::NoggitRenderContext context)
+  {
+    auto const found = skyParamMap.find(id);
+    if (found != skyParamMap.end())
+      found->second = SkyParam(id, context);
+  }
+
+  void reloadCachedParams(Noggit::NoggitRenderContext context)
+  {
+    for (auto& [id, param] : skyParamMap)
+      if (gLightParamsDB.CheckIfIdExists(id))
+        param = SkyParam(id, context);
+  }
 }
 
 
@@ -1057,7 +1072,11 @@ bool Skies::draw(glm::mat4x4 const& model_view
     for (Sky& sky : skies)
     {
       auto param_opt = sky.getCurrentParam();
-      if (sky.weight > 0.f && param_opt.has_value() && param_opt.value()->skybox)
+      // The global light deliberately keeps a zero interpolation weight so it
+      // remains the base for local-light blending. Its skybox is nevertheless
+      // the map's default sky and must be rendered at full opacity.
+      auto const skybox_weight = sky.global ? 1.0f : sky.weight;
+      if (skybox_weight > 0.f && param_opt.has_value() && param_opt.value()->skybox)
       {
         has_skybox = true;
 
@@ -1067,7 +1086,7 @@ bool Skies::draw(glm::mat4x4 const& model_view
             combine_flag = true; // flag 0x2 = still render stars, sun and moons and clouds
     
         auto& model = curr_param->skybox.value();
-        model.model->trans = sky.weight;
+        model.model->trans = skybox_weight;
         model.pos = camera_pos;
         model.scale = 0.1f;
         model.recalcExtents();
@@ -1541,9 +1560,9 @@ void Sky::save_to_dbc()
     bool save_floats_dbc = false;
     bool save_skybox_dbc = false;
 
-    for (int param_id = 0; param_id < NUM_SkyFloatParamsNames; param_id++)
+    for (int param_id = 0; param_id < NUM_SkyParamsNames; param_id++)
     {
-      auto param_opt = getCurrentParam();
+      auto param_opt = getParam(param_id);
       if (!param_opt.has_value())
         continue;
 
@@ -1715,7 +1734,7 @@ void Sky::save_to_dbc()
     gLightDB.save();
     if (save_colors_dbc)
         gLightIntBandDB.save();
-    if (save_colors_dbc)
+    if (save_floats_dbc)
         gLightFloatBandDB.save();
     if (save_param_dbc)
         gLightParamsDB.save();

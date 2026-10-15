@@ -99,6 +99,7 @@ namespace Noggit::Ui::Tools
 
 		void UpdateWorldTime();
 		void updateLightning();
+		void reloadAfterExternalSkyChange();
 
     World* _world;
     MapView* _map_view;
@@ -158,7 +159,6 @@ namespace Noggit::Ui::Tools
 }
 
 #endif //NOGGIT_LIGHTEDITOR_HPP
-
 
 
 

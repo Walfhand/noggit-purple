@@ -17,8 +17,8 @@ namespace Noggit::Ai
 {
   namespace
   {
-    constexpr std::size_t max_points_per_feature = 16;
-    constexpr std::size_t max_total_segments = 128;
+    constexpr std::size_t max_points_per_feature = 17;
+    constexpr std::size_t max_total_segments = 544;
     constexpr float minimum_layout_height = -500.0f;
     constexpr float maximum_layout_height = 5000.0f;
 
@@ -248,6 +248,33 @@ namespace Noggit::Ai
         + 0.28f * valueNoise(x * 27.0f, z * 27.0f, seed ^ 0x9e3779b9U);
     }
 
+    float terrainRidgeRoughness(float x, float z, std::string const& name)
+    {
+      auto const seed = stableHash(name);
+      auto const source_x = x;
+      auto const source_z = z;
+      x += 0.075f * valueNoise(
+        source_x * 1.6f, source_z * 1.6f, seed ^ 0x68bc21ebU);
+      z += 0.075f * valueNoise(
+        source_x * 1.6f + 19.1f, source_z * 1.6f - 7.3f,
+        seed ^ 0x02e5be93U);
+      auto const ridged = [](float noise)
+      {
+        auto const ridge = 1.0f - std::abs(noise);
+        return ridge * ridge;
+      };
+      auto const primary = ridged(valueNoise(
+        x * 7.5f, z * 7.5f, seed ^ 0x9e3779b9U));
+      auto const detail = ridged(valueNoise(
+        x * 19.0f, z * 19.0f, seed ^ 0xa511e9b3U));
+      auto const macro = valueNoise(
+        x * 2.7f, z * 2.7f, seed ^ 0x51ed270bU);
+      return std::clamp(
+        2.4f * std::pow(primary, 1.35f) * (.42f + .58f * detail)
+          + .20f * macro - 1.05f,
+        -1.0f, 1.0f);
+    }
+
     ProceduralShapeDistance distanceToShapeImpl(
       std::vector<ProceduralLayoutPoint> const& points,
       ProceduralLayoutShape shape,
@@ -299,6 +326,10 @@ namespace Noggit::Ai
         {
           result.distance = distance;
           result.height = first.height + (second.height - first.height) * projection;
+          result.side = length_squared > 0.0f
+            ? (dx * (sample_z - nearest_z) - dz * (sample_x - nearest_x))
+                / std::sqrt(length_squared)
+            : 0.0f;
         }
       }
 
@@ -514,9 +545,9 @@ namespace Noggit::Ai
     if (!max_slope.is_null())
     {
       float degrees = 0.0f;
-      if (!readFiniteFloat(max_slope, degrees) || degrees < 5.0f || degrees > 60.0f)
+      if (!readFiniteFloat(max_slope, degrees) || degrees < 5.0f || degrees > 89.0f)
       {
-        return fail("max_slope_degrees doit être null ou compris dans [5,60].");
+        return fail("max_slope_degrees doit être null ou compris dans [5,89].");
       }
       layout.max_slope_degrees = degrees;
     }
@@ -525,7 +556,7 @@ namespace Noggit::Ai
     if (!features.is_array() || features.empty()
         || features.size() > procedural_layout_max_features)
     {
-      return fail("features doit contenir entre une et 32 formes.");
+      return fail("features doit contenir entre une et 96 formes.");
     }
 
     std::set<std::string> unique_names;
@@ -550,7 +581,7 @@ namespace Noggit::Ai
       if (!name_value.is_string() || !points.is_array()
           || points.empty() || points.size() > max_points_per_feature)
       {
-        return fail("Chaque feature doit avoir un nom et entre un et 16 points.");
+        return fail("Chaque feature doit avoir un nom et entre un et 17 points.");
       }
 
       ProceduralLayoutFeature feature;
@@ -586,7 +617,8 @@ namespace Noggit::Ai
       {
         return fail("height_mode doit valoir absolute ou offset.");
       }
-      if (feature.shape == ProceduralLayoutShape::Area && points.size() < 3)
+      if (feature.shape == ProceduralLayoutShape::Area
+          && (points.size() < 3 || points.size() > 16))
       {
         return fail("Une area exige entre trois et 16 points.");
       }
@@ -603,7 +635,7 @@ namespace Noggit::Ai
         ? points.size() : points.size() - 1;
       if (total_segments > max_total_segments)
       {
-        return fail("Le layout ne peut pas dépasser 128 segments au total.");
+        return fail("Le layout ne peut pas dépasser 544 segments au total.");
       }
       for (auto const& point_value : points)
       {
@@ -640,11 +672,13 @@ namespace Noggit::Ai
 
       if (!readFiniteFloat(feature_value.at("half_width_ratio"), feature.half_width_ratio)
           || !readFiniteFloat(feature_value.at("transition_width_ratio"), feature.transition_width_ratio)
-          || feature.half_width_ratio < 0.005f || feature.half_width_ratio > 0.25f
-          || feature.transition_width_ratio < 0.001f
+          || feature.half_width_ratio
+               < (feature.shape == ProceduralLayoutShape::Area ? 0.0f : 0.00125f)
+          || feature.half_width_ratio > 0.25f
+          || feature.transition_width_ratio < 0.00025f
           || feature.transition_width_ratio > 0.25f)
       {
-        return fail("half_width_ratio doit être dans [0.005,0.25] et transition_width_ratio dans [0.001,0.25].");
+        return fail("half_width_ratio doit être dans [0,0.25] pour area ou [0.00125,0.25] pour corridor, et transition_width_ratio dans [0.00025,0.25].");
       }
 
       auto const& texture_layer = feature_value.at("texture_layer");
@@ -685,6 +719,18 @@ namespace Noggit::Ai
         return fail("width_variation_ratio doit être dans [0,0.75].");
       }
       used_layers[feature.texture_layer] = true;
+      feature.min_u = feature.max_u = feature.points.front().u;
+      feature.min_v = feature.max_v = feature.points.front().v;
+      feature.min_height = feature.max_height = feature.points.front().height;
+      for (auto const& bound_point : feature.points)
+      {
+        feature.min_u = std::min(feature.min_u, bound_point.u);
+        feature.max_u = std::max(feature.max_u, bound_point.u);
+        feature.min_v = std::min(feature.min_v, bound_point.v);
+        feature.max_v = std::max(feature.max_v, bound_point.v);
+        feature.min_height = std::min(feature.min_height, bound_point.height);
+        feature.max_height = std::max(feature.max_height, bound_point.height);
+      }
       layout.features.emplace_back(std::move(feature));
     }
 
@@ -740,14 +786,58 @@ namespace Noggit::Ai
 
     auto const feature_count = std::min(
       layout.features.size(), procedural_layout_max_features);
-    // ponytail: O(samples * segments) is bounded by 128 segments; add a
-    // spatial index only if profiling shows large layouts need it.
+    static auto const mountain_noise_name = std::string{"arena_mountain_chain"};
+    constexpr float degrees_to_radians_gradient = 0.017453292519943295f;
+    auto const slope_widening_gradient = layout.max_slope_degrees
+        && std::isfinite(*layout.max_slope_degrees)
+        && *layout.max_slope_degrees >= 5.0f
+        && *layout.max_slope_degrees <= 89.0f
+      ? std::optional<float>(std::tan(
+          *layout.max_slope_degrees * degrees_to_radians_gradient))
+      : std::nullopt;
+    // Bounding-box cull with a conservative influence reach (widened
+    // transitions and edge noise included) keeps large layouts affordable:
+    // the per-sample cost is dominated by the few features actually nearby.
     for (std::size_t index = 0; index < feature_count; ++index)
     {
       auto const& feature = layout.features[index];
+      auto const mountain_arc = feature.name == "arena_mountain_mass"
+        || feature.name == "arena_perimeter_relief";
+      auto const& noise_name = mountain_arc
+        ? mountain_noise_name : feature.name;
+      auto const edge_noise_ratio = mountain_arc
+        ? std::max(layout.edge_noise_ratio, .012f)
+        : layout.edge_noise_ratio;
       if (feature.points.empty())
       {
         continue;
+      }
+      {
+        auto const height_delta_bound = feature.roughness_amplitude
+          + (feature.height_mode == ProceduralLayoutHeightMode::Offset
+             ? std::max(std::abs(feature.min_height), std::abs(feature.max_height))
+             : std::max(std::abs(feature.min_height - sample.height),
+                        std::abs(feature.max_height - sample.height)));
+        auto transition_bound = feature.transition_width_ratio;
+        if (slope_widening_gradient)
+        {
+          transition_bound = std::max(transition_bound,
+            1.5f * height_delta_bound
+              / (*slope_widening_gradient * minimum_dimension));
+        }
+        auto const reach = feature.half_width_ratio
+            * (1.0f + feature.width_variation_ratio)
+          + transition_bound + edge_noise_ratio;
+        auto const outside_x = std::max({feature.min_u * scale_x - sample_x,
+                                         sample_x - feature.max_u * scale_x,
+                                         0.0f});
+        auto const outside_z = std::max({feature.min_v * scale_z - sample_z,
+                                         sample_z - feature.max_v * scale_z,
+                                         0.0f});
+        if (outside_x * outside_x + outside_z * outside_z > reach * reach)
+        {
+          continue;
+        }
       }
       auto const nearest = distanceToProceduralShape(
         feature.points, feature.shape, sample_x, sample_z, scale_x, scale_z);
@@ -757,23 +847,35 @@ namespace Noggit::Ai
           && feature.width_variation_ratio > 0.0f)
       {
         half_width *= 1.0f + feature.width_variation_ratio
-          * proceduralEdgeNoise(sample_x, sample_z, feature.name + ":width");
+          * proceduralEdgeNoise(sample_x, sample_z, noise_name + ":width");
       }
       auto const roughness = feature.roughness_amplitude
-        * terrainRoughness(sample_x, sample_z, feature.name);
+        * (mountain_arc
+            ? terrainRidgeRoughness(sample_x, sample_z, noise_name)
+            : terrainRoughness(sample_x, sample_z, noise_name));
+      auto const mountain_peak_factor = mountain_arc
+          && feature.roughness_amplitude > 0.0f
+        ? std::clamp(
+            .5f + .5f * roughness / feature.roughness_amplitude,
+            0.0f, 1.0f)
+        : .5f;
       auto const target_height = feature.height_mode == ProceduralLayoutHeightMode::Offset
         ? std::clamp(sample.height + nearest.height + roughness,
                      minimum_layout_height, maximum_layout_height)
         : std::clamp(nearest.height + roughness,
                      minimum_layout_height, maximum_layout_height);
       auto transition_width = feature.transition_width_ratio;
+      if (mountain_arc && nearest.side > 0.0f)
+      {
+        transition_width *= .70f - .55f * mountain_peak_factor;
+      }
       // ponytail: analytic widening bounds the generated transition on a flat
       // source; use a global vertex graph only if arbitrary source slopes need
       // a hard guarantee.
-      if (layout.max_slope_degrees
+      if (!mountain_arc && layout.max_slope_degrees
           && std::isfinite(*layout.max_slope_degrees)
           && *layout.max_slope_degrees >= 5.0f
-          && *layout.max_slope_degrees <= 60.0f)
+          && *layout.max_slope_degrees <= 89.0f)
       {
         constexpr float degrees_to_radians = 0.017453292519943295f;
         auto const maximum_gradient = std::tan(
@@ -783,14 +885,14 @@ namespace Noggit::Ai
           / (maximum_gradient * minimum_dimension);
         transition_width = std::max(transition_width, minimum_transition);
       }
-      if (layout.edge_noise_ratio > 0.0f)
+      if (edge_noise_ratio > 0.0f)
       {
         auto const amplitude = std::min(
-          layout.edge_noise_ratio, half_width * 0.75f);
+          edge_noise_ratio, half_width * 0.75f);
         if (distance <= half_width + transition_width + amplitude)
         {
           distance += amplitude
-            * proceduralEdgeNoise(sample_x, sample_z, feature.name);
+            * proceduralEdgeNoise(sample_x, sample_z, noise_name);
         }
       }
       auto const mask = proceduralShapeMask(
@@ -801,10 +903,21 @@ namespace Noggit::Ai
         continue;
       }
 
+      auto applied_target_height = target_height;
+      if (mountain_arc)
+      {
+        applied_target_height = std::clamp(
+          nearest.height + roughness * mask,
+          minimum_layout_height, maximum_layout_height);
+      }
       // ponytail: transitions are one-shot; preserve source heights only if
       // repeatable layout reapplication becomes a real editing workflow.
-      sample.height += (target_height - sample.height) * mask;
+      sample.height += (applied_target_height - sample.height) * mask;
       auto texture_mask = mask;
+      if (mountain_arc)
+      {
+        texture_mask *= .20f + .80f * mountain_peak_factor;
+      }
       if (feature.texture_strength < 1.0f)
       {
         auto const variation = 0.85f + 0.15f

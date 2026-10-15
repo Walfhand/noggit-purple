@@ -51,5 +51,6 @@ private:
   std::array<std::list<AsyncObject*>, (size_t)async_priority::count> _to_load;
   std::list<AsyncObject*> _currently_loading;
   std::list<std::thread> _threads;
+  bool _additional_log;
   bool _important_object_failed_loading = false;
 };

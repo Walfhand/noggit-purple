@@ -113,13 +113,14 @@ int main()
 
   auto too_many_features = validArguments();
   too_many_features["features"] = nlohmann::json::array();
-  for (int index = 0; index < 33; ++index)
+  for (std::size_t index = 0;
+       index < Noggit::Ai::procedural_layout_max_features + 1; ++index)
   {
     too_many_features["features"].push_back(
       corridor("feature_" + std::to_string(index)));
   }
   require(!Noggit::Ai::parseProceduralLiquidLayout(too_many_features).layout,
-          "liquid layout with more than 32 features was accepted");
+          "liquid layout with more features than the cap was accepted");
 
   auto too_many_liquid_types = validArguments();
   too_many_liquid_types["features"] = nlohmann::json::array();
@@ -187,12 +188,17 @@ int main()
           "duplicate consecutive liquid points were accepted");
 
   auto bad_width = validArguments();
-  bad_width["features"][1]["half_width_ratio"] = 0.0;
+  bad_width["features"][1]["half_width_ratio"] = 0.00124;
   require(!Noggit::Ai::parseProceduralLiquidLayout(bad_width).layout,
           "out-of-range liquid half-width was accepted");
+  auto minimum_width = validArguments();
+  minimum_width["features"][1]["half_width_ratio"] = 0.00125;
+  minimum_width["features"][1]["transition_width_ratio"] = 0.00025;
+  require(Noggit::Ai::parseProceduralLiquidLayout(minimum_width).layout.has_value(),
+          "compact liquid widths were rejected");
 
   auto bad_transition = validArguments();
-  bad_transition["features"][1]["transition_width_ratio"] = 0.251;
+  bad_transition["features"][1]["transition_width_ratio"] = 0.00024;
   require(!Noggit::Ai::parseProceduralLiquidLayout(bad_transition).layout,
           "out-of-range liquid transition was accepted");
 

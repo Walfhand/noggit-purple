@@ -314,17 +314,17 @@ namespace Noggit::Ai
         }},
         {"points", {
           {"type", "array"},
-          {"description", "Pour corridor : un point crée une plateforme, plusieurs tracent le chemin. Pour area : 3 à 16 sommets simples avec la même hauteur."},
+          {"description", "Pour corridor : 1 à 16 points tracent le chemin. Pour area : 3 à 16 sommets simples avec la même hauteur."},
           {"items", std::move(layout_point_parameters)},
           {"minItems", 1},
           {"maxItems", 16}
         }},
         {"half_width_ratio", {
-          {"type", "number"}, {"minimum", 0.005}, {"maximum", 0.25},
-          {"description", "Demi-largeur du cœur, en proportion du plus petit côté de la carte."}
+          {"type", "number"}, {"minimum", 0.0}, {"maximum", 0.25},
+          {"description", "Demi-largeur du cœur, en proportion du plus petit côté de la carte. 0 est permis uniquement pour area ; corridor exige au moins 0.00125."}
         }},
         {"transition_width_ratio", {
-          {"type", "number"}, {"minimum", 0.001}, {"maximum", 0.25},
+          {"type", "number"}, {"minimum", 0.00025}, {"maximum", 0.25},
           {"description", "Largeur de la transition douce jusqu'au terrain existant, selon le plus petit côté."}
         }},
         {"texture_layer", {
@@ -381,7 +381,7 @@ namespace Noggit::Ai
           {"description", "Variation déterministe des bordures selon le plus petit côté ; 0 désactive, 0.003 à 0.012 donne un rendu naturel."}
         }},
         {"max_slope_degrees", {
-          {"type", {"number", "null"}}, {"minimum", 5.0}, {"maximum", 60.0},
+          {"type", {"number", "null"}}, {"minimum", 5.0}, {"maximum", 89.0},
           {"description", "Élargit automatiquement les transitions trop abruptes ; 25 à 35 convient aux zones jouables, null désactive."}
         }},
         {"smoothing_strength", {
@@ -390,7 +390,7 @@ namespace Noggit::Ai
         }},
         {"features", {
           {"type", "array"},
-          {"description", "Formes aux noms ASCII uniques, avec au plus 128 segments au total."},
+          {"description", "Formes aux noms ASCII uniques, avec au plus 544 segments au total."},
           {"items", std::move(layout_feature_parameters)},
           {"minItems", 1},
           {"maxItems", 32}
@@ -442,11 +442,11 @@ namespace Noggit::Ai
           {"maxItems", 16}
         }},
         {"half_width_ratio", {
-          {"type", "number"}, {"minimum", 0.005}, {"maximum", 0.25},
+          {"type", "number"}, {"minimum", 0.00125}, {"maximum", 0.25},
           {"description", "Demi-largeur du cœur liquide, relative au plus petit côté de la carte."}
         }},
         {"transition_width_ratio", {
-          {"type", "number"}, {"minimum", 0.001}, {"maximum", 0.25},
+          {"type", "number"}, {"minimum", 0.00025}, {"maximum", 0.25},
           {"description", "Largeur où la profondeur visuelle décroît jusqu'à zéro au rivage."}
         }},
         {"liquid_type_id", {
@@ -482,7 +482,7 @@ namespace Noggit::Ai
         }},
         {"features", {
           {"type", "array"},
-          {"description", "Une à 32 zones d'eau ou d'océan, avec au plus 128 segments et 14 IDs distincts au total."},
+          {"description", "Une à 64 zones d'eau ou d'océan, avec au plus 128 segments et 14 IDs distincts au total."},
           {"items", std::move(liquid_feature_parameters)},
           {"minItems", 1},
           {"maxItems", 32}
@@ -505,7 +505,7 @@ namespace Noggit::Ai
       {"type", "object"},
       {"properties", {
         {"path", {{"type", "string"}, {"minLength", 1}, {"maxLength", 260}}},
-        {"role", {{"type", "string"}, {"enum", {"canopy", "understory", "rock", "detail"}}}},
+        {"role", {{"type", "string"}, {"enum", {"canopy", "understory", "rock", "wall", "detail"}}}},
         {"weight", {{"type", "number"}, {"exclusiveMinimum", 0.0}, {"maximum", 100.0}}},
         {"min_scale", {{"type", "number"}, {"minimum", 0.05}, {"maximum", 10.0}}},
         {"max_scale", {{"type", "number"}, {"minimum", 0.05}, {"maximum", 10.0}}},
@@ -518,13 +518,13 @@ namespace Noggit::Ai
       {"type", "object"},
       {"properties", {
         {"name", {{"type", "string"}, {"minLength", 1}, {"maxLength", 64}}},
-        {"role", {{"type", "string"}, {"enum", {"canopy", "understory", "rock", "detail"}}}},
+        {"role", {{"type", "string"}, {"enum", {"canopy", "understory", "rock", "wall", "detail"}}}},
         {"points", {
           {"type", "array"}, {"items", scatter_point_parameters},
           {"minItems", 3}, {"maxItems", 16}
         }},
         {"density_per_tile", {{"type", "integer"}, {"minimum", 1}, {"maximum", 512}}},
-        {"min_spacing_ratio", {{"type", "number"}, {"minimum", 0.001}, {"maximum", 0.25}}},
+        {"min_spacing_ratio", {{"type", "number"}, {"minimum", 0.00025}, {"maximum", 0.25}}},
         {"min_height", {{"type", "number"}, {"minimum", -500.0}, {"maximum", 5000.0}}},
         {"max_height", {{"type", "number"}, {"minimum", -500.0}, {"maximum", 5000.0}}},
         {"min_slope_degrees", {{"type", "number"}, {"minimum", 0.0}, {"maximum", 90.0}}},
@@ -547,7 +547,7 @@ namespace Noggit::Ai
           {"type", "array"}, {"items", scatter_point_parameters},
           {"minItems", 1}, {"maxItems", 16}
         }},
-        {"half_width_ratio", {{"type", "number"}, {"minimum", 0.001}, {"maximum", 0.25}}}
+        {"half_width_ratio", {{"type", "number"}, {"minimum", 0.00025}, {"maximum", 0.25}}}
       }},
       {"required", {"shape", "points", "half_width_ratio"}},
       {"additionalProperties", false}
@@ -562,20 +562,67 @@ namespace Noggit::Ai
         }},
         {"regions", {
           {"type", "array"}, {"items", std::move(scatter_region_parameters)},
-          {"minItems", 1}, {"maxItems", 16}
+          {"minItems", 1}, {"maxItems", 48}
         }},
         {"exclusions", {
           {"type", "array"}, {"items", std::move(scatter_exclusion_parameters)},
-          {"minItems", 0}, {"maxItems", 32}
+          {"minItems", 0}, {"maxItems", 96}
         }}
       }},
       {"required", {"seed", "assets", "regions", "exclusions"}},
       {"additionalProperties", false}
     };
 
+    auto props_parameters = nlohmann::json{
+      {"type", "object"},
+      {"properties", {
+        {"props", {
+          {"type", "array"}, {"minItems", 1}, {"maxItems", 256},
+          {"items", {
+            {"type", "object"},
+            {"properties", {
+              {"name", {{"type", "string"}, {"minLength", 1}, {"maxLength", 64}}},
+              {"path", {{"type", "string"}, {"minLength", 1}, {"maxLength", 260}}},
+              {"u", {{"type", "number"}, {"minimum", 0.0}, {"maximum", 1.0}}},
+              {"v", {{"type", "number"}, {"minimum", 0.0}, {"maximum", 1.0}}},
+              {"scale", {{"type", "number"}, {"minimum", 0.05}, {"maximum", 10.0}}},
+              {"yaw_degrees", {{"type", "number"}, {"minimum", 0.0}, {"maximum", 360.0}}},
+              {"height_offset", {{"type", "number"}, {"minimum", -100.0}, {"maximum", 100.0}}}
+            }},
+            {"required", {"name", "path", "u", "v", "scale",
+                          "yaw_degrees", "height_offset"}},
+            {"additionalProperties", false}
+          }}
+        }}
+      }},
+      {"required", {"props"}},
+      {"additionalProperties", false}
+    };
+
+    auto prop_paths_parameters = nlohmann::json{
+      {"type", "object"},
+      {"description", "Chemins M2 des props d'ambiance : landmarks de base et d'objectif, braziers, lampadaires et lumières dynamiques world/noggit/lights de Patch-E."},
+      {"properties", {
+        {"base_landmark", {{"type", "string"}, {"minLength", 1}, {"maxLength", 260}}},
+        {"objective_landmark", {{"type", "string"}, {"minLength", 1}, {"maxLength", 260}}},
+        {"camp_marker", {{"type", "string"}, {"minLength", 1}, {"maxLength", 260}}},
+        {"lane_lamp", {{"type", "string"}, {"minLength", 1}, {"maxLength", 260}}},
+        {"team_left_light", {{"type", "string"}, {"minLength", 1}, {"maxLength", 260}}},
+        {"team_right_light", {{"type", "string"}, {"minLength", 1}, {"maxLength", 260}}},
+        {"river_light", {{"type", "string"}, {"minLength", 1}, {"maxLength", 260}}},
+        {"flame_light", {{"type", "string"}, {"minLength", 1}, {"maxLength", 260}}},
+        {"lamp_light", {{"type", "string"}, {"minLength", 1}, {"maxLength", 260}}}
+      }},
+      {"required", {"base_landmark", "objective_landmark", "camp_marker",
+                    "lane_lamp", "team_left_light", "team_right_light",
+                    "river_light", "flame_light", "lamp_light"}},
+      {"additionalProperties", false}
+    };
+
     auto moba_parameters = nlohmann::json{
       {"type", "object"},
       {"properties", {
+        {"prop_paths", prop_paths_parameters},
         {"texture_paths", {
           {"type", "array"},
           {"description", "Exactement quatre textures choisies visuellement : herbe, voie, sol humide, roche."},
@@ -586,19 +633,74 @@ namespace Noggit::Ai
         {"assets", scatter_parameters["properties"]["assets"]},
         {"seed", {{"type", "string"}, {"minLength", 1}, {"maxLength", 64}}},
         {"base_height", {{"type", "number"}, {"minimum", -450.0}, {"maximum", 4950.0}}},
+        {"arena_scale_ratio", {
+          {"type", "number"}, {"minimum", 0.25}, {"maximum", 1.0},
+          {"description", "Échelle horizontale de l'arène dans l'empreinte ; 0.32 reproduit environ le temps de traversée de Summoner's Rift sur une carte 2x2."}
+        }},
         {"river_depth", {{"type", "number"}, {"minimum", 2.0}, {"maximum", 30.0}}},
-        {"lane_width_ratio", {{"type", "number"}, {"minimum", 0.025}, {"maximum", 0.055}}},
+        {"lane_width_ratio", {{"type", "number"}, {"minimum", 0.012}, {"maximum", 0.055},
+          {"description", "Demi-largeur normalisée des voies ; utiliser 0.032 par défaut."}}},
         {"river_width_ratio", {{"type", "number"}, {"minimum", 0.015}, {"maximum", 0.08}}},
         {"lane_curvature", {{"type", "number"}, {"minimum", 0.0}, {"maximum", 1.0}}},
         {"river_curvature", {{"type", "number"}, {"minimum", 0.0}, {"maximum", 1.0}}},
         {"jungle_roughness", {{"type", "number"}, {"minimum", 1.0}, {"maximum", 12.0}}},
-        {"vegetation_density_per_tile", {{"type", "integer"}, {"minimum", 1}, {"maximum", 256}}}
+        {"vegetation_density_per_tile", {{"type", "integer"}, {"minimum", 1}, {"maximum", 256}}},
+        {"ground_effect_texture_id", {
+          {"type", "integer"}, {"minimum", 0},
+          {"description", "ID GroundEffectTexture.dbc choisi avec search_ground_effects ; 0 installe et sélectionne l'herbe dense Battle for Azeroth si elle est disponible."}
+        }},
+        {"skybox_path", {
+          {"type", "string"}, {"minLength", 1}, {"maxLength", 260},
+          {"description", "Modèle M2 de ciel présent dans le client, généralement sous environments/stars."}
+        }},
+        {"skybox_flags", {
+          {"type", "integer"}, {"minimum", 0}, {"maximum", 3},
+          {"description", "Flags LightSkybox : 1 synchronise l'animation avec l'heure, 2 combine avec le ciel procédural."}
+        }}
       }},
       {"required", {
         "texture_paths", "liquid_type_id", "assets", "seed", "base_height",
-        "river_depth", "lane_width_ratio", "river_width_ratio", "lane_curvature",
-        "river_curvature", "jungle_roughness", "vegetation_density_per_tile"
+        "arena_scale_ratio", "river_depth", "lane_width_ratio",
+        "river_width_ratio", "lane_curvature",
+        "river_curvature", "jungle_roughness", "vegetation_density_per_tile",
+        "ground_effect_texture_id", "prop_paths", "skybox_path", "skybox_flags"
       }},
+      {"additionalProperties", false}
+    };
+
+    auto skybox_apply_parameters = nlohmann::json{
+      {"type", "object"},
+      {"properties", {
+        {"skybox_path", { {"type", "string"}, {"minLength", 1}, {"maxLength", 260} }},
+        {"flags", { {"type", "integer"}, {"minimum", 0}, {"maximum", 3} }},
+        {"lighting_param_index", {
+          {"type", "integer"}, {"minimum", 0}, {"maximum", 7},
+          {"description", "Palette à rendre permanente dans Clear Weather : 0=Clear, 1=Clear Underwater, 2=Storm, 3=Storm Underwater."}
+        }}
+      }},
+      {"required", {"skybox_path", "flags", "lighting_param_index"}},
+      {"additionalProperties", false}
+    };
+
+    auto ground_effect_apply_parameters = nlohmann::json{
+      {"type", "object"},
+      {"properties", {
+        {"texture_path", {{"type", "string"}, {"minLength", 1}, {"maxLength", 260}}},
+        {"effect_id", {{"type", "integer"}, {"minimum", 0},
+          {"description", "ID GroundEffectTexture.dbc ; 0 installe et sélectionne l'herbe dense Battle for Azeroth si elle est disponible."}}},
+        {"overwrite", {{"type", "boolean"}}}
+      }},
+      {"required", {"texture_path", "effect_id", "overwrite"}},
+      {"additionalProperties", false}
+    };
+
+    auto ground_effect_search_parameters = nlohmann::json{
+      {"type", "object"},
+      {"properties", {
+        {"query", {{"type", "string"}, {"maxLength", 128}}},
+        {"limit", {{"type", "integer"}, {"minimum", 1}, {"maximum", 50}}}
+      }},
+      {"required", {"query", "limit"}},
       {"additionalProperties", false}
     };
 
@@ -669,14 +771,42 @@ namespace Noggit::Ai
       {
         {"type", "function"},
         {"name", "scatter_assets_on_map"},
-        {"description", "Répartit en un appel des arbres, rochers, buissons et décors M2/WMO dans des zones polygonales. Respecte les exclusions, la hauteur, la pente, la densité et l'espacement. Opération globale déterministe, sauvegardée et réservée à un plan approuvé."},
+        {"description", "Répartit en un appel des arbres, rochers, buissons et décors M2/WMO dans des zones polygonales. Respecte les exclusions, la hauteur, la pente, la densité et l'espacement. Les régions du rôle wall (ou nommées *_wall) placent leurs assets en chaîne déterministe alignée sur le périmètre du polygone, pour bâtir des murs collidables. Opération globale déterministe, sauvegardée et réservée à un plan approuvé."},
         {"parameters", std::move(scatter_parameters)},
         {"strict", true}
       },
       {
         {"type", "function"},
+        {"name", "place_props_on_map"},
+        {"description", "Place une liste explicite de props M2/WMO à des coordonnées normalisées précises : statues, fontaines, braziers, lampadaires et lumières dynamiques world/noggit/lights de Patch-E. Chaque prop est posé sur la hauteur du terrain, avec un height_offset optionnel pour les lumières flottantes. Opération globale déterministe, sauvegardée et réservée à un plan approuvé."},
+        {"parameters", std::move(props_parameters)},
+        {"strict", true}
+      },
+      {
+        {"type", "function"},
+        {"name", "apply_ground_effect_on_map"},
+        {"description", "Affecte un GroundEffectTexture.dbc à toutes les couches utilisant une texture de terrain donnée. Avec effect_id=0, crée dans le projet un set dense Battle for Azeroth requis par les assets Patch-N. Le rendu suit les alphamaps, est sauvegardé dans MCLY et prévisualisé dans Noggit."},
+        {"parameters", std::move(ground_effect_apply_parameters)},
+        {"strict", true}
+      },
+      {
+        {"type", "function"},
+        {"name", "apply_skybox_on_map"},
+        {"description", "Relie une skybox M2 à la lumière globale et copie la palette choisie dans un LightParams Clear privé, sans modifier les paramètres partagés des autres cartes. Écrit Light.dbc, LightParams.dbc, LightSkybox.dbc, LightIntBand.dbc et LightFloatBand.dbc dans le projet."},
+        {"parameters", std::move(skybox_apply_parameters)},
+        {"strict", true}
+      },
+      {
+        {"type", "function"},
+        {"name", "validate_moba_footprint"},
+        {"description", "Préflight non destructif d'une arène MOBA : charge toute l'empreinte et refuse les trous de terrain, chunks infranchissables et placements M2/WMO préexistants avant la première mutation."},
+        {"parameters", context_parameters},
+        {"strict", true}
+      },
+      {
+        {"type", "function"},
         {"name", "create_moba_arena_blueprint"},
-        {"description", "Compile les choix esthétiques de l'IA en une topologie MOBA fixe et cohérente : exactement trois voies, deux bases fortifiées à trois entrées, une rivière, quatre jungles et deux clairières d'objectif. Retourne trois appels génériques à exécuter sans modifier leurs arguments."},
+        {"description", "Compile les choix esthétiques de l'IA en une topologie MOBA fixe et cohérente, compactée au centre d'une carte carrée de 2x2 à 4x4 tuiles et fermée par un relief rocheux périphérique : exactement trois voies, deux bases fortifiées avec trois entrées, une rivière, quatre jungles élevées par des reliefs rocheux irréguliers, vingt chemins, douze camps de tailles variées et deux clairières d'objectif préservées du relief. Chaque quadrant possède cinq portes et un graphe centré sur le buff ; le camp moyen traverse la route principale et le petit camp forme un court cul-de-sac. Les murs M2 collidables sont réservés aux enceintes architecturales des bases ; la jungle est délimitée par le terrain, les rochers et la végétation d'une même famille visuelle récente du Patch-N. Ajoute une couche d'ambiance : fontaines ou statues de base, statues d'objectif, braziers de camps et d'entrées, lampadaires couplés aux lumières dynamiques de Patch-E, puis une skybox moderne de Patch-N. Retourne le préflight, les sept mutations et la validation finale à exécuter sans modifier leurs arguments."},
         {"parameters", std::move(moba_parameters)},
         {"strict", true}
       },
@@ -727,6 +857,13 @@ namespace Noggit::Ai
         {"name", "search_assets"},
         {"description", "Cherche les modèles M2 et bâtiments WMO disponibles dans la listfile du client afin de préparer les placements d'un plan."},
         {"parameters", std::move(asset_search_parameters)},
+        {"strict", true}
+      },
+      {
+        {"type", "function"},
+        {"name", "search_ground_effects"},
+        {"description", "Cherche dans GroundEffectTexture.dbc les ensembles d'herbes, fleurs et petits détails disponibles, avec leurs modèles et densités réels."},
+        {"parameters", std::move(ground_effect_search_parameters)},
         {"strict", true}
       }
     });

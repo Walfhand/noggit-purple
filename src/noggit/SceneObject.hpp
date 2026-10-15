@@ -7,6 +7,8 @@
 #include <noggit/Selection.h>
 #include <noggit/ContextObject.hpp>
 #include <array>
+#include <mutex>
+#include <vector>
 
 namespace BlizzardArchive::Listfile
 {
@@ -27,6 +29,8 @@ class SceneObject : public Selectable
 {
 public:
   SceneObject(SceneObjectTypes type, Noggit::NoggitRenderContext context);
+  SceneObject(SceneObject const& other);
+  SceneObject& operator=(SceneObject const& other);
 
   [[nodiscard]]
   bool isInsideRect(std::array<glm::vec3, 2> const* rect) const;
@@ -59,13 +63,13 @@ public:
   void derefTile(MapTile* tile);
 
   [[nodiscard]]
-  std::vector<MapTile*> const& getTiles() const;;
+  std::vector<MapTile*> getTiles() const;;
 
   [[nodiscard]]
   virtual AsyncObject* instance_model() const = 0;
 
   [[nodiscard]]
-  virtual std::array<glm::vec3, 2> const& getExtents(); // axis aligned
+  virtual std::array<glm::vec3, 2> getExtents(); // axis aligned snapshot
 
   [[nodiscard]]
   virtual std::array<glm::vec3, 8> getBoundingBox() = 0; // non axis aligned
@@ -98,6 +102,11 @@ protected:
 
   Noggit::NoggitRenderContext _context;
 
+  // Extents, transforms, and the derived dirty flags form one cache.  A
+  // recursive mutex is intentional: ensureExtents() can call recalcExtents(),
+  // which in turn calls updateTransformMatrix().
+  mutable std::recursive_mutex _extents_mutex;
+  mutable std::mutex _tiles_mutex;
   std::vector<MapTile*> _tiles;
 };
 

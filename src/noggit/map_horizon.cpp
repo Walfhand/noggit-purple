@@ -434,7 +434,7 @@ void map_horizon::save_wdl(World* world, bool regenerate)
                 // laod tile and extract WDL data
                 if (!horizon_tile || regenerate)
                 {
-                    bool unload = !world->mapIndex.tileLoaded(index) && !world->mapIndex.tileAwaitingLoading(index);
+                    bool unload = !world->mapIndex.tileResident(index);
                     MapTile* mTile = world->mapIndex.loadTile(index, false, false, false);
 
                     auto nloadedtiles = world->mapIndex.getNLoadedTiles();

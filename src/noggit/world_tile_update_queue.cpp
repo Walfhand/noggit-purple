@@ -26,7 +26,7 @@ namespace Noggit
     void apply(World* const world)
     {
       instance->instance_model()->wait_until_loaded();
-      auto& extents(instance->getExtents());
+      auto const extents(instance->getExtents());
       TileIndex start(extents[0]), end(extents[1]);
 
       for (size_t z = start.z; z <= end.z; ++z)

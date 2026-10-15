@@ -2,6 +2,7 @@
 
 #include <math/trig.hpp>
 #include <noggit/ActionManager.hpp>
+#include <noggit/AsyncLoader.h>
 #include <noggit/application/NoggitApplication.hpp>
 #include <noggit/Brush.h> // brush
 #include <noggit/ChunkWater.hpp>
@@ -125,6 +126,46 @@ World::World(const std::string& name, int map_id, Noggit::NoggitRenderContext co
 {
   LogDebug << "Loading world \"" << name << "\"." << std::endl;
   _loaded_tiles_buffer[0] = std::make_pair<std::pair<int, int>, MapTile*>(std::make_pair(0, 0), nullptr);
+}
+
+World::~World()
+{
+  auto resident_tiles = std::vector<TileIndex>{};
+  while (true)
+  {
+    resident_tiles.clear();
+    for (std::size_t z = 0; z < 64; ++z)
+    {
+      for (std::size_t x = 0; x < 64; ++x)
+      {
+        auto const index = TileIndex(x, z);
+        if (mapIndex.tileResident(index))
+          resident_tiles.push_back(index);
+      }
+    }
+
+    // All World members are still alive here. Drain every loader and queued
+    // object-to-tile update before any MapTile destructor can dereference them.
+    for (auto const& index : resident_tiles)
+    {
+      auto* tile = mapIndex.getTile(index);
+      tile->wait_until_loaded();
+      AsyncLoader::instance->ensure_deletable(tile);
+    }
+    wait_for_all_tile_updates();
+
+    auto expanded_count = std::size_t{0};
+    for (std::size_t z = 0; z < 64; ++z)
+      for (std::size_t x = 0; x < 64; ++x)
+        if (mapIndex.tileResident(TileIndex(x, z)))
+          ++expanded_count;
+    if (expanded_count == resident_tiles.size()) break;
+  }
+
+  for (std::size_t z = 0; z < 64; ++z)
+    for (std::size_t x = 0; x < 64; ++x)
+      if (mapIndex.getTile(TileIndex(x, z)))
+        mapIndex.unloadTile(TileIndex(x, z));
 }
 
 void World::LoadSavedSelectionGroups()
@@ -1137,15 +1178,19 @@ bool World::isInIndoorWmoGroup(std::array<glm::vec3, 2> obj_bounds, glm::mat4x4 
                 && wmo_extents[1].z >= obj_bounds[0].z)
 
             {
+                auto const all_group_extents = wmo_instance.getGroupExtents();
                 for (int i = 0; i < (int)wmo_instance.wmo->groups.size(); ++i)
                 {
                     auto const& group = wmo_instance.wmo->groups[i];
 
                     if (group.is_indoor())
                     {
-                        // must call getGroupExtent() to initialize wmo_instance.group_extents
-                        // clear group extents to free memory ?
-                        auto& group_extents = wmo_instance.getGroupExtents().at(i);
+                        auto const extents_it = all_group_extents.find(i);
+                        if (extents_it == all_group_extents.end())
+                        {
+                            continue;
+                        }
+                        auto const& group_extents = extents_it->second;
 
 
                         bool aabb_test = obj_bounds[1].x >= group_extents.first.x
@@ -1203,8 +1248,9 @@ selection_result World::intersect (glm::mat4x4 const& model_view
       TileIndex index{ static_cast<std::size_t>(pair.first.first)
                         , static_cast<std::size_t>(pair.first.second) };
 
-      // handle tiles that got unloaded mid-frame to avoid illegal access
-      if (!mapIndex.tileLoaded(index) || mapIndex.tileAwaitingLoading(index))
+      // The same index may already contain a replacement tile. Validate the
+      // cached pointer itself before dereferencing it.
+      if (mapIndex.getTile(index) != tile)
           continue;
 
       if (!tile->finishedLoading())
@@ -1575,9 +1621,9 @@ std::vector<selected_object_type> World::getObjectsInRange(glm::vec3 const& pos,
             continue;
         }
 
-        std::vector<uint32_t>* uids = tile->get_uids();
+        auto const uids = tile->get_uids();
 
-        for (uint32_t uid : *uids)
+        for (uint32_t uid : uids)
         {
             auto instance = _model_instance_storage.get_instance(uid);
 
@@ -1952,7 +1998,7 @@ void World::convert_alphamap(QProgressDialog* progress_dialog, bool to_big_alpha
       // not cancellable.
       TileIndex tile(x, z);
 
-      bool unload = !mapIndex.tileLoaded(tile) && !mapIndex.tileAwaitingLoading(tile);
+      bool unload = !mapIndex.tileResident(tile);
       MapTile* mTile = mapIndex.loadTile(tile);
 
       if (mTile)
@@ -2803,7 +2849,7 @@ void World::swapTextureGlobal(scoped_blp_texture_reference tex)
             {
                 TileIndex tile(x, z);
 
-                bool unload = !mapIndex.tileLoaded(tile) && !mapIndex.tileAwaitingLoading(tile);
+                bool unload = !mapIndex.tileResident(tile);
                 MapTile* mTile = mapIndex.loadTile(tile);
 
                 if (mTile)
@@ -3277,9 +3323,9 @@ float World::getMaxTileHeight(const TileIndex& tile)
   m_tile->forceRecalcExtents();
   float max_height = m_tile->getMaxHeight();
 
-  std::vector<uint32_t>* uids = m_tile->get_uids();
+  auto const uids = m_tile->get_uids();
 
-  for (uint32_t uid : *uids)
+  for (uint32_t uid : uids)
   {
     auto instance = _model_instance_storage.get_instance(uid);
 
@@ -3287,7 +3333,8 @@ float World::getMaxTileHeight(const TileIndex& tile)
     {
       auto obj = std::get<selected_object_type>(instance.value());
       obj->ensureExtents();
-      max_height = std::max(max_height, std::max(obj->getExtents()[0].y, obj->getExtents()[1].y));
+      auto const obj_extents = obj->getExtents();
+      max_height = std::max(max_height, std::max(obj_extents[0].y, obj_extents[1].y));
     }
   }
 
@@ -3348,7 +3395,7 @@ void World::exportAllADTsAlphamap()
     {
       TileIndex tile(x, z);
 
-      bool unload = !mapIndex.tileLoaded(tile) && !mapIndex.tileAwaitingLoading(tile);
+      bool unload = !mapIndex.tileResident(tile);
       MapTile* mTile = mapIndex.loadTile(tile);
 
       if (mTile)
@@ -3391,7 +3438,7 @@ void World::exportAllADTsAlphamap(const std::string& filename)
     {
       TileIndex tile(x, z);
 
-      bool unload = !mapIndex.tileLoaded(tile) && !mapIndex.tileAwaitingLoading(tile);
+      bool unload = !mapIndex.tileResident(tile);
       MapTile* mTile = mapIndex.loadTile(tile);
 
       if (mTile)
@@ -3457,7 +3504,7 @@ void World::exportAllADTsHeightmap()
     {
       TileIndex tile(x, z);
 
-      bool unload = !mapIndex.tileLoaded(tile) && !mapIndex.tileAwaitingLoading(tile);
+      bool unload = !mapIndex.tileResident(tile);
       MapTile* mTile = mapIndex.loadTile(tile);
 
       if (mTile)
@@ -3487,7 +3534,7 @@ void World::exportAllADTsHeightmap()
     {
       TileIndex tile(x, z);
 
-      bool unload = !mapIndex.tileLoaded(tile) && !mapIndex.tileAwaitingLoading(tile);
+      bool unload = !mapIndex.tileResident(tile);
       MapTile* mTile = mapIndex.loadTile(tile);
 
       if (mTile)
@@ -3527,7 +3574,7 @@ void World::exportAllADTsVertexColorMap()
     {
       TileIndex tile(x, z);
 
-      bool unload = !mapIndex.tileLoaded(tile) && !mapIndex.tileAwaitingLoading(tile);
+      bool unload = !mapIndex.tileResident(tile);
       MapTile* mTile = mapIndex.loadTile(tile);
 
       if (mTile)
@@ -3577,7 +3624,7 @@ void World::importAllADTsAlphamaps(QProgressDialog* progress_dialog)
 
       TileIndex tile(x, z);
 
-      bool unload = !mapIndex.tileLoaded(tile) && !mapIndex.tileAwaitingLoading(tile);
+      bool unload = !mapIndex.tileResident(tile);
       MapTile* mTile = mapIndex.loadTile(tile);
       
       if (mTile)
@@ -3643,7 +3690,7 @@ void World::importAllADTsHeightmaps(QProgressDialog* progress_dialog, float min_
         return;
       TileIndex tile(x, z);
 
-      bool unload = !mapIndex.tileLoaded(tile) && !mapIndex.tileAwaitingLoading(tile);
+      bool unload = !mapIndex.tileResident(tile);
       MapTile* mTile = mapIndex.loadTile(tile);
       
       if (mTile)
@@ -3701,7 +3748,7 @@ void World::importAllADTVertexColorMaps(unsigned mode, bool tiledEdges)
     {
       TileIndex tile(x, z);
 
-      bool unload = !mapIndex.tileLoaded(tile) && !mapIndex.tileAwaitingLoading(tile);
+      bool unload = !mapIndex.tileResident(tile);
       MapTile* mTile = mapIndex.loadTile(tile);
 
       if (mTile)
@@ -3756,7 +3803,7 @@ void World::ensureAllTilesetsAllADTs()
     {
       TileIndex tile(x, z);
 
-      bool unload = !mapIndex.tileLoaded(tile) && !mapIndex.tileAwaitingLoading(tile);
+      bool unload = !mapIndex.tileResident(tile);
       MapTile* mTile = mapIndex.loadTile(tile);
 
       if (mTile)
@@ -3841,6 +3888,12 @@ void World::select_objects_in_area(
     {
       break;
     }
+
+    auto const index = TileIndex(
+      static_cast<std::size_t>(map_object.first.first),
+      static_cast<std::size_t>(map_object.first.second));
+    if (mapIndex.getTile(index) != tile)
+      continue;
 
     // some optimizations to see if the tile is in selection before iterating objects in it
     {
@@ -3931,7 +3984,8 @@ void World::select_objects_in_area(
         if (distance > user_depth || distance > renderer()->cullDistance())
           continue;
 
-        math::aabb obj_world_aabb(instance->getExtents()[0], instance->getExtents()[1]);
+        auto const instance_extents = instance->getExtents();
+        math::aabb obj_world_aabb(instance_extents[0], instance_extents[1]);
         auto aabb_center = obj_world_aabb.center();
 
         bool point_valid = false;

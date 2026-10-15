@@ -25,13 +25,61 @@ SceneObject::SceneObject(SceneObjectTypes type, Noggit::NoggitRenderContext cont
   extents[1] = glm::vec3(std::numeric_limits<float>::lowest()); 
 }
 
+SceneObject::SceneObject(SceneObject const& other)
+  : SceneObject(eMODEL, Noggit::MAP_VIEW)
+{
+  std::scoped_lock lock(other._extents_mutex, other._tiles_mutex);
+  _grouped = other._grouped;
+  pos = other.pos;
+  dir = other.dir;
+  scale = other.scale;
+  uid = other.uid;
+  frame = other.frame;
+  _rendered_last_frame = other._rendered_last_frame;
+  _type = other._type;
+  _transform_mat = other._transform_mat;
+  _transform_mat_inverted = other._transform_mat_inverted;
+  extents = other.extents;
+  bounding_radius = other.bounding_radius;
+  _tiles = other._tiles;
+}
+
+SceneObject& SceneObject::operator=(SceneObject const& other)
+{
+  if (this == &other) return *this;
+  std::scoped_lock lock(
+    _extents_mutex, other._extents_mutex, _tiles_mutex, other._tiles_mutex);
+  _grouped = other._grouped;
+  pos = other.pos;
+  dir = other.dir;
+  scale = other.scale;
+  uid = other.uid;
+  frame = other.frame;
+  _rendered_last_frame = other._rendered_last_frame;
+  _type = other._type;
+  _transform_mat = other._transform_mat;
+  _transform_mat_inverted = other._transform_mat_inverted;
+  extents = other.extents;
+  bounding_radius = other.bounding_radius;
+  _context = other._context;
+  _tiles = other._tiles;
+  return *this;
+}
+
 bool SceneObject::isInsideRect(std::array<glm::vec3, 2> const* rect) const
 {
+  std::lock_guard lock(_extents_mutex);
   return misc::rectOverlap(extents.data(), rect->data());
 }
 
 bool SceneObject::isDuplicateOf(SceneObject const& other)
 {
+  if (this == &other)
+  {
+    return true;
+  }
+
+  std::scoped_lock lock(_extents_mutex, other._extents_mutex);
   auto a_obj_this = instance_model();
   auto a_obj_other = other.instance_model();
 
@@ -54,6 +102,7 @@ bool SceneObject::isDuplicateOf(SceneObject const& other)
 
 void SceneObject::updateTransformMatrix()
 {
+  std::lock_guard lock(_extents_mutex);
   glm::mat4x4 matrix = glm::mat4x4(1.0f);
 
   if (pos != glm::vec3(0.0f))
@@ -89,12 +138,14 @@ void SceneObject::updateTransformMatrix()
 
 void SceneObject::resetDirection()
 {
+  std::lock_guard lock(_extents_mutex);
   dir =  math::degrees::vec3(math::degrees(0)._, dir.y, math::degrees(0)._);
   recalcExtents();
 }
 
 void SceneObject::normalizeDirection()
 {
+    std::lock_guard lock(_extents_mutex);
     //! [-180, 180)
     while (dir.x >= 180.0f)
         dir.x -= 360.0f;
@@ -115,6 +166,7 @@ void SceneObject::normalizeDirection()
 [[nodiscard]]
 glm::mat4x4 SceneObject::transformMatrix() const
 {
+  std::lock_guard lock(_extents_mutex);
   /*ensureExtents();*/
   return _transform_mat;
 }
@@ -122,6 +174,7 @@ glm::mat4x4 SceneObject::transformMatrix() const
 [[nodiscard]]
 glm::mat4x4 SceneObject::transformMatrixInverted() const
 {
+  std::lock_guard lock(_extents_mutex);
   /*ensureExtents();*/
   return _transform_mat_inverted;
 }
@@ -129,12 +182,14 @@ glm::mat4x4 SceneObject::transformMatrixInverted() const
 [[nodiscard]]
 SceneObjectTypes SceneObject::which() const
 {
+  std::lock_guard lock(_extents_mutex);
   return _type;
 }
 
 void SceneObject::refTile(MapTile* tile)
 {
   assert(tile);
+  std::lock_guard lock(_tiles_mutex);
   auto it = std::find(_tiles.begin(), _tiles.end(), tile);
   if (it == _tiles.end())
     _tiles.push_back(tile);
@@ -143,6 +198,7 @@ void SceneObject::refTile(MapTile* tile)
 void SceneObject::derefTile(MapTile* tile)
 {
   assert(tile);
+  std::lock_guard lock(_tiles_mutex);
   if (_tiles.empty())
   {
     return;
@@ -154,24 +210,28 @@ void SceneObject::derefTile(MapTile* tile)
 }
 
 [[nodiscard]]
-std::vector<MapTile*> const& SceneObject::getTiles() const
+std::vector<MapTile*> SceneObject::getTiles() const
 {
+  std::lock_guard lock(_tiles_mutex);
   return _tiles;
 }
 
 [[nodiscard]]
-std::array<glm::vec3, 2> const& SceneObject::getExtents()
+std::array<glm::vec3, 2> SceneObject::getExtents()
 {
+  std::lock_guard lock(_extents_mutex);
   ensureExtents(); return extents;
 }
 
 [[nodiscard]]
 float SceneObject::getBoundingRadius()
 {
+  std::lock_guard lock(_extents_mutex);
   ensureExtents(); return bounding_radius;
 }
 
 glm::vec3 const SceneObject::getServerPos() const
 {
+  std::lock_guard lock(_extents_mutex);
   return glm::vec3(ZEROPOINT - pos.z, ZEROPOINT - pos.x, pos.y);
 }

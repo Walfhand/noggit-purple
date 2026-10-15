@@ -162,11 +162,12 @@ namespace Noggit::Rendering
 
     // buffers
     OpenGL::Scoped::deferred_upload_buffers<6> _buffers;
-    OpenGL::Scoped::deferred_upload_vertex_arrays<2> _vertex_arrays;
+    OpenGL::Scoped::deferred_upload_vertex_arrays<3> _vertex_arrays;
 
     std::vector<uint16_t> const _box_indices = {5, 7, 3, 2, 0, 1, 3, 1, 5, 4, 0, 4, 6, 2, 6, 7};
 
     GLuint const& _vao = _vertex_arrays[0];
+    GLuint const& _single_vao = _vertex_arrays[2];
     GLuint const& _transform_buffer = _buffers[0];
     GLuint const& _vertices_buffer = _buffers[1];
     GLuint const& _indices_buffer = _buffers[3];
@@ -182,6 +183,7 @@ namespace Noggit::Rendering
 
     bool _uploaded = false;
     bool _vao_setup = false;
+    bool _single_vao_setup = false;
   };
 }
 

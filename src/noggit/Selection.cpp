@@ -6,6 +6,7 @@
 #include <noggit/texture_set.hpp>
 #include <noggit/World.h>
 
+#include <algorithm>
 #include <sstream>
 
 
@@ -271,6 +272,10 @@ void selection_group::save_json()
 
 void selection_group::remove_member(unsigned int object_uid)
 {
+    auto const member = std::find(_members_uid.begin(), _members_uid.end(), object_uid);
+    if (member == _members_uid.end())
+        return;
+
     if (_members_uid.size() == 1)
     {
         remove_group();
@@ -278,22 +283,14 @@ void selection_group::remove_member(unsigned int object_uid)
         return;
     }
 
-    for (auto it = _members_uid.begin(); it != _members_uid.end(); ++it)
+    if (auto const object = _world->get_model(object_uid))
     {
-        auto member_uid = *it;
-        std::optional<selection_type> obj = _world->get_model(member_uid);
-        if (!obj)
-            continue;
-        SceneObject* instance = std::get<SceneObject*>(obj.value());
-
-        if (instance->uid == object_uid)
-        {
-            _members_uid.erase(it);
-            instance->_grouped = false;
-            save_json();
-            return;
-        }
+        auto* const instance = std::get<SceneObject*>(*object);
+        instance->_grouped = false;
     }
+
+    _members_uid.erase(member);
+    save_json();
 }
 
 bool selection_group::contains_object(SceneObject* object)
@@ -385,20 +382,9 @@ void selection_group::recalcExtents()
             continue;
         }
 
-        // min = glm::min(min, point);
-        if (instance->getExtents()[0].x < _group_extents[0].x)
-            _group_extents[0].x = instance->getExtents()[0].x;
-        if (instance->getExtents()[0].y < _group_extents[0].y)
-            _group_extents[0].y = instance->getExtents()[0].y;
-        if (instance->getExtents()[0].z < _group_extents[0].z)
-            _group_extents[0].z = instance->getExtents()[0].z;
-
-        if (instance->getExtents()[1].x > _group_extents[1].x)
-            _group_extents[1].x = instance->getExtents()[1].x;
-        if (instance->getExtents()[1].y > _group_extents[1].y)
-            _group_extents[1].y = instance->getExtents()[1].y;
-        if (instance->getExtents()[1].z > _group_extents[1].z)
-            _group_extents[1].z = instance->getExtents()[1].z;
+        auto const instance_extents = instance->getExtents();
+        _group_extents[0] = glm::min(_group_extents[0], instance_extents[0]);
+        _group_extents[1] = glm::max(_group_extents[1], instance_extents[1]);
     }
 }
 

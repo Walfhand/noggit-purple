@@ -40,6 +40,7 @@ namespace Noggit::Ai
   {
     float distance = 0.0f;
     float height = 0.0f;
+    float side = 0.0f;
   };
 
   bool isSimpleProceduralArea(std::vector<ProceduralLayoutPoint> const& points);

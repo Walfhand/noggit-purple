@@ -938,6 +938,27 @@ namespace Noggit::Ai
     }
     auto const globally_reached = flood(boundary_seeds,
       [&](std::size_t index) { return walkable[index] != 0; });
+    auto perimeter_escape_triangles = std::size_t{0};
+    if (findFeature(layout, "arena_mountain_mass")
+        || findFeature(layout, "arena_perimeter_relief"))
+    {
+      for (std::size_t offset = 0; offset < cells; ++offset)
+      {
+        perimeter_escape_triangles += globally_reached[
+          triangleIndex(offset, 0, 0)] != 0;
+        perimeter_escape_triangles += globally_reached[
+          triangleIndex(cells - 1, offset, 1)] != 0;
+        perimeter_escape_triangles += globally_reached[
+          triangleIndex(offset, cells - 1, 2)] != 0;
+        perimeter_escape_triangles += globally_reached[
+          triangleIndex(0, offset, 3)] != 0;
+      }
+      if (perimeter_escape_triangles)
+        addIssue(report, "navigation.perimeter_escape",
+          "la composante jouable atteint "
+            + std::to_string(perimeter_escape_triangles)
+            + " triangles du bord malgré la chaîne montagneuse");
+    }
 
     auto const* semantics = blueprint.contains("moba_semantics")
       && blueprint.at("moba_semantics").is_object()
@@ -3156,6 +3177,7 @@ namespace Noggit::Ai
       {"geometry_symmetry_error", geometry_symmetry_error},
       {"rotation_mismatch_ratio", symmetry_mismatch},
       {"maximum_rotation_mismatch_ratio", maximum_rotation_mismatch},
+      {"perimeter_escape_triangles", perimeter_escape_triangles},
       {"enclosed_components", enclosed_components},
       {"enclosed_triangles", enclosed_triangles},
       {"camps", std::move(camp_metrics)},

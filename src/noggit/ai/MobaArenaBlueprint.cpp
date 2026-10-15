@@ -14,6 +14,7 @@
 #include <cmath>
 #include <initializer_list>
 #include <map>
+#include <numbers>
 #include <optional>
 #include <set>
 #include <stdexcept>
@@ -205,16 +206,30 @@ namespace Noggit::Ai
           if (inverse)
             features.erase(std::remove_if(features.begin(), features.end(),
               [](nlohmann::json const& value)
-              { return value.at("name") == "arena_perimeter_relief"; }),
+              {
+                auto const& name
+                  = value.at("name").get_ref<std::string const&>();
+                return name == "arena_mountain_mass"
+                  || name == "arena_perimeter_relief";
+              }),
               features.end());
           for (auto& value : features)
           {
             auto const& feature_name
               = value.at("name").get_ref<std::string const&>();
-            if (feature_name == "arena_ground") continue;
-            fitPoints(value.at("points"), scale, inverse);
+            if (feature_name != "arena_ground")
+              fitPoints(value.at("points"), scale, inverse);
             fitWidth(value, "half_width_ratio", 0.0, scale, inverse);
             fitWidth(value, "transition_width_ratio", 0.0, scale, inverse);
+            if (feature_name == "top_lane" || feature_name == "bottom_lane")
+              value["half_width_ratio"] = value.at("half_width_ratio").get<double>()
+                * (inverse ? .8 : 1.25);
+            if (feature_name == "arena_ground")
+            {
+              value["roughness_amplitude"] = inverse ? 2.0 : 0.0;
+              if (inverse) value["transition_width_ratio"] = .02;
+              value["priority"] = 5;
+            }
             if (feature_name == "objective_north"
                 || feature_name == "objective_south")
               value["priority"] = inverse ? 70 : 91;
@@ -288,7 +303,7 @@ namespace Noggit::Ai
         "tileset/expansion07/zuldazarzone/8zul_moss01_512.blp",
         "tileset/expansion07/zuldazarzone/8zul_tile01_512.blp",
         "tileset/expansion07/zuldazarzone/8zul_redjunglefloor_1024.blp",
-        "tileset/expansion07/zuldazarzone/8zul_rock01_1024.blp"
+        "tileset/expansion02/dragonblight/ig_rockjaggeda.blp"
       })},
       {"liquid_type_id", 1},
       {"ground_effect_texture_id", 0},
@@ -1089,10 +1104,11 @@ namespace Noggit::Ai
     raiseLaneEnds(bottom);
 
     auto terrain_features = nlohmann::json::array();
+    constexpr auto arena_ground_roughness = 2.0;
     terrain_features.push_back(feature("arena_ground", "area",
       nlohmann::json::array({point(0, 0, base), point(1, 0, base),
         point(1, 1, base), point(0, 1, base)}),
-      .005, .02, 0, 5, "absolute", 2.0, .85));
+      .005, .02, 0, 5, "absolute", arena_ground_roughness, .85));
     for (std::size_t i = 0; i < wall_polygons.size(); ++i)
       terrain_features.push_back(feature(
         "jungle_" + std::to_string(i + 1) + "_wall_mass", "area",
@@ -1228,7 +1244,8 @@ namespace Noggit::Ai
           {"name", "jungle_" + std::to_string(i + 1) + "_" + role.role},
           {"role", role.role}, {"points", points}, {"density_per_tile", density},
           {"min_spacing_ratio", role.spacing}, {"min_height", base - 40},
-          {"max_height", base + 60}, {"min_slope_degrees", role.min_slope},
+          {"max_height", std::min(5000.0, base + 60)},
+          {"min_slope_degrees", role.min_slope},
           {"max_slope_degrees", role.max_slope}, {"cluster_scale", role.clusters},
           {"cluster_strength", role.strength}});
       }
@@ -1592,9 +1609,11 @@ namespace Noggit::Ai
         {"doors", cut.doors}
       });
 
+    constexpr auto terrain_max_slope_degrees = 56.0;
     nlohmann::json terrain = {{"texture_paths", textures}, {"steep_texture_layer", 3},
-      {"slope_start_degrees", 18}, {"slope_full_degrees", 34},
-      {"edge_noise_ratio", 0.0}, {"max_slope_degrees", 56},
+      {"slope_start_degrees", 28}, {"slope_full_degrees", 62},
+      {"edge_noise_ratio", 0.0},
+      {"max_slope_degrees", terrain_max_slope_degrees},
       {"smoothing_strength", .4}, {"features", std::move(terrain_features)}};
     // The water polygon stops on the submerged bank slope, where roughly one
     // third of the water column remains, so shore cells are shallow and the
@@ -1661,51 +1680,104 @@ namespace Noggit::Ai
       auto& fitted_features
         = blueprint["next_calls"][1]["arguments"]["features"];
       auto const margin = (1.0 - arena_scale) * .5;
-      constexpr auto mountain_width_variation = .6;
-      auto const mountain_half_width
-        = std::clamp(margin * .018, .00125, .006);
-      auto const mountain_transition
-        = std::clamp(margin * .09, .00025, .03);
-      auto const mountain_clearance = std::min(.005, margin * .02);
-      auto const mountain_inset = std::max(0.0,
-        margin - mountain_half_width * (1.0 + mountain_width_variation)
-          - mountain_transition - mountain_clearance);
-      auto const mountain_outer = 1.0 - mountain_inset;
-      auto const mountain_jag = std::min(.04, mountain_inset);
-      auto const mountain_shoulder = std::min(.07, arena_scale * .22);
-      auto const mountain_base_height
-        = base + std::max(42.0, relief_rise * 3.0);
-      auto const perimeter_height = mountain_base_height + 34.0;
-      fitted_features.insert(fitted_features.begin(), feature(
-        "arena_perimeter_relief", "corridor",
-        nlohmann::json::array({
-          point(mountain_inset - mountain_jag, mountain_inset,
-                mountain_base_height),
-          point(.5 - mountain_shoulder,
-                mountain_inset - .9 * mountain_jag,
-                mountain_base_height + 24.0),
-          point(mountain_outer,
-                mountain_inset - .65 * mountain_jag,
-                mountain_base_height + 8.0),
-          point(mountain_outer + mountain_jag, .5 - mountain_shoulder,
-                mountain_base_height + 34.0),
-          point(mountain_outer + mountain_jag, mountain_outer,
-                mountain_base_height),
-          point(.5 + mountain_shoulder,
-                mountain_outer + .9 * mountain_jag,
-                mountain_base_height + 24.0),
-          point(mountain_inset,
-                mountain_outer + .65 * mountain_jag,
-                mountain_base_height + 8.0),
-          point(mountain_inset - mountain_jag, .5 + mountain_shoulder,
-                mountain_base_height + 34.0),
-          point(mountain_inset - mountain_jag, mountain_inset,
-                mountain_base_height)}),
-        mountain_half_width, mountain_transition, 0, 10, "absolute",
-        std::clamp(roughness * 3.2, 14.0, 18.0), 1.0,
-        mountain_width_variation));
-
+      for (auto& value : fitted_features)
+        if (value.at("name") == "arena_ground")
+        {
+          value["transition_width_ratio"]
+            = std::clamp(margin * .30, .004, .11);
+        }
       constexpr auto tile_size = 1600.0 / 3.0;
+      constexpr auto mountain_width_variation = .55;
+      constexpr auto mountain_rise = 130.0;
+      constexpr auto mountain_roughness = 100.0;
+      auto const mountain_available_rise = std::max(0.0, 5000.0 - base);
+      auto perimeter_height = base;
+      if (margin >= .01 && mountain_available_rise > 0.0)
+      {
+        auto const desired_mountain_rise
+          = mountain_rise + mountain_roughness;
+        auto const mountain_scale = std::min({
+          1.0,
+          mountain_available_rise / desired_mountain_rise,
+          margin / .12
+        });
+        auto const mountainHeight = [&](double rise)
+        {
+          return std::min(5000.0, base + rise * mountain_scale);
+        };
+        auto mountainArc = [&](double center_angle, double radius,
+                               double irregularity, std::string const& name)
+        {
+          constexpr auto arc_span = 220.0 * std::numbers::pi / 180.0;
+          auto points = nlohmann::json::array();
+          for (auto index = 0; index <= 16; ++index)
+          {
+            auto const along = static_cast<double>(index) / 16.0;
+            auto const angle = center_angle - arc_span * .5
+              + arc_span * along;
+            auto const cosine = std::cos(angle);
+            auto const sine = std::sin(angle);
+            auto const loop_x = .5f + .24f * static_cast<float>(cosine);
+            auto const loop_z = .5f + .24f * static_cast<float>(sine);
+            auto radius_noise = std::clamp(
+              static_cast<double>(proceduralEdgeNoise(
+                loop_x, loop_z, name + ":centerline")),
+              -1.0, 1.0);
+            auto const point_radius = radius + irregularity * radius_noise;
+            auto const tangent_noise = std::clamp(
+              static_cast<double>(proceduralEdgeNoise(
+                loop_x + 7.7f, loop_z - 11.3f, name + ":tangent")),
+              -1.0, 1.0);
+            auto const squircle_x
+              = std::copysign(std::sqrt(std::abs(cosine)), cosine);
+            auto const squircle_z
+              = std::copysign(std::sqrt(std::abs(sine)), sine);
+            auto const shape_x = .45 * cosine + .55 * squircle_x;
+            auto const shape_z = .45 * sine + .55 * squircle_z;
+            points.push_back(point(
+              .5 + shape_x * point_radius
+                - sine * irregularity * .45 * tangent_noise,
+              .5 + shape_z * point_radius
+                + cosine * irregularity * .45 * tangent_noise,
+              mountainHeight(mountain_rise)));
+          }
+          return points;
+        };
+
+        auto const mountain_half_width = std::clamp(
+          margin * .075, .022, .032);
+        auto const mountain_transition = std::clamp(
+          margin * .30, .08, .12);
+        auto const mountain_clearance = std::clamp(
+          margin * .275, .005, .095);
+        auto const mountain_radius = arena_scale * .5
+          + mountain_clearance;
+        auto const mountain_irregularity = std::min(
+          .015, margin * .045);
+        auto const first_mountain_arc = mountainArc(
+          std::numbers::pi * .25, mountain_radius,
+          mountain_irregularity, "arena_mountain_chain");
+        auto second_mountain_arc = nlohmann::json::array();
+        for (auto const& mountain_point : first_mountain_arc)
+          second_mountain_arc.push_back(point(
+            1.0 - mountain_point.at("u").get<double>(),
+            1.0 - mountain_point.at("v").get<double>(),
+            mountain_point.at("height").get<double>()));
+        fitted_features.insert(fitted_features.begin(), feature(
+          "arena_mountain_mass", "corridor",
+          first_mountain_arc,
+          mountain_half_width, mountain_transition, 3, 6, "absolute",
+          mountain_roughness * mountain_scale, .55,
+          mountain_width_variation));
+        fitted_features.insert(fitted_features.begin(), feature(
+          "arena_perimeter_relief", "corridor",
+          std::move(second_mountain_arc),
+          mountain_half_width, mountain_transition, 3, 7, "absolute",
+          mountain_roughness * mountain_scale, .55,
+          mountain_width_variation));
+        perimeter_height = mountainHeight(desired_mountain_rise);
+      }
+
       constexpr auto wow_run_speed = 7.0;
       auto const playable_side = arena_scale
         * static_cast<double>(footprint_side_tiles) * tile_size;

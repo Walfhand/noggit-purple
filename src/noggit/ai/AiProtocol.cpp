@@ -314,7 +314,7 @@ namespace Noggit::Ai
         }},
         {"points", {
           {"type", "array"},
-          {"description", "Pour corridor : un point crée une plateforme, plusieurs tracent le chemin. Pour area : 3 à 16 sommets simples avec la même hauteur."},
+          {"description", "Pour corridor : 1 à 16 points tracent le chemin. Pour area : 3 à 16 sommets simples avec la même hauteur."},
           {"items", std::move(layout_point_parameters)},
           {"minItems", 1},
           {"maxItems", 16}
@@ -390,7 +390,7 @@ namespace Noggit::Ai
         }},
         {"features", {
           {"type", "array"},
-          {"description", "Formes aux noms ASCII uniques, avec au plus 256 segments au total."},
+          {"description", "Formes aux noms ASCII uniques, avec au plus 544 segments au total."},
           {"items", std::move(layout_feature_parameters)},
           {"minItems", 1},
           {"maxItems", 32}

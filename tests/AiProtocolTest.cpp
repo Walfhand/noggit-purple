@@ -164,7 +164,9 @@ int main()
             && layout_properties.at("texture_paths").at("maxItems") == 16,
           "terrain layout texture count changed");
   require(layout_properties.at("features").at("minItems") == 1
-            && layout_properties.at("features").at("maxItems") == 32,
+            && layout_properties.at("features").at("maxItems") == 32
+            && layout_properties.at("features").at("items").at("properties")
+                 .at("points").at("maxItems") == 16,
           "terrain layout feature count changed");
   require(layout_properties.at("steep_texture_layer").at("type")
             == nlohmann::json::array({"integer", "null"})

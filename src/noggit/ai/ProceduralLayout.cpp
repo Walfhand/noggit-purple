@@ -17,8 +17,8 @@ namespace Noggit::Ai
 {
   namespace
   {
-    constexpr std::size_t max_points_per_feature = 16;
-    constexpr std::size_t max_total_segments = 520;
+    constexpr std::size_t max_points_per_feature = 17;
+    constexpr std::size_t max_total_segments = 544;
     constexpr float minimum_layout_height = -500.0f;
     constexpr float maximum_layout_height = 5000.0f;
 
@@ -248,6 +248,33 @@ namespace Noggit::Ai
         + 0.28f * valueNoise(x * 27.0f, z * 27.0f, seed ^ 0x9e3779b9U);
     }
 
+    float terrainRidgeRoughness(float x, float z, std::string const& name)
+    {
+      auto const seed = stableHash(name);
+      auto const source_x = x;
+      auto const source_z = z;
+      x += 0.075f * valueNoise(
+        source_x * 1.6f, source_z * 1.6f, seed ^ 0x68bc21ebU);
+      z += 0.075f * valueNoise(
+        source_x * 1.6f + 19.1f, source_z * 1.6f - 7.3f,
+        seed ^ 0x02e5be93U);
+      auto const ridged = [](float noise)
+      {
+        auto const ridge = 1.0f - std::abs(noise);
+        return ridge * ridge;
+      };
+      auto const primary = ridged(valueNoise(
+        x * 7.5f, z * 7.5f, seed ^ 0x9e3779b9U));
+      auto const detail = ridged(valueNoise(
+        x * 19.0f, z * 19.0f, seed ^ 0xa511e9b3U));
+      auto const macro = valueNoise(
+        x * 2.7f, z * 2.7f, seed ^ 0x51ed270bU);
+      return std::clamp(
+        2.4f * std::pow(primary, 1.35f) * (.42f + .58f * detail)
+          + .20f * macro - 1.05f,
+        -1.0f, 1.0f);
+    }
+
     ProceduralShapeDistance distanceToShapeImpl(
       std::vector<ProceduralLayoutPoint> const& points,
       ProceduralLayoutShape shape,
@@ -299,6 +326,10 @@ namespace Noggit::Ai
         {
           result.distance = distance;
           result.height = first.height + (second.height - first.height) * projection;
+          result.side = length_squared > 0.0f
+            ? (dx * (sample_z - nearest_z) - dz * (sample_x - nearest_x))
+                / std::sqrt(length_squared)
+            : 0.0f;
         }
       }
 
@@ -525,7 +556,7 @@ namespace Noggit::Ai
     if (!features.is_array() || features.empty()
         || features.size() > procedural_layout_max_features)
     {
-      return fail("features doit contenir entre une et 64 formes.");
+      return fail("features doit contenir entre une et 96 formes.");
     }
 
     std::set<std::string> unique_names;
@@ -550,7 +581,7 @@ namespace Noggit::Ai
       if (!name_value.is_string() || !points.is_array()
           || points.empty() || points.size() > max_points_per_feature)
       {
-        return fail("Chaque feature doit avoir un nom et entre un et 16 points.");
+        return fail("Chaque feature doit avoir un nom et entre un et 17 points.");
       }
 
       ProceduralLayoutFeature feature;
@@ -586,7 +617,8 @@ namespace Noggit::Ai
       {
         return fail("height_mode doit valoir absolute ou offset.");
       }
-      if (feature.shape == ProceduralLayoutShape::Area && points.size() < 3)
+      if (feature.shape == ProceduralLayoutShape::Area
+          && (points.size() < 3 || points.size() > 16))
       {
         return fail("Une area exige entre trois et 16 points.");
       }
@@ -603,7 +635,7 @@ namespace Noggit::Ai
         ? points.size() : points.size() - 1;
       if (total_segments > max_total_segments)
       {
-        return fail("Le layout ne peut pas dépasser 520 segments au total.");
+        return fail("Le layout ne peut pas dépasser 544 segments au total.");
       }
       for (auto const& point_value : points)
       {
@@ -754,6 +786,7 @@ namespace Noggit::Ai
 
     auto const feature_count = std::min(
       layout.features.size(), procedural_layout_max_features);
+    static auto const mountain_noise_name = std::string{"arena_mountain_chain"};
     constexpr float degrees_to_radians_gradient = 0.017453292519943295f;
     auto const slope_widening_gradient = layout.max_slope_degrees
         && std::isfinite(*layout.max_slope_degrees)
@@ -768,6 +801,13 @@ namespace Noggit::Ai
     for (std::size_t index = 0; index < feature_count; ++index)
     {
       auto const& feature = layout.features[index];
+      auto const mountain_arc = feature.name == "arena_mountain_mass"
+        || feature.name == "arena_perimeter_relief";
+      auto const& noise_name = mountain_arc
+        ? mountain_noise_name : feature.name;
+      auto const edge_noise_ratio = mountain_arc
+        ? std::max(layout.edge_noise_ratio, .012f)
+        : layout.edge_noise_ratio;
       if (feature.points.empty())
       {
         continue;
@@ -787,7 +827,7 @@ namespace Noggit::Ai
         }
         auto const reach = feature.half_width_ratio
             * (1.0f + feature.width_variation_ratio)
-          + transition_bound + layout.edge_noise_ratio;
+          + transition_bound + edge_noise_ratio;
         auto const outside_x = std::max({feature.min_u * scale_x - sample_x,
                                          sample_x - feature.max_u * scale_x,
                                          0.0f});
@@ -807,20 +847,32 @@ namespace Noggit::Ai
           && feature.width_variation_ratio > 0.0f)
       {
         half_width *= 1.0f + feature.width_variation_ratio
-          * proceduralEdgeNoise(sample_x, sample_z, feature.name + ":width");
+          * proceduralEdgeNoise(sample_x, sample_z, noise_name + ":width");
       }
       auto const roughness = feature.roughness_amplitude
-        * terrainRoughness(sample_x, sample_z, feature.name);
+        * (mountain_arc
+            ? terrainRidgeRoughness(sample_x, sample_z, noise_name)
+            : terrainRoughness(sample_x, sample_z, noise_name));
+      auto const mountain_peak_factor = mountain_arc
+          && feature.roughness_amplitude > 0.0f
+        ? std::clamp(
+            .5f + .5f * roughness / feature.roughness_amplitude,
+            0.0f, 1.0f)
+        : .5f;
       auto const target_height = feature.height_mode == ProceduralLayoutHeightMode::Offset
         ? std::clamp(sample.height + nearest.height + roughness,
                      minimum_layout_height, maximum_layout_height)
         : std::clamp(nearest.height + roughness,
                      minimum_layout_height, maximum_layout_height);
       auto transition_width = feature.transition_width_ratio;
+      if (mountain_arc && nearest.side > 0.0f)
+      {
+        transition_width *= .70f - .55f * mountain_peak_factor;
+      }
       // ponytail: analytic widening bounds the generated transition on a flat
       // source; use a global vertex graph only if arbitrary source slopes need
       // a hard guarantee.
-      if (layout.max_slope_degrees
+      if (!mountain_arc && layout.max_slope_degrees
           && std::isfinite(*layout.max_slope_degrees)
           && *layout.max_slope_degrees >= 5.0f
           && *layout.max_slope_degrees <= 89.0f)
@@ -833,14 +885,14 @@ namespace Noggit::Ai
           / (maximum_gradient * minimum_dimension);
         transition_width = std::max(transition_width, minimum_transition);
       }
-      if (layout.edge_noise_ratio > 0.0f)
+      if (edge_noise_ratio > 0.0f)
       {
         auto const amplitude = std::min(
-          layout.edge_noise_ratio, half_width * 0.75f);
+          edge_noise_ratio, half_width * 0.75f);
         if (distance <= half_width + transition_width + amplitude)
         {
           distance += amplitude
-            * proceduralEdgeNoise(sample_x, sample_z, feature.name);
+            * proceduralEdgeNoise(sample_x, sample_z, noise_name);
         }
       }
       auto const mask = proceduralShapeMask(
@@ -851,10 +903,21 @@ namespace Noggit::Ai
         continue;
       }
 
+      auto applied_target_height = target_height;
+      if (mountain_arc)
+      {
+        applied_target_height = std::clamp(
+          nearest.height + roughness * mask,
+          minimum_layout_height, maximum_layout_height);
+      }
       // ponytail: transitions are one-shot; preserve source heights only if
       // repeatable layout reapplication becomes a real editing workflow.
-      sample.height += (target_height - sample.height) * mask;
+      sample.height += (applied_target_height - sample.height) * mask;
       auto texture_mask = mask;
+      if (mountain_arc)
+      {
+        texture_mask *= .20f + .80f * mountain_peak_factor;
+      }
       if (feature.texture_strength < 1.0f)
       {
         auto const variation = 0.85f + 0.15f

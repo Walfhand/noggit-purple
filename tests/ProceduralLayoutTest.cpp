@@ -291,17 +291,33 @@ int main()
 
   auto too_many_points = validArguments();
   auto& oversized_points = too_many_points["features"][0]["points"];
-  while (oversized_points.size() < 17)
+  while (oversized_points.size() < 18)
   {
     auto const index = oversized_points.size();
     oversized_points.push_back({
-      {"u", static_cast<double>(index) / 16.0},
+      {"u", static_cast<double>(index) / 17.0},
       {"v", 0.4},
       {"height", 10.0}
     });
   }
   require(!Noggit::Ai::parseProceduralLayout(too_many_points).layout,
-          "feature with more than 16 points was accepted");
+          "feature with more than 17 points was accepted");
+
+  auto too_many_area_points = validArguments();
+  auto& area_points = too_many_area_points["features"][0]["points"];
+  too_many_area_points["features"][0]["shape"] = "area";
+  area_points = nlohmann::json::array();
+  for (auto point = 0; point < 17; ++point)
+  {
+    auto const angle = static_cast<double>(point) * 6.283185307179586 / 17.0;
+    area_points.push_back({
+      {"u", .5 + .4 * std::cos(angle)},
+      {"v", .5 + .4 * std::sin(angle)},
+      {"height", 10.0}
+    });
+  }
+  require(!Noggit::Ai::parseProceduralLayout(too_many_area_points).layout,
+          "area with more than 16 points was accepted");
 
   auto too_many_segments = validArguments();
   too_many_segments["features"] = nlohmann::json::array();
@@ -310,10 +326,10 @@ int main()
     auto feature = validArguments()["features"][0];
     feature["name"] = "oversized_" + std::to_string(feature_index);
     feature["points"] = nlohmann::json::array();
-    for (int point = 0; point < 16; ++point)
+    for (int point = 0; point < 17; ++point)
     {
       feature["points"].push_back({
-        {"u", static_cast<double>(point) / 15.0},
+        {"u", static_cast<double>(point) / 16.0},
         {"v", static_cast<double>(feature_index) / 35.0},
         {"height", 10.0}
       });
@@ -321,24 +337,20 @@ int main()
     too_many_segments["features"].push_back(std::move(feature));
   }
   auto segment_limit = too_many_segments;
-  segment_limit["features"].erase(segment_limit["features"].end() - 1);
+  segment_limit["features"].erase(
+    segment_limit["features"].end() - 1, segment_limit["features"].end());
+  require(Noggit::Ai::parseProceduralLayout(segment_limit).layout.has_value(),
+          "layout with 544 segments was rejected");
+  auto over_segment_limit = segment_limit;
   auto limit_tail = validArguments()["features"][0];
   limit_tail["name"] = "limit_tail";
-  limit_tail["points"] = nlohmann::json::array();
-  for (int point = 0; point < 11; ++point)
-    limit_tail["points"].push_back({
-      {"u", static_cast<double>(point) / 10.0},
-      {"v", .99},
-      {"height", 10.0}
-    });
-  segment_limit["features"].push_back(std::move(limit_tail));
-  require(Noggit::Ai::parseProceduralLayout(segment_limit).layout.has_value(),
-          "layout with 520 segments was rejected");
-  segment_limit["features"].back()["points"].push_back({
-    {"u", .5}, {"v", .98}, {"height", 10.0}
+  limit_tail["points"] = nlohmann::json::array({
+    {{"u", 0.0}, {"v", .99}, {"height", 10.0}},
+    {{"u", 1.0}, {"v", .99}, {"height", 10.0}}
   });
-  require(!Noggit::Ai::parseProceduralLayout(segment_limit).layout,
-          "layout with more than 520 segments was accepted");
+  over_segment_limit["features"].push_back(std::move(limit_tail));
+  require(!Noggit::Ai::parseProceduralLayout(over_segment_limit).layout,
+          "layout with more than 544 segments was accepted");
   require(!Noggit::Ai::parseProceduralLayout(too_many_segments).layout,
           "oversized layout segment count was accepted");
 
@@ -476,6 +488,49 @@ int main()
                  0.0f, 100.0f, 100.0f).height,
                20.0f,
                "feature roughness leaked outside its area");
+
+  auto ridge_layout = baseLayout();
+  auto ridge = platform(
+    "arena_perimeter_relief", 0.1f, 0.5f, 120.0f,
+    0.01f, 0.03f, 1, 10);
+  ridge.points.push_back({0.9f, 0.5f, 120.0f});
+  ridge.roughness_amplitude = 40.0f;
+  ridge_layout.features.push_back(std::move(ridge));
+  std::vector<float> ridge_profile;
+  ridge_profile.reserve(513);
+  for (auto sample = 0; sample <= 512; ++sample)
+  {
+    ridge_profile.push_back(Noggit::Ai::sampleProceduralLayout(
+      ridge_layout, .1f + .8f * static_cast<float>(sample) / 512.0f,
+      .5f, 20.0f, 0.0f, 1000.0f, 1000.0f).height);
+  }
+  auto ridge_peaks = 0;
+  auto ridge_curvature = 0.0f;
+  for (std::size_t sample = 1; sample + 1 < ridge_profile.size(); ++sample)
+  {
+    ridge_peaks += ridge_profile[sample] > ridge_profile[sample - 1]
+      && ridge_profile[sample] >= ridge_profile[sample + 1];
+    ridge_curvature = std::max(ridge_curvature, std::abs(
+      ridge_profile[sample - 1] - 2.0f * ridge_profile[sample]
+        + ridge_profile[sample + 1]));
+  }
+  require(ridge_peaks >= 6 && ridge_peaks <= 12 && ridge_curvature >= 1.0f,
+          "the mountain profile must keep sharp peaks without sawtooth repetition");
+
+  auto asymmetric_mountain = baseLayout();
+  auto mountain_arc = platform(
+    "arena_mountain_mass", 0.2f, 0.5f, 120.0f,
+    0.02f, 0.2f, 1, 10);
+  mountain_arc.points.push_back({0.8f, 0.5f, 120.0f});
+  asymmetric_mountain.features.push_back(mountain_arc);
+  auto const outside_face = Noggit::Ai::sampleProceduralLayout(
+    asymmetric_mountain, 0.5f, 0.35f, 20.0f,
+    0.0f, 1000.0f, 1000.0f);
+  auto const inside_face = Noggit::Ai::sampleProceduralLayout(
+    asymmetric_mountain, 0.5f, 0.65f, 20.0f,
+    0.0f, 1000.0f, 1000.0f);
+  require(outside_face.height > 20.0f && inside_face.height == 20.0f,
+          "a mountain arc no longer has a broad outside and a short inside face");
 
   auto bounded_offset = area_layout;
   for (auto& point : bounded_offset.features.front().points)

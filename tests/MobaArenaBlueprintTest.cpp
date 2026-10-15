@@ -33,10 +33,11 @@ namespace
     if (!condition) throw std::runtime_error(message);
   }
 
-  void requireAudit(Noggit::Ai::MobaArenaAuditReport const& audit)
+  void requireAudit(
+    Noggit::Ai::MobaArenaAuditReport const& audit,
+    std::filesystem::path const& artifacts = NOGGIT_TEST_ARTIFACT_DIR)
   {
     if (audit.ok()) return;
-    auto const artifacts = std::filesystem::path{NOGGIT_TEST_ARTIFACT_DIR};
     std::filesystem::create_directories(artifacts);
     lodepng::encode((artifacts / "moba-arena-structural.actual.png").string(),
                     audit.preview_rgba, audit.preview_width, audit.preview_height);
@@ -48,6 +49,153 @@ namespace
       message += ": " + issue.message;
     }
     throw std::runtime_error(message);
+  }
+
+  void writeMountainPreview(
+    Noggit::Ai::ProceduralLayout const& layout,
+    std::filesystem::path const& path,
+    float base_height,
+    float world_size)
+  {
+    constexpr unsigned size = 384;
+    constexpr unsigned width = size * 3;
+    auto const spacing = world_size / 512.0f;
+    std::vector<float> heights(size * size);
+    for (unsigned y = 0; y < size; ++y)
+      for (unsigned x = 0; x < size; ++x)
+        heights[y * size + x]
+          = Noggit::Ai::sampleSmoothedProceduralLayoutHeight(
+              layout,
+              (static_cast<float>(x) + .5f) / static_cast<float>(size),
+              (static_cast<float>(y) + .5f) / static_cast<float>(size),
+              base_height, world_size, world_size, spacing);
+
+    constexpr std::array<std::array<float, 3>, 4> colors{{
+      {{48.0f, 75.0f, 39.0f}},
+      {{93.0f, 88.0f, 70.0f}},
+      {{83.0f, 60.0f, 43.0f}},
+      {{111.0f, 113.0f, 110.0f}}
+    }};
+    constexpr std::array<float, 3> light{{-.48f, .76f, -.44f}};
+    auto const [minimum_height, maximum_height] = std::minmax_element(
+      heights.begin(), heights.end());
+    auto const height_range = std::max(1.0f, *maximum_height - *minimum_height);
+    std::vector<unsigned char> pixels(width * size * 4, 255);
+    std::vector<std::array<unsigned char, 3>> terrain_colors(size * size);
+    for (unsigned y = 0; y < size; ++y)
+      for (unsigned x = 0; x < size; ++x)
+      {
+        auto const pixel = (static_cast<std::size_t>(y) * width + x) * 4;
+        pixels[pixel] = static_cast<unsigned char>(10 + y * 12 / size);
+        pixels[pixel + 1] = static_cast<unsigned char>(17 + y * 16 / size);
+        pixels[pixel + 2] = static_cast<unsigned char>(22 + y * 20 / size);
+      }
+    auto heightAt = [&](int x, int y)
+    {
+      x = std::clamp(x, 0, static_cast<int>(size) - 1);
+      y = std::clamp(y, 0, static_cast<int>(size) - 1);
+      return heights[static_cast<std::size_t>(y) * size
+        + static_cast<std::size_t>(x)];
+    };
+    for (unsigned y = 0; y < size; ++y)
+      for (unsigned x = 0; x < size; ++x)
+      {
+        auto const gradient_x = (heightAt(x + 1, y) - heightAt(x - 1, y))
+          / (2.0f * spacing);
+        auto const gradient_z = (heightAt(x, y + 1) - heightAt(x, y - 1))
+          / (2.0f * spacing);
+        auto const normal_length
+          = std::sqrt(gradient_x * gradient_x + gradient_z * gradient_z + 1.0f);
+        auto const shade = std::clamp(
+          (-gradient_x * light[0] + light[1] - gradient_z * light[2])
+            / normal_length,
+          .08f, 1.0f);
+        auto const slope = std::atan(std::hypot(gradient_x, gradient_z))
+          * 180.0f / static_cast<float>(std::numbers::pi);
+        auto const sample = Noggit::Ai::sampleProceduralLayout(
+          layout,
+          (static_cast<float>(x) + .5f) / static_cast<float>(size),
+          (static_cast<float>(y) + .5f) / static_cast<float>(size),
+          base_height, slope, world_size, world_size);
+        std::array<float, 3> color{};
+        for (std::size_t layer = 0; layer < colors.size(); ++layer)
+          for (std::size_t channel = 0; channel < color.size(); ++channel)
+            color[channel] += colors[layer][channel]
+              * static_cast<float>(sample.quantized_weights[layer]) / 255.0f;
+        auto const pixel
+          = (static_cast<std::size_t>(y) * width + x + size) * 4;
+        auto& terrain_color
+          = terrain_colors[static_cast<std::size_t>(y) * size + x];
+        for (std::size_t channel = 0; channel < color.size(); ++channel)
+        {
+          terrain_color[channel] = static_cast<unsigned char>(std::clamp(
+            color[channel] * (.38f + .62f * shade), 0.0f, 255.0f));
+          pixels[pixel + channel] = terrain_color[channel];
+        }
+
+        auto const elevation = std::clamp(
+          (heights[static_cast<std::size_t>(y) * size + x] - *minimum_height)
+            / height_range,
+          0.0f, 1.0f);
+        auto const contour = std::fmod(
+          std::max(0.0f,
+            heights[static_cast<std::size_t>(y) * size + x] - base_height),
+          20.0f) < 1.5f ? .58f : 1.0f;
+        std::array<float, 3> elevation_color{
+          37.0f + 122.0f * elevation,
+          70.0f + 86.0f * elevation,
+          35.0f + 121.0f * elevation
+        };
+        auto const elevation_pixel
+          = (static_cast<std::size_t>(y) * width + x + size * 2) * 4;
+        for (std::size_t channel = 0;
+             channel < elevation_color.size(); ++channel)
+          pixels[elevation_pixel + channel] = static_cast<unsigned char>(
+            elevation_color[channel] * contour);
+      }
+
+    std::vector<float> depth_buffer(
+      static_cast<std::size_t>(size) * size,
+      std::numeric_limits<float>::lowest());
+    for (unsigned y = 0; y < size; ++y)
+      for (unsigned x = 0; x < size; ++x)
+      {
+        auto const height = heights[static_cast<std::size_t>(y) * size + x];
+        auto const height_delta = height - base_height;
+        auto const screen_x = static_cast<int>(size / 2)
+          + static_cast<int>((static_cast<float>(x) - static_cast<float>(y))
+                             * .38f);
+        auto const screen_y = static_cast<int>(150.0f
+          + (static_cast<float>(x) + static_cast<float>(y)) * .22f
+          - height_delta * .55f);
+        auto const depth = static_cast<float>(x + y) + height_delta * .6f;
+        auto const& color
+          = terrain_colors[static_cast<std::size_t>(y) * size + x];
+        for (auto offset_y = -3; offset_y <= 3; ++offset_y)
+          for (auto offset_x = -3; offset_x <= 3; ++offset_x)
+          {
+            auto const projected_x = screen_x + offset_x;
+            auto const projected_y = screen_y + offset_y;
+            if (projected_x < 0 || projected_y < 0
+                || projected_x >= static_cast<int>(size)
+                || projected_y >= static_cast<int>(size))
+              continue;
+            auto const projected = static_cast<std::size_t>(projected_y) * size
+              + static_cast<std::size_t>(projected_x);
+            if (depth <= depth_buffer[projected]) continue;
+            depth_buffer[projected] = depth;
+            auto const pixel = (static_cast<std::size_t>(projected_y) * width
+                                + static_cast<std::size_t>(projected_x)) * 4;
+            for (std::size_t channel = 0; channel < color.size(); ++channel)
+              pixels[pixel + channel] = color[channel];
+          }
+      }
+
+    std::filesystem::create_directories(path.parent_path());
+    auto const error = lodepng::encode(path.string(), pixels, width, size);
+    if (error)
+      throw std::runtime_error("cannot write MOBA mountain preview: "
+        + std::string{lodepng_error_text(error)});
   }
 
   void verifyGolden(Noggit::Ai::MobaArenaAuditReport const& audit, bool update)
@@ -354,10 +502,15 @@ namespace
 int main(int argc, char** argv)
 {
   auto const update_golden = argc == 2 && std::string_view{argv[1]} == "--update-golden";
-  auto const dump_audit = argc == 2 && std::string_view{argv[1]} == "--dump-audit";
-  if (argc > 2 || (argc == 2 && !update_golden && !dump_audit))
+  auto const dump_audit = (argc == 2 || argc == 3)
+    && std::string_view{argv[1]} == "--dump-audit";
+  if (argc > 3 || (argc >= 2 && !update_golden && !dump_audit))
     throw std::runtime_error(
-      "usage: noggit-moba-arena-blueprint-test [--update-golden|--dump-audit]");
+      "usage: noggit-moba-arena-blueprint-test "
+      "[--update-golden|--dump-audit [output-directory]]");
+  auto const dump_artifacts = dump_audit && argc == 3
+    ? std::filesystem::path{argv[2]}
+    : std::filesystem::temp_directory_path() / "noggit-moba-audit";
   auto footprint = [](std::size_t width, std::size_t height)
   {
     std::vector<std::pair<std::size_t, std::size_t>> tiles;
@@ -384,15 +537,15 @@ int main(int argc, char** argv)
 
   auto const spec = specification();
   auto const& texture_paths = spec.at("texture_paths");
-  require(std::all_of(texture_paths.begin(), texture_paths.end(),
+  require(std::all_of(texture_paths.begin(), texture_paths.begin() + 3,
           [](nlohmann::json const& path)
           {
             return path.get_ref<std::string const&>()
               .starts_with("tileset/expansion07/");
           })
             && texture_paths.at(3)
-              == "tileset/expansion07/zuldazarzone/8zul_rock01_1024.blp",
-          "the default MOBA terrain textures must be WotLK-compatible");
+              == "tileset/expansion02/dragonblight/ig_rockjaggeda.blp",
+          "the default MOBA rock texture must resolve in WotLK");
   require(spec.at("skybox_path")
               == "environments/stars/legionnexus_netherskybox01.m2"
             && spec.at("skybox_flags") == 0,
@@ -405,12 +558,10 @@ int main(int argc, char** argv)
   if (dump_audit)
   {
     auto const audit = Noggit::Ai::auditMobaArenaBlueprint(first, 4);
-    requireAudit(audit);
-    verifyReferenceSimilarity(audit);
-    auto const artifacts = std::filesystem::path{NOGGIT_TEST_ARTIFACT_DIR};
-    std::filesystem::create_directories(artifacts);
+    requireAudit(audit, dump_artifacts);
+    std::filesystem::create_directories(dump_artifacts);
     auto const write_error = lodepng::encode(
-      (artifacts / "moba-arena-semantic.actual.png").string(),
+      (dump_artifacts / "moba-arena-semantic.actual.png").string(),
       audit.preview_rgba, audit.preview_width, audit.preview_height);
     if (write_error)
       throw std::runtime_error("cannot write MOBA audit preview");
@@ -419,13 +570,11 @@ int main(int argc, char** argv)
     auto const compact_audit
       = Noggit::Ai::auditMobaArenaBlueprint(compact, 2);
     auto const compact_write_error = lodepng::encode(
-      (artifacts / "moba-arena-compact.actual.png").string(),
+      (dump_artifacts / "moba-arena-compact.actual.png").string(),
       compact_audit.preview_rgba,
       compact_audit.preview_width, compact_audit.preview_height);
     if (compact_write_error)
       throw std::runtime_error("cannot write compact MOBA audit preview");
-    std::cout << audit.metrics.dump(2) << '\n';
-    return 0;
   }
   auto const second = Noggit::Ai::compileMobaArenaBlueprint(reference_spec, 4);
   require(first == second, "blueprint must be deterministic");
@@ -460,6 +609,7 @@ int main(int argc, char** argv)
     fitted_max_u = std::max(fitted_max_u, point.at("u").get<double>());
   }
   auto const& perimeter = terrainFeature(fitted, "arena_perimeter_relief");
+  auto const& mountain_mass = terrainFeature(fitted, "arena_mountain_mass");
   auto const base_height = fitted_ground.at("points").front().at("height").get<double>();
   auto const& reference_relief
     = terrainFeature(mutation_baseline, "jungle_1_wall_mass");
@@ -477,19 +627,43 @@ int main(int argc, char** argv)
     perimeter_max_height = std::max(
       perimeter_max_height, point.at("height").get<double>());
   }
+  auto const fitted_scale
+    = fitted.at("arena_fit").at("scale_ratio").get<double>();
+  auto const fitted_margin = (1.0 - fitted_scale) * .5;
   require(std::abs(fitted_min_u) < .0001
             && std::abs(fitted_max_u - 1.0) < .0001
+            && fitted_ground.at("transition_width_ratio").get<double>() >= .10
+            && fitted_ground.at("roughness_amplitude") == 0.0
+            && fitted_ground.at("priority") == 5
+            && mountain_mass.at("shape") == "corridor"
+            && mountain_mass.at("texture_layer") == 3
+            && mountain_mass.at("priority") == 6
+            && mountain_mass.at("points").size() == 17
+            && mountain_mass.at("points").front()
+              != mountain_mass.at("points").back()
+            && mountain_mass.at("half_width_ratio").get<double>() >= .022
+            && mountain_mass.at("half_width_ratio").get<double>() <= .032
+            && mountain_mass.at("transition_width_ratio").get<double>() >= .08
+            && mountain_mass.at("transition_width_ratio").get<double>() <= .12
+            && mountain_mass.at("roughness_amplitude").get<double>() >= 98.0
+            && mountain_mass.at("roughness_amplitude").get<double>() <= 100.0
+            && mountain_mass.at("texture_strength").get<double>() <= .6
+            && std::abs(
+                 mountain_mass.at("width_variation_ratio").get<double>() - .55)
+              < .0001
             && perimeter.at("shape") == "corridor"
-            && perimeter.at("texture_layer") == 0
-            && perimeter.at("priority") == 10
-            && perimeter.at("points").size() == 9
+            && perimeter.at("texture_layer") == 3
+            && perimeter.at("priority") == 7
+            && perimeter.at("points").size() == 17
             && perimeter.at("points").front()
-              == perimeter.at("points").back()
-            && perimeter.at("half_width_ratio").get<double>() <= .008
-            && perimeter.at("transition_width_ratio").get<double>() >= .024
-            && perimeter_max_height - perimeter_min_height >= 30.0
-            && perimeter.at("roughness_amplitude").get<double>() >= 14.0
-            && std::abs(perimeter.at("width_variation_ratio").get<double>() - .6)
+              != perimeter.at("points").back()
+            && perimeter.at("half_width_ratio").get<double>() >= .022
+            && perimeter.at("transition_width_ratio").get<double>() >= .08
+            && perimeter_max_height - perimeter_min_height < .0001
+            && perimeter.at("roughness_amplitude").get<double>() >= 98.0
+            && perimeter.at("roughness_amplitude").get<double>() <= 100.0
+            && perimeter.at("texture_strength").get<double>() <= .6
+            && std::abs(perimeter.at("width_variation_ratio").get<double>() - .55)
               < .0001
             && std::abs(fitted_relief_height - base_height
                   - (reference_relief_height - base_height)) < .0001
@@ -499,18 +673,40 @@ int main(int argc, char** argv)
             && callArguments(fitted, "apply_terrain_layout_on_map")
                  .at("features").size()
               == callArguments(first, "apply_terrain_layout_on_map")
-                   .at("features").size() + 1
+                   .at("features").size() + 2
             && fitted.at("moba_semantics").at("camps").size()
               == first.at("moba_semantics").at("camps").size()
             && callArguments(fitted, "place_props_on_map").at("props").size()
               == callArguments(first, "place_props_on_map").at("props").size(),
           "fitting the arena must preserve its generated content inside a raised perimeter");
+  for (std::size_t index = 0; index < perimeter.at("points").size(); ++index)
+    require(std::abs(
+              mountain_mass.at("points")[index].at("u").get<double>()
+                + perimeter.at("points")[index].at("u").get<double>() - 1.0)
+              < .000001
+            && std::abs(
+              mountain_mass.at("points")[index].at("v").get<double>()
+                + perimeter.at("points")[index].at("v").get<double>() - 1.0)
+              < .000001
+            && mountain_mass.at("points")[index].at("height")
+              == perimeter.at("points")[index].at("height"),
+            "the two open mountain arcs lost their opposite overlap");
   auto const fitted_liquid = Noggit::Ai::parseProceduralLiquidLayout(
     callArguments(fitted, "apply_liquid_layout_on_map"));
   auto const fitted_terrain = Noggit::Ai::parseProceduralLayout(
     callArguments(fitted, "apply_terrain_layout_on_map"));
   require(fitted_liquid.layout.has_value() && fitted_terrain.layout.has_value(),
           "the fitted terrain and river must remain valid layouts");
+  for (auto const& corner : std::array<std::array<float, 2>, 4>{{
+         {{0.0f, 0.0f}}, {{1.0f, 0.0f}}, {{1.0f, 1.0f}}, {{0.0f, 1.0f}}}})
+  {
+    auto const reset = Noggit::Ai::sampleProceduralLayout(
+      *fitted_terrain.layout, corner[0], corner[1], 300.0f, 0.0f,
+      3200.0f / 3.0f, 3200.0f / 3.0f);
+    require(std::abs(reset.height - base_height) < .001f
+              && reset.quantized_weights[0] == 255,
+            "regenerating the compact arena retained stale outer relief");
+  }
   auto const& reference_terrain
     = callArguments(mutation_baseline, "apply_terrain_layout_on_map");
   auto const& compact_terrain
@@ -529,7 +725,9 @@ int main(int argc, char** argv)
                 - expected_compact_slope) < .000001
             && std::abs(canonical_fitted_terrain
                  .at("max_slope_degrees").get<double>() - reference_slope)
-              < .000001,
+              < .000001
+            && terrainFeature(canonical_fitted, "arena_ground")
+                 .at("transition_width_ratio") == .02,
           "compact slope widening must preserve the horizontal relief mask");
   require(terrainFeature(mutation_baseline, "objective_north").at("priority") == 70
             && terrainFeature(fitted, "objective_north").at("priority") == 91
@@ -540,18 +738,18 @@ int main(int argc, char** argv)
   {
     auto const& name = reference_feature.at("name").get_ref<std::string const&>();
     auto const& compact_feature = terrainFeature(fitted, name);
-    if (name == "arena_ground")
-    {
-      require(compact_feature == reference_feature,
-              "the full-map ground must reset stale perimeter terrain");
-      continue;
-    }
+    auto const expected_transition = name == "arena_ground"
+      ? std::clamp(fitted_margin * .30, .004, .11)
+      : reference_feature.at("transition_width_ratio").get<double>() * .32;
+    auto const expected_half_width
+      = reference_feature.at("half_width_ratio").get<double>() * .32
+        * ((name == "top_lane" || name == "bottom_lane") ? 1.25 : 1.0);
     require(std::abs(compact_feature.at("half_width_ratio").get<double>()
-                  - reference_feature.at("half_width_ratio").get<double>() * .32)
+                  - expected_half_width)
                 < .000001
               && std::abs(
                 compact_feature.at("transition_width_ratio").get<double>()
-                - reference_feature.at("transition_width_ratio").get<double>() * .32)
+                - expected_transition)
                 < .000001
               && compact_feature.at("points").size()
                 == reference_feature.at("points").size(),
@@ -561,11 +759,15 @@ int main(int argc, char** argv)
     {
       auto const& reference_point = reference_feature.at("points")[index];
       auto const& compact_point = compact_feature.at("points")[index];
-      require(std::abs(compact_point.at("u").get<double>()
-                    - (.5 + (reference_point.at("u").get<double>() - .5) * .32))
+      auto const expected_u = name == "arena_ground"
+        ? reference_point.at("u").get<double>()
+        : .5 + (reference_point.at("u").get<double>() - .5) * .32;
+      auto const expected_v = name == "arena_ground"
+        ? reference_point.at("v").get<double>()
+        : .5 + (reference_point.at("v").get<double>() - .5) * .32;
+      require(std::abs(compact_point.at("u").get<double>() - expected_u)
                   < .000001
-                && std::abs(compact_point.at("v").get<double>()
-                    - (.5 + (reference_point.at("v").get<double>() - .5) * .32))
+                && std::abs(compact_point.at("v").get<double>() - expected_v)
                   < .000001
                 && std::abs(compact_point.at("height").get<double>()
                     - reference_point.at("height").get<double>()) < .000001,
@@ -678,131 +880,442 @@ int main(int argc, char** argv)
               + 2.0f * compact_river.half_width_ratio
               >= Noggit::Ai::moba_arena_minimum_liquid_span_v,
           "the compact river no longer satisfies its runtime span contract");
-  auto const unique_point_count = perimeter.at("points").size() - 1;
   constexpr auto compact_world_size = 3200.0f / 3.0f;
-  std::vector<float> ridge_heights;
-  ridge_heights.reserve(unique_point_count);
-  for (std::size_t index = 0; index < unique_point_count; ++index)
-  {
-    auto const& point = perimeter.at("points").at(index);
-    ridge_heights.push_back(Noggit::Ai::sampleProceduralLayout(
-      *fitted_terrain.layout,
-      point.at("u").get<float>(), point.at("v").get<float>(),
-      20.0f, 0.0f, compact_world_size, compact_world_size).height);
-  }
-  auto const [ridge_min, ridge_max] = std::minmax_element(
-    ridge_heights.begin(), ridge_heights.end());
-  auto local_peaks = 0;
-  auto local_cols = 0;
-  for (std::size_t index = 0; index < unique_point_count; ++index)
-  {
-    auto const previous
-      = ridge_heights[(index + unique_point_count - 1) % unique_point_count];
-    auto const current = ridge_heights[index];
-    auto const next = ridge_heights[(index + 1) % unique_point_count];
-    local_peaks += current >= previous + 2.0f && current >= next + 2.0f;
-    local_cols += current <= previous - 2.0f && current <= next - 2.0f;
-  }
-  auto const peak_index = static_cast<std::size_t>(
-    std::max_element(ridge_heights.begin(), ridge_heights.end())
-      - ridge_heights.begin());
-  auto const& peak = perimeter.at("points").at(peak_index);
-  auto const& previous_peak_point = perimeter.at("points")
-    .at((peak_index + unique_point_count - 1) % unique_point_count);
-  auto const& next_peak_point = perimeter.at("points")
-    .at((peak_index + 1) % unique_point_count);
-  auto const tangent_u = next_peak_point.at("u").get<float>()
-    - previous_peak_point.at("u").get<float>();
-  auto const tangent_v = next_peak_point.at("v").get<float>()
-    - previous_peak_point.at("v").get<float>();
-  auto const tangent_length = std::hypot(tangent_u, tangent_v);
-  auto const peak_u = peak.at("u").get<float>();
-  auto const peak_v = peak.at("v").get<float>();
-  auto const normal_u = -tangent_v / tangent_length;
-  auto const normal_v = tangent_u / tangent_length;
-  auto const outside = Noggit::Ai::sampleProceduralLayout(
-    *fitted_terrain.layout, .1f, .1f, 20.0f, 0.0f,
-    compact_world_size, compact_world_size);
-  auto const centre_height = Noggit::Ai::sampleProceduralLayout(
-    *fitted_terrain.layout, .5f, .5f, 20.0f, 0.0f,
-    compact_world_size, compact_world_size).height;
-  auto const mountain_moss = Noggit::Ai::sampleProceduralLayout(
-    *fitted_terrain.layout, peak_u, peak_v, 20.0f, 0.0f,
-    compact_world_size, compact_world_size);
-  std::array<bool, 2> rocky_flanks{};
-  constexpr auto terrain_step = 1.0f / 256.0f;
-  for (std::size_t side = 0; side < rocky_flanks.size(); ++side)
-    for (auto step = 1; step < 20; ++step)
+  auto mountain_scene_layout = *fitted_terrain.layout;
+  mountain_scene_layout.features.erase(std::remove_if(
+    mountain_scene_layout.features.begin(), mountain_scene_layout.features.end(),
+    [](Noggit::Ai::ProceduralLayoutFeature const& value)
     {
-      auto const offset = (side == 0 ? -1.0f : 1.0f)
-        * terrain_step * static_cast<float>(step);
-      auto sampleHeight = [&](float delta)
+      return value.name != "arena_ground"
+        && value.name != "arena_mountain_mass"
+        && value.name != "arena_perimeter_relief";
+    }),
+    mountain_scene_layout.features.end());
+  require(mountain_scene_layout.features.size() == 3,
+          "the fitted terrain lost its mountain scene");
+  auto mountain_layout = mountain_scene_layout;
+  mountain_layout.features.erase(std::remove_if(
+    mountain_layout.features.begin(), mountain_layout.features.end(),
+    [](Noggit::Ai::ProceduralLayoutFeature const& value)
+    {
+      return value.name != "arena_mountain_mass"
+        && value.name != "arena_perimeter_relief";
+    }),
+    mountain_layout.features.end());
+  require(mountain_layout.features.size() == 2,
+          "the fitted terrain lost one of its mountain arcs");
+  auto const sampleHeight = [&](Noggit::Ai::ProceduralLayout const& layout,
+                                float u, float v)
+  {
+    return Noggit::Ai::sampleSmoothedProceduralLayoutHeight(
+      layout, u, v, 20.0f,
+      compact_world_size, compact_world_size,
+      compact_world_size / 512.0f) - 20.0f;
+  };
+  auto const sampleSceneDelta = [&](float u, float v)
+  { return sampleHeight(mountain_scene_layout, u, v); };
+  auto const sampleRidgeDelta = [&](float u, float v)
+  { return sampleHeight(mountain_layout, u, v); };
+  auto lane_mountain_intrusion_max = 0.0f;
+  for (auto const name : {"top_lane", "middle_lane", "bottom_lane"})
+  {
+    auto const lane = std::find_if(
+      fitted_terrain.layout->features.begin(),
+      fitted_terrain.layout->features.end(),
+      [&](auto const& feature) { return feature.name == name; });
+    require(lane != fitted_terrain.layout->features.end(),
+            "the fitted terrain lost a lane");
+    auto const clearance
+      = lane->half_width_ratio + lane->transition_width_ratio + .006f;
+    for (std::size_t segment = 0; segment + 1 < lane->points.size(); ++segment)
+    {
+      auto const& first = lane->points[segment];
+      auto const& second = lane->points[segment + 1];
+      auto const du = second.u - first.u;
+      auto const dv = second.v - first.v;
+      auto const length = std::hypot(du, dv);
+      auto const steps = std::max(
+        1, static_cast<int>(std::ceil(length / .002f)));
+      for (auto step = 0; step <= steps; ++step)
       {
-        return Noggit::Ai::sampleProceduralLayout(
-          *fitted_terrain.layout,
-          peak_u + normal_u * (offset + delta),
-          peak_v + normal_v * (offset + delta),
-          20.0f, 0.0f, compact_world_size, compact_world_size).height;
-      };
-      auto const slope = std::atan(
-        std::abs(sampleHeight(terrain_step) - sampleHeight(-terrain_step))
-          / (2.0f * terrain_step * compact_world_size))
-        * 180.0f / static_cast<float>(std::numbers::pi);
-      auto const texture = Noggit::Ai::sampleProceduralLayout(
-        *fitted_terrain.layout,
-        peak_u + normal_u * offset, peak_v + normal_v * offset,
-        20.0f, slope, compact_world_size, compact_world_size);
-      rocky_flanks[side] = rocky_flanks[side]
-        || (slope >= 34.0f && texture.quantized_weights[3] >= 250);
+        auto const along = static_cast<float>(step) / steps;
+        auto const u = first.u + du * along;
+        auto const v = first.v + dv * along;
+        for (auto const side : {-1.0f, 0.0f, 1.0f})
+          lane_mountain_intrusion_max = std::max(
+            lane_mountain_intrusion_max,
+            sampleRidgeDelta(
+              u - dv / length * clearance * side,
+              v + du / length * clearance * side));
+      }
     }
-  require(std::abs(outside.height - base_height) <= 2.01f
-            && mountain_moss.height - centre_height >= 40.0f
-            && *ridge_max - *ridge_min >= 24.0f
-            && local_peaks >= 2 && local_cols >= 2
-            && rocky_flanks[0] && rocky_flanks[1]
-            && Noggit::Ai::proceduralShapeMask(
-                 perimeter.at("half_width_ratio").get<float>(),
-                 perimeter.at("transition_width_ratio").get<float>(), .02f)
-              < .95f
-            && mountain_moss.quantized_weights[0] >= 200,
-          "the perimeter must have narrow mossy peaks and rocky flanks");
-  auto terrain_without_mountains = compact_terrain;
-  auto& terrain_features_without_mountains
-    = terrain_without_mountains.at("features");
-  terrain_features_without_mountains.erase(std::remove_if(
-    terrain_features_without_mountains.begin(),
-    terrain_features_without_mountains.end(),
-    [](nlohmann::json const& value)
-    { return value.at("name") == "arena_perimeter_relief"; }),
-    terrain_features_without_mountains.end());
-  auto const without_mountains
-    = Noggit::Ai::parseProceduralLayout(terrain_without_mountains);
-  require(without_mountains.layout.has_value(),
-          "the compact terrain without its mountains must remain valid");
-  for (auto y = 0; y <= 8; ++y)
-    for (auto x = 0; x <= 8; ++x)
+  }
+
+  std::vector<float> ridge_heights;
+  std::vector<float> contact_distances;
+  std::vector<float> ridge_distances;
+  std::vector<float> crest_clearances;
+  std::vector<float> face_slopes;
+  std::vector<float> rocky_face_flags;
+  auto rocky_faces = 0;
+  auto mixed_shoulders = 0;
+  auto collectCrestClearances = [&](nlohmann::json const& arc)
+  {
+    for (auto const& arc_point : arc.at("points"))
     {
-      auto const u = .34f + .32f * static_cast<float>(x) / 8.0f;
-      auto const v = .34f + .32f * static_cast<float>(y) / 8.0f;
-      auto const with_height = Noggit::Ai::sampleProceduralLayout(
-        *fitted_terrain.layout, u, v, 20.0f, 0.0f,
-        3200.0f / 3.0f, 3200.0f / 3.0f).height;
-      auto const without_height = Noggit::Ai::sampleProceduralLayout(
-        *without_mountains.layout, u, v, 20.0f, 0.0f,
-        3200.0f / 3.0f, 3200.0f / 3.0f).height;
-      require(std::abs(with_height - without_height) < .0001f,
-              "the mountain ridge changed the playable terrain relief");
+      auto const u = arc_point.at("u").get<float>();
+      auto const v = arc_point.at("v").get<float>();
+      auto const outside_u = std::max({
+        static_cast<float>(fitted_margin) - u,
+        u - static_cast<float>(1.0 - fitted_margin), 0.0f});
+      auto const outside_v = std::max({
+        static_cast<float>(fitted_margin) - v,
+        v - static_cast<float>(1.0 - fitted_margin), 0.0f});
+      crest_clearances.push_back(
+        std::hypot(outside_u, outside_v) * compact_world_size);
     }
+  };
+  collectCrestClearances(mountain_mass);
+  collectCrestClearances(perimeter);
+  for (auto side = 0; side < 4; ++side)
+  {
+    for (auto sample = 0; sample < 64; ++sample)
+    {
+      auto const along = static_cast<float>(
+        fitted_margin + fitted_scale * (sample + .5) / 64.0);
+      auto best_height = std::numeric_limits<float>::lowest();
+      auto best_distance = 0.0f;
+      auto contact = std::numeric_limits<float>::infinity();
+      std::array<float, 97> profile_heights{};
+      std::array<float, 97> profile_u{};
+      std::array<float, 97> profile_v{};
+      for (auto depth = 0; depth <= 96; ++depth)
+      {
+        auto const distance
+          = static_cast<float>(fitted_margin) * depth / 96.0f;
+        auto u = along;
+        auto v = along;
+        if (side == 0) { u = static_cast<float>(fitted_margin) - distance; }
+        if (side == 1) { v = static_cast<float>(fitted_margin) - distance; }
+        if (side == 2) { u = 1.0f - static_cast<float>(fitted_margin) + distance; }
+        if (side == 3) { v = 1.0f - static_cast<float>(fitted_margin) + distance; }
+        auto const scene_height = sampleSceneDelta(u, v);
+        auto const ridge_height = sampleRidgeDelta(u, v);
+        profile_heights[depth] = scene_height;
+        profile_u[depth] = u;
+        profile_v[depth] = v;
+        if (!std::isfinite(contact) && scene_height >= 1.0f)
+          contact = distance * compact_world_size;
+        if (ridge_height > best_height)
+        {
+          best_height = ridge_height;
+          best_distance = distance * compact_world_size;
+        }
+      }
+      contact_distances.push_back(contact);
+      ridge_distances.push_back(best_distance);
+      ridge_heights.push_back(best_height);
+      auto ray_has_rocky_face = false;
+      auto ray_has_mixed_face = false;
+      auto ray_max_slope = 0.0f;
+      constexpr auto slope_span = 4;
+      auto const slope_run = 2.0f * slope_span
+        * static_cast<float>(fitted_margin) / 96.0f
+        * compact_world_size;
+      for (auto depth = slope_span; depth <= 96 - slope_span; ++depth)
+      {
+        auto const rise = profile_heights[depth + slope_span]
+          - profile_heights[depth - slope_span];
+        auto const middle = profile_heights[depth];
+        if (rise <= 0.0f || middle <= best_height * .08f
+            || middle >= best_height * .92f)
+          continue;
+        auto const slope = std::atan(rise / slope_run)
+          * 180.0f / static_cast<float>(std::numbers::pi);
+        ray_max_slope = std::max(ray_max_slope, slope);
+        auto const face = Noggit::Ai::sampleProceduralLayout(
+          mountain_scene_layout, profile_u[depth], profile_v[depth],
+          20.0f, slope, compact_world_size, compact_world_size);
+        ray_has_rocky_face = ray_has_rocky_face
+          || (slope >= 52.0f && face.quantized_weights[3] >= 160);
+        ray_has_mixed_face = ray_has_mixed_face
+          || (face.quantized_weights[3] > 0
+            && (face.quantized_weights[0] > 0
+              || face.quantized_weights[2] > 0));
+      }
+      rocky_faces += ray_has_rocky_face;
+      rocky_face_flags.push_back(ray_has_rocky_face ? 1.0f : 0.0f);
+      mixed_shoulders += ray_has_mixed_face;
+      if (ray_max_slope > 0.0f) face_slopes.push_back(ray_max_slope);
+    }
+  }
+  auto circularOrder = [](std::vector<float> const& side_order)
+  {
+    auto result = std::vector<float>{};
+    result.reserve(side_order.size());
+    for (auto index = 0; index < 64; ++index)
+      result.push_back(side_order[64 + index]);
+    for (auto index = 0; index < 64; ++index)
+      result.push_back(side_order[128 + index]);
+    for (auto index = 0; index < 64; ++index)
+      result.push_back(side_order[192 + 63 - index]);
+    for (auto index = 0; index < 64; ++index)
+      result.push_back(side_order[63 - index]);
+    return result;
+  };
+  auto const ordered_ridge_heights = circularOrder(ridge_heights);
+  auto const ordered_rocky_face_flags = circularOrder(rocky_face_flags);
+  auto sorted_ridge_distances = ridge_distances;
+  std::sort(sorted_ridge_distances.begin(), sorted_ridge_distances.end());
+  std::sort(ridge_heights.begin(), ridge_heights.end());
+  std::sort(face_slopes.begin(), face_slopes.end());
+  auto const ridge_p10 = ridge_heights[ridge_heights.size() / 10];
+  auto const ridge_p90 = ridge_heights[ridge_heights.size() * 9 / 10];
+  auto low_saddle_faces = 0;
+  auto low_saddle_rocky_faces = 0;
+  for (std::size_t index = 0; index < ordered_ridge_heights.size(); ++index)
+  {
+    if (ordered_ridge_heights[index] > ridge_p10)
+      continue;
+    ++low_saddle_faces;
+    low_saddle_rocky_faces += ordered_rocky_face_flags[index] > 0.0f;
+  }
+  auto const ridge_distance_p90
+    = sorted_ridge_distances[sorted_ridge_distances.size() * 9 / 10];
+  auto prominent_peak_count = 0;
+  auto peaks_by_side = std::array<int, 4>{};
+  constexpr auto peak_window = std::size_t{6};
+  for (std::size_t index = 0; index < ordered_ridge_heights.size(); ++index)
+  {
+    auto left_min = ordered_ridge_heights[index];
+    auto right_min = ordered_ridge_heights[index];
+    auto local_maximum = true;
+    for (std::size_t offset = 1; offset <= peak_window; ++offset)
+    {
+      auto const left = ordered_ridge_heights[
+        (index + ordered_ridge_heights.size() - offset)
+          % ordered_ridge_heights.size()];
+      auto const right = ordered_ridge_heights[
+        (index + offset) % ordered_ridge_heights.size()];
+      left_min = std::min(left_min, left);
+      right_min = std::min(right_min, right);
+      local_maximum = local_maximum
+        && ordered_ridge_heights[index] > left
+        && ordered_ridge_heights[index] >= right;
+    }
+    if (!local_maximum
+        || ordered_ridge_heights[index] - std::max(left_min, right_min) < 12.0f)
+      continue;
+    ++prominent_peak_count;
+    ++peaks_by_side[index / 64];
+  }
+  auto const high_crest_threshold
+    = ridge_p10 + .65f * (ridge_p90 - ridge_p10);
+  auto longest_high_crest_run = std::size_t{0};
+  auto high_crest_run = std::size_t{0};
+  for (std::size_t index = 0;
+       index < ordered_ridge_heights.size() * 2; ++index)
+  {
+    if (ordered_ridge_heights[index % ordered_ridge_heights.size()]
+        >= high_crest_threshold)
+      high_crest_run = std::min(
+        ordered_ridge_heights.size(), high_crest_run + 1);
+    else
+      high_crest_run = 0;
+    longest_high_crest_run
+      = std::max(longest_high_crest_run, high_crest_run);
+  }
+  require(!face_slopes.empty(), "the mountain slope probe found no rising face");
+  auto const slope_p50 = face_slopes[face_slopes.size() / 2];
+  auto const slope_p90 = face_slopes[face_slopes.size() * 9 / 10];
+  auto outer_min = std::numeric_limits<float>::max();
+  auto outer_max = std::numeric_limits<float>::lowest();
+  for (auto y = 0; y <= 48; ++y)
+    for (auto x = 0; x <= 48; ++x)
+    {
+      auto const u = static_cast<float>(x) / 48.0f;
+      auto const v = static_cast<float>(y) / 48.0f;
+      if (u > fitted_margin && u < 1.0 - fitted_margin
+          && v > fitted_margin && v < 1.0 - fitted_margin)
+        continue;
+      auto const height = Noggit::Ai::sampleProceduralLayout(
+        mountain_scene_layout, u, v, 20.0f, 0.0f,
+        compact_world_size, compact_world_size).height;
+      outer_min = std::min(outer_min, height);
+      outer_max = std::max(outer_max, height);
+    }
+  auto const contact_max
+    = *std::max_element(contact_distances.begin(), contact_distances.end());
+  auto const ridge_distance_max
+    = *std::max_element(ridge_distances.begin(), ridge_distances.end());
+  auto const crest_clearance_max
+    = *std::max_element(crest_clearances.begin(), crest_clearances.end());
+  auto corner_relief_min = std::numeric_limits<float>::max();
+  for (auto const& corner : std::array<std::array<float, 2>, 4>{{
+         {{.02f, .02f}}, {{.98f, .02f}}, {{.98f, .98f}}, {{.02f, .98f}}}})
+    corner_relief_min = std::min(
+      corner_relief_min, sampleSceneDelta(corner[0], corner[1]));
+  auto const mountain_ok
+    = std::all_of(contact_distances.begin(), contact_distances.end(),
+        [](float distance)
+        { return std::isfinite(distance) && distance <= 55.0f; })
+      && std::all_of(ridge_distances.begin(), ridge_distances.end(),
+           [](float distance) { return distance <= 180.0f; })
+      && contact_max >= 4.0f
+      && ridge_distance_p90 <= 165.0f
+      && crest_clearance_max <= 110.0f
+      && ridge_heights.front() >= 45.0f
+      && ridge_p90 - ridge_p10 >= 70.0f
+      && slope_p50 >= 45.0f && slope_p90 <= 82.0f
+      && outer_max - outer_min >= 70.0f
+      && prominent_peak_count >= 6
+      && std::all_of(peaks_by_side.begin(), peaks_by_side.end(),
+           [](int count) { return count >= 1; })
+      && longest_high_crest_run <= 68
+      && mixed_shoulders >= 120
+      && rocky_faces >= 160
+      && low_saddle_rocky_faces * 5 <= low_saddle_faces * 4
+      && lane_mountain_intrusion_max <= 1.0f;
+  if (dump_audit)
+  {
+    auto const preview
+      = dump_artifacts / "moba-arena-mountains.actual.png";
+    writeMountainPreview(
+      *fitted_terrain.layout, preview, 20.0f, compact_world_size);
+    std::cout << nlohmann::json{
+      {"format", "noggit.moba-mountain-feedback/v1"},
+      {"ok", mountain_ok},
+      {"terrain_features",
+        callArguments(fitted, "apply_terrain_layout_on_map")
+          .at("features").size()},
+      {"preview", preview.string()},
+      {"rock_texture", texture_paths.at(3)},
+      {"contact_distance_max", contact_max},
+      {"ridge_distance_max", ridge_distance_max},
+      {"ridge_distance_p90", ridge_distance_p90},
+      {"crest_clearance_max", crest_clearance_max},
+      {"ridge_height", {
+        {"min", ridge_heights.front()},
+        {"p10", ridge_p10},
+        {"p90", ridge_p90},
+        {"max", ridge_heights.back()}
+      }},
+      {"macro_slope_degrees", {
+        {"p50", slope_p50},
+        {"p90", slope_p90}
+      }},
+      {"outer_relief_range", outer_max - outer_min},
+      {"corner_relief_min", corner_relief_min},
+      {"prominent_peak_count", prominent_peak_count},
+      {"peaks_by_side", peaks_by_side},
+      {"longest_high_crest_run", longest_high_crest_run},
+      {"mixed_shoulders", mixed_shoulders},
+      {"rocky_faces", rocky_faces},
+      {"low_saddle_rocky_faces", low_saddle_rocky_faces},
+      {"low_saddle_faces", low_saddle_faces},
+      {"lane_mountain_intrusion_max", lane_mountain_intrusion_max},
+      {"sampled_faces", 256}
+    }.dump(2) << std::endl;
+    if (mountain_ok)
+    {
+      requireAudit(
+        Noggit::Ai::auditMobaArenaBlueprint(fitted, 2), dump_artifacts);
+      return 0;
+    }
+  }
+  require(mountain_ok,
+          "the sampled mountain chain is not close, broad, ridged and rocky");
+
+  for (auto const scale : std::array{.7, .9, .95})
+  {
+    auto scaled_spec = spec;
+    scaled_spec["arena_scale_ratio"] = scale;
+    auto scaled = Noggit::Ai::compileMobaArenaBlueprint(scaled_spec, 2);
+    require(Noggit::Ai::parseProceduralLayout(
+              callArguments(scaled, "apply_terrain_layout_on_map"))
+                .layout.has_value(),
+            "a supported fitted mountain layout became invalid");
+  }
+  auto narrow_arena_spec = spec;
+  narrow_arena_spec["arena_scale_ratio"] = .99;
+  auto narrow_arena
+    = Noggit::Ai::compileMobaArenaBlueprint(narrow_arena_spec, 2);
+  require(std::none_of(
+            callArguments(narrow_arena, "apply_terrain_layout_on_map")
+              .at("features").begin(),
+            callArguments(narrow_arena, "apply_terrain_layout_on_map")
+              .at("features").end(),
+            [](nlohmann::json const& value)
+            { return value.at("name") == "arena_perimeter_relief"; }),
+          "a nearly full-map arena kept a sub-vertex mountain ridge");
+  auto near_full_spec = spec;
+  near_full_spec["arena_scale_ratio"] = .999999;
+  auto near_full
+    = Noggit::Ai::compileMobaArenaBlueprint(near_full_spec, 2);
+  require(std::none_of(
+            callArguments(near_full, "apply_terrain_layout_on_map")
+              .at("features").begin(),
+            callArguments(near_full, "apply_terrain_layout_on_map")
+              .at("features").end(),
+            [](nlohmann::json const& value)
+            { return value.at("name") == "arena_perimeter_relief"; }),
+          "a full-map arena kept a mountain ridge");
+  auto high_arena_spec = spec;
+  high_arena_spec["base_height"] = 4950;
+  auto high_arena
+    = Noggit::Ai::compileMobaArenaBlueprint(high_arena_spec, 2);
+  auto const& high_perimeter
+    = terrainFeature(high_arena, "arena_perimeter_relief");
+  auto high_layout = Noggit::Ai::parseProceduralLayout(
+    callArguments(high_arena, "apply_terrain_layout_on_map"));
+  require(high_layout.layout.has_value(),
+          "the high fitted arena produced an invalid layout");
+  auto high_min = std::numeric_limits<float>::max();
+  auto high_max = std::numeric_limits<float>::lowest();
+  for (std::size_t index = 0;
+       index + 1 < high_perimeter.at("points").size(); ++index)
+  {
+    auto const& first = high_perimeter.at("points").at(index);
+    auto const& second = high_perimeter.at("points").at(index + 1);
+    for (auto step = 0; step < 8; ++step)
+    {
+      auto const ratio = static_cast<float>(step) / 8.0f;
+      auto const sample = Noggit::Ai::sampleProceduralLayout(
+        *high_layout.layout,
+        first.at("u").get<float>() * (1.0f - ratio)
+          + second.at("u").get<float>() * ratio,
+        first.at("v").get<float>() * (1.0f - ratio)
+          + second.at("v").get<float>() * ratio,
+        4950.0f, 0.0f, compact_world_size, compact_world_size);
+      high_min = std::min(high_min, sample.height);
+      high_max = std::max(high_max, sample.height);
+    }
+  }
+  require(high_min > 4950.0f && high_max <= 5000.0f
+            && high_max - high_min >= 3.0f,
+          "a high fitted arena flattened or inverted its mountain peaks");
   requireAudit(Noggit::Ai::auditMobaArenaBlueprint(fitted, 2));
   auto fitted_runtime = fitted;
   fitted_runtime.erase("arena_fit");
   auto const runtime_audit
     = Noggit::Ai::auditMobaArenaBlueprint(fitted_runtime, 2);
-  require(!runtime_audit.hasIssue("props.unwalkable")
-            && runtime_audit.metrics.at("feature_cores")
-                 .at("arena_perimeter_relief")
-                 .at("effective_core_samples").get<std::size_t>() >= 4,
-          "the compact runtime must retain a sampled mountain crest and walkable props");
+  auto const runtime_core_samples
+    = runtime_audit.metrics.at("feature_cores")
+        .at("arena_perimeter_relief")
+        .at("effective_core_samples").get<std::size_t>();
+  if (runtime_audit.hasIssue("props.unwalkable")
+      || runtime_core_samples < 4)
+  {
+    auto message = std::string{
+      "the compact runtime must retain a sampled mountain crest and walkable "
+      "props: unwalkable="} + std::to_string(
+        runtime_audit.hasIssue("props.unwalkable"))
+      + ", core_samples=" + std::to_string(runtime_core_samples);
+    for (auto const& issue : runtime_audit.issues)
+      if (issue.code == "props.unwalkable")
+        message += ", prop=" + issue.subject;
+    throw std::runtime_error(message);
+  }
   auto const runtime_origin_audit = Noggit::Ai::auditMobaArenaBlueprint(
     fitted_runtime, 2, 64, 26, 25);
   auto const& runtime_vegetation
